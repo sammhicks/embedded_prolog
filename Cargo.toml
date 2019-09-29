@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "wam",
+    "target_simulator",
+]
