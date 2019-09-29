@@ -13,7 +13,7 @@ impl wam::Hal for Hal {
     type SerialWrite = SerialWrite;
 
     fn get_serial_reader(&self) -> SerialRead {
-        SerialRead::new(b"SP000000020000000100000002")
+        SerialRead::new(b"S\nP000000020000000100000002\n")
     }
 
     fn get_serial_writer(&self) -> SerialWrite {

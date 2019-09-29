@@ -129,5 +129,13 @@ pub enum Header {
 pub fn read_header<R: serial::Read<u8, Error = !>>(
     reader: &mut R,
 ) -> Result<Header, TryFromPrimitiveError<Header>> {
-    Header::try_from(ignore_error(block!(reader.read())))
+    loop {
+        let b = ignore_error(block!(reader.read()));
+
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+
+        return Header::try_from(b);
+    }
 }
