@@ -25,7 +25,8 @@ States
 + ChoicePoint
 
 Messages:
-    Header, 32 bit in hex, then bytes in hex
+    Header, u32 length in hex, then bytes in hex
     Headers:
         + I - Info
         + E - Error
+    After Messages: 'S'

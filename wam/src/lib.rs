@@ -4,10 +4,8 @@
 
 use embedded_hal::serial;
 
-mod hal;
 mod io;
 
-pub use hal::Hal;
 use io::{Header, SerialWriter};
 
 enum State {
@@ -38,21 +36,16 @@ where
 
     //TODO, read hash and check
 
-    SerialWriter::send_char(writer, 'S');
+    SerialWriter::send_str(writer, "S\n");
 
     Ok(len)
 }
 
-pub fn run_wam<SR, SW, H>(h: H) -> !
+pub fn run_wam<SR, SW>(mut reader: SR, mut writer: SW, memory: &mut [u32]) -> !
 where
     SR: serial::Read<u8, Error = !>,
     SW: serial::Write<u8, Error = !>,
-    H: Hal<SerialRead = SR, SerialWrite = SW>,
 {
-    let mut reader = h.get_serial_reader();
-    let mut writer = h.get_serial_writer();
-    let memory = h.get_ram();
-
     let mut state = State::WaitingForProgram;
 
     loop {
@@ -60,7 +53,7 @@ where
         state = match state {
             State::WaitingForProgram => match io::read_header(&mut reader) {
                 Ok(Header::ReportStatus) => {
-                    SerialWriter::send_char(&mut writer, 'P');
+                    SerialWriter::send_str(&mut writer, "P\n");
                     State::WaitingForProgram
                 }
                 Ok(Header::SubmitProgram) => {
@@ -83,7 +76,7 @@ where
             },
             State::WaitingForQuery { program_size } => match io::read_header(&mut reader) {
                 Ok(Header::ReportStatus) => {
-                    SerialWriter::send_char(&mut writer, 'Q');
+                    SerialWriter::send_str(&mut writer, "Q\n");
                     State::WaitingForQuery { program_size }
                 }
                 Ok(Header::SubmitProgram) => {
@@ -95,17 +88,19 @@ where
                         }
                     }
                 }
-                Ok(Header::SubmitQuery) => match handle_code_submission(
-                    &mut reader,
-                    &mut writer,
-                    &mut memory[program_size..],
-                ) {
-                    Ok(query_size) => unimplemented!(),
-                    Err(e) => {
-                        error!(&mut writer, "{:?}", e);
-                        State::WaitingForQuery { program_size }
+                Ok(Header::SubmitQuery) => {
+                    match handle_code_submission(
+                        &mut reader,
+                        &mut writer,
+                        &mut memory[program_size..],
+                    ) {
+                        Ok(query_size) => unimplemented!(),
+                        Err(e) => {
+                            error!(&mut writer, "{:?}", e);
+                            State::WaitingForQuery { program_size }
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     error!(&mut writer, "Not a header: {:x}", e.number);
                     State::WaitingForQuery { program_size }

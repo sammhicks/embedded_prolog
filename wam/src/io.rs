@@ -26,6 +26,10 @@ impl<'a, SW: serial::Write<u8, Error = !>> SerialWriter<'a, SW> {
     pub fn send_char(w: &'a mut SW, c: char) {
         ignore_error(SerialWriter::new(w).write_char(c));
     }
+
+    pub fn send_str(w: &'a mut SW, s: &str) {
+        ignore_error(SerialWriter::new(w).write_str(s));
+    }
 }
 
 impl<'a, SW: serial::Write<u8, Error = !>> core::fmt::Write for SerialWriter<'a, SW> {
@@ -34,11 +38,13 @@ impl<'a, SW: serial::Write<u8, Error = !>> core::fmt::Write for SerialWriter<'a,
             ignore_error(block!(self.w.write(b)));
         }
 
+        ignore_error(block!(self.w.flush()));
+
         Ok(())
     }
 }
 
-pub struct MessageWriter<'a, SW: serial::Write<u8, Error = !>> {
+struct MessageWriter<'a, SW: serial::Write<u8, Error = !>> {
     header: char,
     writer: &'a mut SW,
 }
@@ -46,6 +52,10 @@ pub struct MessageWriter<'a, SW: serial::Write<u8, Error = !>> {
 impl<'a, SW: serial::Write<u8, Error = !>> MessageWriter<'a, SW> {
     fn new(header: char, writer: &'a mut SW) -> Self {
         MessageWriter { header, writer }
+    }
+
+    fn done(self) {
+        ignore_error(SerialWriter::new(self.writer).write_str("S\n"));
     }
 }
 
@@ -62,6 +72,8 @@ impl<'a, SW: serial::Write<u8, Error = !>> core::fmt::Write for MessageWriter<'a
             ignore_error(write!(&mut writer, "{:x}", b));
         }
 
+        ignore_error(writeln!(&mut writer, ""));
+
         Ok(())
     }
 }
@@ -71,7 +83,9 @@ pub fn message<SW: serial::Write<u8, Error = !>>(
     header: char,
     args: core::fmt::Arguments,
 ) {
-    ignore_error(MessageWriter::new(header, writer).write_fmt(args));
+    let mut writer = MessageWriter::new(header, writer);
+    ignore_error(writer.write_fmt(args));
+    writer.done();
 }
 
 #[macro_export]
