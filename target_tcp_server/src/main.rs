@@ -20,7 +20,7 @@ fn handle_client(
                     return Ok(());
                 }
                 Ok(_) => {
-                    println!("Data: {:x}", buffer[0]);
+                    println!("Data: {:?}", buffer[0] as char);
                     sender
                         .send(buffer[0])
                         .map_err(|e| io::Error::new(ErrorKind::Other, e))?;

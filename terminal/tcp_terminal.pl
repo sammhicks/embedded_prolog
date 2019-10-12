@@ -8,6 +8,8 @@
 
 :- export(disconnect/0).
 :- export(status/1).
+:- export(compile_program/2).
+
 
 connect :-
     disconnect,
