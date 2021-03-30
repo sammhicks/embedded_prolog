@@ -1,11 +1,14 @@
 :- module(io, [
               read_nonspace/2,
+              try_read_u8/2,
               read_u8/2,
+              read_u16/2,
               read_u32/2,
-              write_words/2
+              write_words_with_hash/2
           ]).
 
 :- use_module(library(apply)).
+:- use_module(library(sha)).
 
 
 read_nonspace(Stream, Result) :-
@@ -16,8 +19,25 @@ read_nonspace(Stream, Result) :-
     ).
 
 
+try_read_u8(Stream, Result) :-
+    get_code(Stream, AC),
+    (   is_digit(AC, 16, A)
+    ->  get_code(Stream, BC),
+        is_digit(BC, 16, B),
+        N is 16 * A + B,
+        Result = ok(N)
+    ;   char_code(E, AC),
+        Result = err(E)
+    ),
+    !.
+
+
 read_u8(Stream, N) :-
     read_un(Stream, 1, N).
+
+
+read_u16(Stream, N) :-
+    read_un(Stream, 2, N).
 
 
 read_u32(Stream, N) :-
@@ -36,14 +56,13 @@ be_bytes(Byte, Acc, Next) :-
     Next is 256 * Acc + Byte.
 
 
-write_words(Stream, Words) :-
+write_words_with_hash(Stream, Words) :-
     length(Words, Length),
     write_u32(Stream, Length),
-    maplist(write_word(Stream), Words).
-
-
-write_word(Stream, Word) :-
-    maplist(write_u8(Stream), Word).
+    append(Words, Bytes),
+    maplist(write_u8(Stream), Bytes),
+    sha_hash(Bytes, Hash, [algorithm(sha256), encoding(octet)]),
+    maplist(write_u8(Stream), Hash).
 
 
 write_u8(Stream, N) :-

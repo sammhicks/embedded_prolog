@@ -2,6 +2,5 @@
 
 members = [
     "wam",
-    "target_simulator",
     "target_tcp_server",
 ]

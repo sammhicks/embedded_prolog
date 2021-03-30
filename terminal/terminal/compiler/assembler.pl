@@ -33,30 +33,32 @@ assemble_codes([]) -->
 	[].
 assemble_codes([Code|Codes]) -->
 	assemble_code(Code),
+	!,
 	assemble_codes(Codes).
 
 
-assemble_code(put_variable(x(N), Ai)) --> [[0x00,   Ai, 0x00,    N]].
-assemble_code(put_variable(y(N), Ai)) --> [[0x01,   Ai, 0x00,    N]].
-assemble_code(put_value(x(N), Ai))    --> [[0x02,   Ai, 0x00,    N]].
-assemble_code(put_value(y(N), Ai))    --> [[0x03,   Ai, 0x00,    N]].
-assemble_code(put_structure(F/N, Ai)) --> [[0x04,   Ai,   F0,    N]], { uint(F, F0) }, !.
-assemble_code(put_structure(F/N, Ai)) --> [[0x05,   Ai, 0x00,    N], [0x00, 0x00, F1, F0]], { uint(F, F1, F0) }.
-assemble_code(put_list(Ai))           --> [[0x06,   Ai, 0x00, 0x00]].
-assemble_code(put_constant(C, Ai))    --> [[0x07,   Ai,   C1,   C0]], { uint(C, C1, C0) }.
-assemble_code(put_integer(I, Ai))     --> [[0x08,   Ai,   I1,   I0]], { sint(I, I1, I0) }, !.
-assemble_code(put_integer(I, Ai))     --> [[0x09,   Ai,    S,    N]], wsint(I, S, N).
+assemble_code(put_variable(x(N), a(Ai))) --> [[0x00,   Ai, 0x00,    N]].
+assemble_code(put_variable(y(N), a(Ai))) --> [[0x01,   Ai, 0x00,    N]].
+assemble_code(put_value(x(N), a(Ai)))    --> [[0x02,   Ai, 0x00,    N]].
+assemble_code(put_value(y(N), a(Ai)))    --> [[0x03,   Ai, 0x00,    N]].
+assemble_code(put_structure(F/N, a(Ai))) --> [[0x04,   Ai,   F0,    N]], { uint(F, F0) }, !.
+assemble_code(put_structure(F/N, a(Ai))) --> [[0x05,   Ai, 0x00,    N], [0x00, 0x00, F1, F0]], { uint(F, F1, F0) }.
+assemble_code(put_list(a(Ai)))           --> [[0x06,   Ai, 0x00, 0x00]].
+assemble_code(put_constant(C, a(Ai)))    --> [[0x07,   Ai,   C1,   C0]], { uint(C, C1, C0) }.
+assemble_code(put_integer(I, a(Ai)))     --> [[0x08,   Ai,   I1,   I0]], { sint(I, I1, I0) }, !.
+assemble_code(put_integer(I, a(Ai)))     --> [[0x09,   Ai,    S,    N]], wsint(I, S, N).
+assemble_code(put_void(N, a(Ai)))        --> [[0x0a,   Ai, 0x00,    N]].
 
-assemble_code(get_variable(x(N), Ai)) --> [[0x10,   Ai, 0x00,    N]].
-assemble_code(get_variable(y(N), Ai)) --> [[0x11,   Ai, 0x00,    N]].
-assemble_code(get_value(x(N), Ai))    --> [[0x12,   Ai, 0x00,    N]].
-assemble_code(get_value(y(N), Ai))    --> [[0x13,   Ai, 0x00,    N]].
-assemble_code(get_structure(F/N, Ai)) --> [[0x14,   Ai,    F,    N]].
-assemble_code(get_structure(F/N, Ai)) --> [[0x15,   Ai, 0x00,    N], [0x00, 0x00, F1, F0]], { uint(F, F1, F0) }.
-assemble_code(get_list(Ai))           --> [[0x16,   Ai, 0x00, 0x00]].
-assemble_code(get_constant(C, Ai))    --> [[0x17,   Ai,   C1,   C0]], { uint(C, C1, C0) }.
-assemble_code(get_integer(I, Ai))     --> [[0x18,   Ai,   I1,   I0]], { sint(I, I1, I0) }.
-assemble_code(get_integer(I, Ai))     --> [[0x19,   Ai,    S,    N]], wsint(I, S, N).
+assemble_code(get_variable(x(N), a(Ai))) --> [[0x10,   Ai, 0x00,    N]].
+assemble_code(get_variable(y(N), a(Ai))) --> [[0x11,   Ai, 0x00,    N]].
+assemble_code(get_value(x(N), a(Ai)))    --> [[0x12,   Ai, 0x00,    N]].
+assemble_code(get_value(y(N), a(Ai)))    --> [[0x13,   Ai, 0x00,    N]].
+assemble_code(get_structure(F/N, a(Ai))) --> [[0x14,   Ai,    F,    N]].
+assemble_code(get_structure(F/N, a(Ai))) --> [[0x15,   Ai, 0x00,    N], [0x00, 0x00, F1, F0]], { uint(F, F1, F0) }.
+assemble_code(get_list(a(Ai)))           --> [[0x16,   Ai, 0x00, 0x00]].
+assemble_code(get_constant(C, a(Ai)))    --> [[0x17,   Ai,   C1,   C0]], { uint(C, C1, C0) }.
+assemble_code(get_integer(I, a(Ai)))     --> [[0x18,   Ai,   I1,   I0]], { sint(I, I1, I0) }.
+assemble_code(get_integer(I, a(Ai)))     --> [[0x19,   Ai,    S,    N]], wsint(I, S, N).
 
 assemble_code(set_variable(x(N)))     --> [[0x20, 0x00, 0x00,    N]].
 assemble_code(set_variable(y(N)))     --> [[0x21, 0x00, 0x00,    N]].

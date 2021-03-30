@@ -25,6 +25,7 @@
 | put constant                         | `07` | `Ai` | `c`1 | `c`0 |
 | put integer                          | `08` | `Ai` | `i`1 | `i`0 |
 | put integer                          | `09` | `Ai` | `00` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
+| put void                             | `0a` | `Ai` | `00` | `00` |
 | get variable                         | `10` | `Ai` | `00` | `Xn` |
 | get variable                         | `11` | `Ai` | `00` | `Yn` |
 | get value                            | `12` | `Ai` | `00` | `Xn` |

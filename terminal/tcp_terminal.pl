@@ -9,6 +9,7 @@
 :- export(disconnect/0).
 :- export(status/1).
 :- export(compile_program/2).
+:- export(run_query/2).
 
 
 connect :-
