@@ -199,7 +199,7 @@ fn load_code<
         }
         hasher.update(&bytes);
         let word = u32::from_be_bytes(bytes);
-        log_trace!("Word: {:X}", word);
+        log_trace!("Word: {:08X}", word);
         *memory_word = word;
     }
 
@@ -279,13 +279,17 @@ mod device_with_query {
                 };
 
             self.serial_connection.write_char(success as u8 as char)?;
-            for &value in machine.solution_registers() {
-                self.serial_connection.write_value(value)?;
+            for &address in machine.solution_registers() {
+                self.serial_connection.write_be_u16_hex(address.0)?;
             }
             self.serial_connection.flush()?;
 
             loop {
-                match CommandHeader::parse(self.serial_connection.read_ascii_char()?)? {
+                let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;
+
+                log::debug!("Processing command {:?}", command);
+
+                match command {
                     CommandHeader::ReportStatus => {
                         log::debug!("Status: Waiting for Query");
                         self.serial_connection
@@ -294,14 +298,13 @@ mod device_with_query {
                     CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
                     CommandHeader::SubmitQuery => return Ok(UnhandledCommand::SubmitQuery),
                     CommandHeader::LookupMemory => {
-                        let value = machine.lookup_memory(super::machine::Address(
-                            self.serial_connection.read_be_u16_hex()?,
-                        ));
+                        let value = machine
+                            .lookup_memory(super::machine::Address(
+                                self.serial_connection.read_be_u16_hex()?,
+                            ))
+                            .1;
                         self.serial_connection.write_value(value)?;
                         self.serial_connection.flush()?;
-                        if let super::machine::ExecutionSuccess::SingleAnswer = success {
-                            return Ok(UnhandledCommand::ProcessNextCommand);
-                        }
                     }
                     CommandHeader::NextSolution => {
                         todo!()
@@ -314,7 +317,8 @@ mod device_with_query {
 
 mod device_with_program {
     use super::{
-        log_info, CommandHeader, ProcessInputError, SerialConnection, SerialRead, SerialWrite,
+        log_info, log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead,
+        SerialWrite,
     };
 
     type EscalatedCommand = super::device_with_query::UnhandledCommand;
@@ -363,6 +367,8 @@ mod device_with_program {
             }
             .run()?;
 
+            log_trace!("Finished with query");
+
             Ok(match unhandled_command {
                 EscalatedCommand::ProcessNextCommand => Action::ProcessNextCommand,
                 EscalatedCommand::SubmitProgram => {
@@ -392,6 +398,9 @@ mod device_with_program {
             log_info!("Waiting for Query");
             loop {
                 let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;
+
+                log::debug!("Processing command {:?}", command);
+
                 let mut command = match command {
                     CommandHeader::ReportStatus => HandledCommand::ReportStatus,
                     CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
@@ -448,6 +457,8 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
         }
         .run()?;
 
+        log_trace!("Finished with program");
+
         match unhandled_command {
             device_with_program::UnhandledCommand::SubmitProgram => {
                 Ok(Action::ProcessCommand(CommandHeader::SubmitProgram))
@@ -476,12 +487,14 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
                 Ok(Action::ProcessNextCommand)
             }
             CommandHeader::SubmitProgram => self.handle_submit_program(),
-            CommandHeader::SubmitQuery => {
-                error!(&mut self.serial_connection, "No Program",)?;
+            CommandHeader::SubmitQuery
+            | CommandHeader::LookupMemory
+            | CommandHeader::NextSolution => {
+                error!(
+                    &mut self.serial_connection,
+                    "Cannot handle {:?}: No program", command_header
+                )?;
                 Ok(Action::ProcessNextCommand)
-            }
-            CommandHeader::LookupMemory | CommandHeader::NextSolution => {
-                Err(ProcessInputError::Unexpected(command_header as u8))
             }
         }
     }

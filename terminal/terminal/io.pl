@@ -4,6 +4,7 @@
               read_u8/2,
               read_u16/2,
               read_u32/2,
+              write_u16/2,
               write_words_with_hash/2
           ]).
 
@@ -67,6 +68,10 @@ write_words_with_hash(Stream, Words) :-
 
 write_u8(Stream, N) :-
     format(Stream, "~|~`0t~16r~2+", [N]).
+
+
+write_u16(Stream, N) :-
+    format(Stream, "~|~`0t~16r~4+", [N]).
 
 
 write_u32(Stream, N) :-

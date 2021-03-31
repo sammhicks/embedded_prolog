@@ -3,8 +3,8 @@
   + P - Waiting for Program
   + Q - Waiting for Query
   + R - Executing Program
-  + A - Single Answer, then predicate values
-  + C - Multiple Answers, then predicate values
+  + A - Single Answer, then register addresses
+  + C - Multiple Answers, then register addresses
   + F - No Answers
 + P - Submit Program
   + length in words(u32): BE u32 in hex
