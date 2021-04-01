@@ -76,7 +76,7 @@ assemble_code(unify_value(y(N)))      --> [[0x33, 0x00, 0x00,    N]].
 assemble_code(unify_constant(C))      --> [[0x37, 0x00,   C1,   C0]], { uint(C, C1, C0) }.
 assemble_code(unify_integer(I))       --> [[0x38, 0x00,   I1,   I0]], { sint(I, I1, I0) }.
 assemble_code(unify_integer(I))       --> [[0x39, 0x00,    S,    N]], wsint(I, S, N).
-assemble_code(unify_void(y(N)))       --> [[0x3a, 0x00, 0x00,    N]].
+assemble_code(unify_void(N))          --> [[0x3a, 0x00, 0x00,    N]].
 
 assemble_code(allocate(N))        --> [[0x40, 0x00, 0x00,    N]].
 assemble_code(trim(N))            --> [[0x41, 0x00, 0x00,    N]].

@@ -86,7 +86,7 @@ impl SerializableWrapper for Functor {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Arity(u8);
 
 impl fmt::Debug for Arity {
@@ -459,6 +459,7 @@ enum Instruction {
     UnifyValueXn { xn: Xn },
     UnifyValueYn { yn: Yn },
     UnifyConstant { c: Constant },
+    UnifyVoid { n: Arity },
     Allocate { n: Arity },
     Trim { n: Arity },
     Deallocate,
@@ -611,6 +612,7 @@ impl Instruction {
                     c: Constant::from_be_bytes([c1, c0]),
                 },
             ),
+            [0x3a, 0, 0, n] => (pc.offset(1), Instruction::UnifyVoid { n: Arity(n) }),
             [0x40, 0, 0, n] => (pc.offset(1), Instruction::Allocate { n: Arity(n) }),
             [0x41, 0, 0, n] => (pc.offset(1), Instruction::Trim { n: Arity(n) }),
             [0x42, 0, 0, 0] => (pc.offset(1), Instruction::Deallocate),
@@ -693,6 +695,20 @@ impl ReadMode {
             (address, ReadWriteMode::Unknown)
         } else {
             (address, ReadWriteMode::Read(self))
+        }
+    }
+
+    fn skip_terms(mut self, n: Arity) -> ReadWriteMode {
+        self.index = Arity(self.index.0 + n.0);
+        if self.index > self.arity {
+            panic!("No more terms to read");
+        }
+
+        if self.index == self.arity {
+            log_trace!("Finished reading structure");
+            ReadWriteMode::Unknown
+        } else {
+            ReadWriteMode::Read(self)
         }
     }
 }
@@ -959,6 +975,19 @@ impl<'m> Machine<'m> {
                     }
                 }
             }
+            Instruction::UnifyVoid { n } => match self.read_write_mode {
+                ReadWriteMode::Unknown => panic!("Unknown read/write mode"),
+                ReadWriteMode::Read(read_mode) => {
+                    self.read_write_mode = read_mode.skip_terms(n);
+                    Ok(())
+                }
+                ReadWriteMode::Write => {
+                    for _ in 0..n.0 {
+                        self.new_variable();
+                    }
+                    Ok(())
+                }
+            },
             Instruction::Allocate { n } => {
                 self.new_environment(n);
                 Ok(())
