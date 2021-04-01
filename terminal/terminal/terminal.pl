@@ -7,6 +7,7 @@
           ]).
 
 :- use_module(library(lists)).
+:- use_module(library(ordsets)).
 :- use_module(library(utf8)).
 
 :- use_module(compiler/compiler).
@@ -143,49 +144,88 @@ read_answer(Stream, Query, Functors) :-
     compound_name_arity(Query, Name, Arity),
     length(Register_References, Arity),
     maplist(read_u16(Stream), Register_References),
-    read_answer_references(Register_References, Stream, Functors, values{}, Lookup_Table),
+    read_answer_references(Register_References, Stream, Functors, [], [], Lookup_Table),
     maplist(get_lookup_value(Lookup_Table), Register_References, Arguments),
     compound_name_arguments(Query, Name, Arguments).
 
 
-read_answer_references([], _Stream, _Functors, Lookup_Table, Lookup_Table).
-read_answer_references([Reference|References], Stream, Functors, Current_Lookup_Table, Final_Lookup_Table) :-
-    read_answer_reference(Stream, Functors, Reference, Current_Lookup_Table, New_Lookup_Table, New_References),
+read_answer_references([], _Stream, _Functors, _Resolved_References, Lookup_Table, Lookup_Table).
+read_answer_references([Reference|References], Stream, Functors, Resolved_References, Current_Lookup_Table, Final_Lookup_Table) :-
+    read_answer_reference(Stream, Functors, Reference, Resolved_References, New_References, Newly_Resolved_References, New_Entries),
     append(References, New_References, All_References),
-    read_answer_references(All_References, Stream, Functors, New_Lookup_Table, Final_Lookup_Table).
+    ord_union(Newly_Resolved_References, Resolved_References, Next_Resolved_References),
+    insert_entries(New_Entries, Current_Lookup_Table, New_Lookup_Table),
+    read_answer_references(All_References, Stream, Functors, Next_Resolved_References, New_Lookup_Table, Final_Lookup_Table).
 
 
-read_answer_reference(Stream, Functors, Reference, Current_Lookup_Table, New_Lookup_Table, New_References) :-
-    (   get_dict(Reference, Current_Lookup_Table, _Value)
-    ->  New_Lookup_Table = Current_Lookup_Table,
-        New_References = []
-    ;   write(Stream, 'M'),
-        write_u16(Stream, Reference),
-        flush_output(Stream),
-        read_value(Stream, Value_Description, New_References),
-        resolve_value_description(Value_Description, Functors, Current_Lookup_Table, Value),
-        New_Lookup_Table = Current_Lookup_Table.put(Reference, Value)
-    ).
+read_answer_reference(_Stream, _Functors, Reference, Resolved_References, [], [], []) :-
+    memberchk(Reference, Resolved_References),
+    !.
+
+read_answer_reference(Stream, Functors, Reference, _Resolved_References, New_References, Newly_Resolved_References, New_Entries) :-
+    write(Stream, 'M'),
+    write_u16(Stream, Reference),
+    flush_output(Stream),
+    read_nonspace(Stream, Value_Header),
+    read_value(Value_Header, Stream, Value_Description),
+    read_u16(Stream, Address),
+    resolve_value_description(Value_Description, Functors, Value, New_References, Additional_Entries),
+    list_to_ord_set([Reference, Address], Newly_Resolved_References),
+    New_Entries = [Reference=Value, Address=Value|Additional_Entries].
 
 
-resolve_value_description(reference(R), _Functors, Lookup_Table, Value) :- get_dict(R, Lookup_Table, Value), !.
-resolve_value_description(reference(_R), _Functors, _Lookup_Table, _Value).
+resolve_value_description(reference(_R), _Functors, _Value, [], []).
+resolve_value_description(structure(Functor, Arity, First_Term), Functors, Value, New_References, Additional_Entries) :-
+    nth0(Functor, Functors, Name),
+    length(Arguments, Arity),
+    compound_name_arguments(Value, Name, Arguments),
+    length(New_References, Arity),
+    incrementing_series(New_References, First_Term),
+    maplist(entry, New_References, Arguments, Additional_Entries),
+    true.
 
-resolve_value_description(constant(C), Functors, _Lookup_Table, Value) :-
+resolve_value_description(constant(C), Functors, Value, [], []) :-
     nth0(C, Functors, Value).
 
 
-read_value(Stream, Value, New_References) :-
-    read_nonspace(Stream, Value_Header),
-    read_value(Value_Header, Stream, Value, New_References).
-
-
-read_value('R', Stream, reference(R), []) :-
+read_value('R', Stream, reference(R)) :-
     read_u16(Stream, R).
 
-read_value('C', Stream, constant(C), []) :-
+read_value('S', Stream, structure(F, N, First_Term)) :-
+    read_u16(Stream, F),
+    read_u8(Stream, N),
+    read_u16(Stream, First_Term).
+
+read_value('C', Stream, constant(C)) :-
     read_u16(Stream, C).
 
 
+incrementing_series([], _N).
+incrementing_series([N|Ns], N) :-
+    Successor is N + 1,
+    incrementing_series(Ns, Successor).
+
+
+insert_entries([], Table, Table).
+insert_entries([Entry|Entries], Current_Table, Final_Table) :-
+    insert_entry(Entry, Current_Table, New_Table),
+    insert_entries(Entries, New_Table, Final_Table).
+
+
+insert_entry(New_Entry, Table, Table) :-
+    entry(Key, New_Value, New_Entry),
+    entry(Key, Current_Value, Current_Entry),
+    memberchk(Current_Entry, Table),
+    !,
+    Current_Value = New_Value.
+
+insert_entry(New_Entry, Current_Table, [New_Entry|Current_Table]).
+
+
+
 get_lookup_value(Lookup_Table, Reference, Value) :-
-    get_dict(Reference, Lookup_Table, Value).
+    entry(Reference, Value, Entry),
+    memberchk(Entry, Lookup_Table).
+
+
+entry(K, V, K=V).

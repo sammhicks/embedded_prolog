@@ -14,6 +14,7 @@ mod errors;
 mod hex;
 mod logging;
 mod machine;
+mod serializable;
 
 #[derive(Debug)]
 pub enum Never {}
@@ -73,20 +74,14 @@ impl<R: SerialRead<u8>> SerialConnection<R> {
         Ok((a << 4) + b)
     }
 
-    fn read_be_u16_hex(&mut self) -> Result<u16, ProcessInputError> {
-        let mut buffer = [0; 2];
-        for b in (&mut buffer).iter_mut() {
+    fn read_be_serializable_hex<S: serializable::Serializable>(
+        &mut self,
+    ) -> Result<S, ProcessInputError> {
+        let mut buffer = S::Bytes::default();
+        for b in buffer.as_mut() {
             *b = self.read_be_u8_hex()?;
         }
-        Ok(u16::from_be_bytes(buffer))
-    }
-
-    fn read_be_u32_hex(&mut self) -> Result<u32, ProcessInputError> {
-        let mut buffer = [0; 4];
-        for b in (&mut buffer).iter_mut() {
-            *b = self.read_be_u8_hex()?;
-        }
-        Ok(u32::from_be_bytes(buffer))
+        Ok(S::from_be_bytes(buffer))
     }
 }
 
@@ -125,32 +120,39 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
         Ok(())
     }
 
-    fn write_be_u8_slice_hex(&mut self, bytes: &[u8]) -> Result<(), IoError> {
-        for &b in bytes {
+    fn write_be_serializable_hex<S: serializable::Serializable>(
+        &mut self,
+        value: S,
+    ) -> Result<(), IoError> {
+        for &b in value.into_be_bytes().as_ref() {
             self.write_be_u8_hex(b)?;
         }
         Ok(())
     }
 
-    fn write_be_u16_hex(&mut self, w: u16) -> Result<(), IoError> {
-        self.write_be_u8_slice_hex(&w.to_be_bytes())
-    }
-
-    // fn write_be_u32_hex(&mut self, w: u32) -> Result<(), IoError> {
-    //     self.write_be_u8_slice_hex(&w.to_be_bytes())
-    // }
-
-    fn write_value(&mut self, value: machine::Value) -> Result<(), IoError> {
+    fn write_value(
+        &mut self,
+        address: machine::Address,
+        value: machine::Value,
+    ) -> Result<(), IoError> {
         match value {
             machine::Value::Reference(address) => {
                 self.write_char('R')?;
-                self.write_be_u16_hex(address.0)?;
+                self.write_be_serializable_hex(address)?;
+            }
+            machine::Value::Structure(f, n) => {
+                self.write_char('S')?;
+                self.write_be_serializable_hex(f)?;
+                self.write_be_serializable_hex(n)?;
+                self.write_be_serializable_hex(address.offset(1))?;
             }
             machine::Value::Constant(c) => {
                 self.write_char('C')?;
-                self.write_be_u16_hex(c.0)?;
+                self.write_be_serializable_hex(c)?;
             }
         }
+
+        self.write_be_serializable_hex(address)?;
 
         Ok(())
     }
@@ -174,7 +176,7 @@ fn load_code<
 ) -> Result<Option<LoadedCode<'code, 'rest>>, ProcessInputError> {
     let mut serial_connection = serial_connection.borrow_mut();
 
-    let code_length = serial_connection.read_be_u32_hex()? as usize;
+    let code_length = serial_connection.read_be_serializable_hex::<u32>()? as usize;
     let memory_capacity = memory.len();
 
     log_debug!("Code length:     {}", code_length);
@@ -246,7 +248,9 @@ impl CommandHeader {
 }
 
 mod device_with_query {
-    use super::{CommandHeader, ProcessInputError, SerialConnection, SerialRead, SerialWrite};
+    use super::{
+        log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead, SerialWrite,
+    };
 
     #[derive(Debug)]
     pub enum UnhandledCommand {
@@ -279,8 +283,9 @@ mod device_with_query {
                 };
 
             self.serial_connection.write_char(success as u8 as char)?;
-            for &address in machine.solution_registers() {
-                self.serial_connection.write_be_u16_hex(address.0)?;
+            for address in machine.solution_registers() {
+                log_trace!("Solution Register: {}", address);
+                self.serial_connection.write_be_serializable_hex(address)?;
             }
             self.serial_connection.flush()?;
 
@@ -298,12 +303,9 @@ mod device_with_query {
                     CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
                     CommandHeader::SubmitQuery => return Ok(UnhandledCommand::SubmitQuery),
                     CommandHeader::LookupMemory => {
-                        let value = machine
-                            .lookup_memory(super::machine::Address(
-                                self.serial_connection.read_be_u16_hex()?,
-                            ))
-                            .1;
-                        self.serial_connection.write_value(value)?;
+                        let (address, value) = machine
+                            .lookup_memory(self.serial_connection.read_be_serializable_hex()?);
+                        self.serial_connection.write_value(address, value)?;
                         self.serial_connection.flush()?;
                     }
                     CommandHeader::NextSolution => {

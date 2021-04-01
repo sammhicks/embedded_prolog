@@ -1,3 +1,9 @@
-foo(a).
+foo(A, B, A, D, D) :-
+    a(A),
+    b(B).
 
-bar(A, A).
+a(a).
+b(b).
+
+
+bar(foo(A, x), A, A).
