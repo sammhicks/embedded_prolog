@@ -134,6 +134,7 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
         &mut self,
         address: machine::Address,
         value: machine::Value,
+        subterms: impl Iterator<Item = machine::Address>,
     ) -> Result<(), IoError> {
         match value {
             machine::Value::Reference(address) => {
@@ -144,12 +145,15 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
                 self.write_char('S')?;
                 self.write_be_serializable_hex(f)?;
                 self.write_be_serializable_hex(n)?;
-                self.write_be_serializable_hex(address.offset(1))?;
             }
             machine::Value::Constant(c) => {
                 self.write_char('C')?;
                 self.write_be_serializable_hex(c)?;
             }
+        }
+
+        for subterm in subterms {
+            self.write_be_serializable_hex(subterm)?;
         }
 
         self.write_be_serializable_hex(address)?;
@@ -303,9 +307,10 @@ mod device_with_query {
                     CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
                     CommandHeader::SubmitQuery => return Ok(UnhandledCommand::SubmitQuery),
                     CommandHeader::LookupMemory => {
-                        let (address, value) = machine
+                        let (address, value, subterms) = machine
                             .lookup_memory(self.serial_connection.read_be_serializable_hex()?);
-                        self.serial_connection.write_value(address, value)?;
+                        self.serial_connection
+                            .write_value(address, value, subterms)?;
                         self.serial_connection.flush()?;
                     }
                     CommandHeader::NextSolution => {

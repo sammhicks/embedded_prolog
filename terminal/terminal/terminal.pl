@@ -175,12 +175,10 @@ read_answer_reference(Stream, Functors, Reference, _Resolved_References, New_Ref
 
 
 resolve_value_description(reference(_R), _Functors, _Value, [], []).
-resolve_value_description(structure(Functor, Arity, First_Term), Functors, Value, New_References, Additional_Entries) :-
+resolve_value_description(structure(Functor, Arity, New_References), Functors, Value, New_References, Additional_Entries) :-
     nth0(Functor, Functors, Name),
     length(Arguments, Arity),
     compound_name_arguments(Value, Name, Arguments),
-    length(New_References, Arity),
-    incrementing_series(New_References, First_Term),
     maplist(entry, New_References, Arguments, Additional_Entries),
     true.
 
@@ -191,19 +189,14 @@ resolve_value_description(constant(C), Functors, Value, [], []) :-
 read_value('R', Stream, reference(R)) :-
     read_u16(Stream, R).
 
-read_value('S', Stream, structure(F, N, First_Term)) :-
+read_value('S', Stream, structure(F, N, Terms)) :-
     read_u16(Stream, F),
     read_u8(Stream, N),
-    read_u16(Stream, First_Term).
+    length(Terms, N),
+    maplist(read_u16(Stream), Terms).
 
 read_value('C', Stream, constant(C)) :-
     read_u16(Stream, C).
-
-
-incrementing_series([], _N).
-incrementing_series([N|Ns], N) :-
-    Successor is N + 1,
-    incrementing_series(Ns, Successor).
 
 
 insert_entries([], Table, Table).

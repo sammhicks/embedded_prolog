@@ -114,6 +114,8 @@ impl SerializableWrapper for Arity {
 }
 
 impl Arity {
+    const ZERO: Self = Self(0);
+
     fn value(self) -> usize {
         self.0 as usize
     }
@@ -257,6 +259,29 @@ impl SerializableWrapper for ProgramCounter {
     }
 }
 
+pub struct Heap<'m>(&'m mut [u32]);
+
+impl<'m, A: Into<Address>> std::ops::Index<A> for Heap<'m> {
+    type Output = u32;
+
+    fn index(&self, index: A) -> &Self::Output {
+        &self.0[index.into().0 as usize]
+    }
+}
+
+impl<'m, A: Into<Address>> std::ops::IndexMut<A> for Heap<'m> {
+    fn index_mut(&mut self, index: A) -> &mut Self::Output {
+        &mut self.0[index.into().0 as usize]
+    }
+}
+
+impl<'m> Heap<'m> {
+    fn range(&self, start: impl Into<Address>, count: usize) -> &[u32] {
+        let start = start.into().0 as usize;
+        &self.0[start..(start + count)]
+    }
+}
+
 const REFERENCE_HEADER: u8 = b'R';
 const STRUCTURE_HEADER: u8 = b'S';
 const CONSTANT_HEADER: u8 = b'C';
@@ -331,32 +356,110 @@ impl Value {
     }
 }
 
-fn structure_terms(header_address: Address, n: Arity) -> impl Iterator<Item = Address> {
-    ((header_address.0 + 1)..).take(n.value()).map(Address)
-}
+mod structure_iteration {
+    use super::{log_trace, Address, Arity, Heap};
 
-struct Heap<'m>(&'m mut [u32]);
+    pub enum ReadWriteMode {
+        None,
+        Read,
+        Write,
+    }
 
-impl<'m, A: Into<Address>> std::ops::Index<A> for Heap<'m> {
-    type Output = u32;
+    pub struct StructureIterationState {
+        read_write_mode: ReadWriteMode,
+        first_term: Address,
+        index: Arity,
+        arity: Arity,
+    }
 
-    fn index(&self, index: A) -> &Self::Output {
-        &self.0[index.into().0 as usize]
+    impl Default for StructureIterationState {
+        fn default() -> Self {
+            Self {
+                read_write_mode: ReadWriteMode::None,
+                first_term: Address::NULL,
+                index: Arity::ZERO,
+                arity: Arity::ZERO,
+            }
+        }
+    }
+
+    impl StructureIterationState {
+        pub fn read_write_mode(&self) -> &ReadWriteMode {
+            &self.read_write_mode
+        }
+
+        pub fn struct_reader(header_address: Address, arity: Arity) -> Self {
+            Self {
+                read_write_mode: ReadWriteMode::Read,
+                first_term: header_address.offset(1),
+                index: Arity::ZERO,
+                arity,
+            }
+        }
+
+        pub fn start_reading_struct(&mut self, header_address: Address, arity: Arity) {
+            assert!(matches!(&self.read_write_mode, ReadWriteMode::None));
+            *self = Self::struct_reader(header_address, arity);
+        }
+
+        pub fn start_writing(&mut self, first_term: Address, arity: Arity) {
+            assert!(matches!(&self.read_write_mode, ReadWriteMode::None));
+            *self = Self {
+                read_write_mode: ReadWriteMode::Write,
+                first_term,
+                index: Arity::ZERO,
+                arity,
+            };
+        }
+
+        fn check_done(&mut self) {
+            if self.index == self.arity {
+                log_trace!("Finished reading structure");
+                self.read_write_mode = ReadWriteMode::None;
+            }
+        }
+
+        fn with_next<T>(&mut self, action: impl FnOnce(Address) -> T) -> T {
+            if self.index == self.arity {
+                panic!("No more terms");
+            }
+
+            let address = self.first_term.offset(self.index.0 as u16);
+
+            self.index = Arity(self.index.0 + 1);
+
+            let result = action(address);
+
+            self.check_done();
+
+            result
+        }
+
+        pub fn read_next(&mut self, memory: &Heap) -> Address {
+            self.with_next(|address| Address(memory[address] as u16))
+        }
+
+        pub fn write_next(&mut self, memory: &mut Heap, address: Address) {
+            self.with_next(|term_address| {
+                log_trace!("Writing {} to {}", address, term_address);
+                memory[term_address] = address.0 as u32;
+            })
+        }
+
+        pub fn skip(&mut self, n: Arity) {
+            assert!(matches!(&self.read_write_mode, ReadWriteMode::Read));
+
+            self.index = Arity(self.index.0 + n.0);
+            if self.index > self.arity {
+                panic!("No more terms to read");
+            }
+
+            self.check_done();
+        }
     }
 }
 
-impl<'m, A: Into<Address>> std::ops::IndexMut<A> for Heap<'m> {
-    fn index_mut(&mut self, index: A) -> &mut Self::Output {
-        &mut self.0[index.into().0 as usize]
-    }
-}
-
-impl<'m> Heap<'m> {
-    fn range(&self, start: impl Into<Address>, count: usize) -> &[u32] {
-        let start = start.into().0 as usize;
-        &self.0[start..(start + count)]
-    }
-}
+use structure_iteration::{ReadWriteMode, StructureIterationState};
 
 struct Environment {
     continuation_environment: EnvironmentAddress,
@@ -673,53 +776,6 @@ enum CurrentlyExecuting {
     Program,
 }
 
-#[derive(Copy, Clone, Debug)]
-struct ReadMode {
-    header_address: Address,
-    index: Arity,
-    arity: Arity,
-}
-
-impl ReadMode {
-    fn next_term(mut self) -> (Address, ReadWriteMode) {
-        if self.index == self.arity {
-            panic!("No more terms to read");
-        }
-
-        let address = self.header_address.offset(1).offset(self.index.0 as u16);
-
-        self.index = Arity(self.index.0 + 1);
-
-        if self.index == self.arity {
-            log_trace!("Finished reading structure");
-            (address, ReadWriteMode::Unknown)
-        } else {
-            (address, ReadWriteMode::Read(self))
-        }
-    }
-
-    fn skip_terms(mut self, n: Arity) -> ReadWriteMode {
-        self.index = Arity(self.index.0 + n.0);
-        if self.index > self.arity {
-            panic!("No more terms to read");
-        }
-
-        if self.index == self.arity {
-            log_trace!("Finished reading structure");
-            ReadWriteMode::Unknown
-        } else {
-            ReadWriteMode::Read(self)
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-enum ReadWriteMode {
-    Unknown,
-    Read(ReadMode),
-    Write,
-}
-
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum ExecutionFailure {
@@ -744,7 +800,7 @@ pub struct MachineMemory<'m> {
 
 pub struct Machine<'m> {
     currently_executing: CurrentlyExecuting,
-    read_write_mode: ReadWriteMode,
+    structure_iteration_state: StructureIterationState,
     pc: ProgramCounter,
     cp: ProgramCounter,
     h: Address,
@@ -766,12 +822,12 @@ impl<'m> Machine<'m> {
     ) -> Result<(Self, ExecutionSuccess), ExecutionFailure> {
         let mut machine = Self {
             currently_executing: CurrentlyExecuting::Query,
-            read_write_mode: ReadWriteMode::Unknown,
+            structure_iteration_state: StructureIterationState::default(),
             pc: ProgramCounter(0),
             cp: ProgramCounter::NULL,
             h: Address(0),
             e: EnvironmentAddress::NULL,
-            argument_count: Arity(0),
+            argument_count: Arity::ZERO,
             registers: RegisterBlock([Address::NULL; 32]),
             program,
             query,
@@ -868,25 +924,21 @@ impl<'m> Machine<'m> {
                 )
                 .or_else(|UnificationFailure| self.backtrack()),
             Instruction::GetStructure { ai, f, n } => {
-                let (address, value) = self.lookup_register(ai);
+                let (address, value) = self.deref_register(ai);
                 match value {
                     Value::Reference(r) => {
                         log_trace!("Writing structure {}/{}", f, n);
 
-                        let structure_address = self.new_structure(f, n);
+                        let header_address = self.new_structure(f, n);
 
-                        self.bind_variable(r, structure_address);
-                        self.read_write_mode = ReadWriteMode::Write;
+                        self.bind_variable(r, header_address);
                     }
                     Value::Structure(found_f, found_n) => {
                         if f == found_f && n == found_n {
                             log_trace!("Reading structure {}/{}", f, n);
 
-                            self.read_write_mode = ReadWriteMode::Read(ReadMode {
-                                header_address: address,
-                                index: Arity(0),
-                                arity: n,
-                            });
+                            self.structure_iteration_state
+                                .start_reading_struct(address, n);
                         } else {
                             self.backtrack()?;
                         }
@@ -895,7 +947,7 @@ impl<'m> Machine<'m> {
                 }
                 Ok(())
             }
-            Instruction::GetConstant { ai, c } => match self.lookup_register(ai).1 {
+            Instruction::GetConstant { ai, c } => match self.deref_register(ai).1 {
                 Value::Reference(address) => {
                     self.bind_to_constant(address, c);
                     Ok(())
@@ -906,29 +958,40 @@ impl<'m> Machine<'m> {
             Instruction::SetVariableXn { xn } => {
                 let address = self.new_variable();
                 self.registers.store(xn, address);
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetVariableYn { yn } => {
                 let address = self.new_variable();
                 Environment::write_variable(&mut self.memory, self.e, yn, address);
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetValueXn { xn } => {
-                self.new_variable_with_value(self.registers.load(xn));
+                let address = self.registers.load(xn);
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetValueYn { yn } => {
                 let address = Environment::read_variable(&self.memory, self.e, yn);
-                self.new_variable_with_value(address);
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetConstant { c } => {
-                self.new_constant(c);
+                let address = self.new_constant(c);
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetVoid { n } => {
                 for _ in 0..n.into_inner() {
-                    self.new_variable();
+                    let address = self.new_variable();
+                    self.structure_iteration_state
+                        .write_next(&mut self.memory, address);
                 }
                 Ok(())
             }
@@ -945,14 +1008,12 @@ impl<'m> Machine<'m> {
                 Environment::read_variable(&this.memory, this.e, yn)
             }),
             Instruction::UnifyConstant { c } => {
-                match self.read_write_mode {
-                    ReadWriteMode::Unknown => panic!("Unknown read/write mode"),
-                    ReadWriteMode::Read(read_mode) => {
-                        let (term_address, next_mode) = read_mode.next_term();
+                match self.structure_iteration_state.read_write_mode() {
+                    ReadWriteMode::None => panic!("Unknown read/write mode"),
+                    ReadWriteMode::Read => {
+                        let term_address = self.structure_iteration_state.read_next(&self.memory);
 
-                        self.read_write_mode = next_mode;
-
-                        match self.lookup_memory(term_address).1 {
+                        match self.deref_address(term_address).1 {
                             Value::Reference(address) => {
                                 self.memory[address] = Value::Constant(c).encode();
                                 // trail(address)
@@ -969,25 +1030,31 @@ impl<'m> Machine<'m> {
                         }
                     }
                     ReadWriteMode::Write => {
-                        self.new_constant(c);
+                        let address = self.new_constant(c);
+                        self.structure_iteration_state
+                            .write_next(&mut self.memory, address);
 
                         Ok(())
                     }
                 }
             }
-            Instruction::UnifyVoid { n } => match self.read_write_mode {
-                ReadWriteMode::Unknown => panic!("Unknown read/write mode"),
-                ReadWriteMode::Read(read_mode) => {
-                    self.read_write_mode = read_mode.skip_terms(n);
-                    Ok(())
-                }
-                ReadWriteMode::Write => {
-                    for _ in 0..n.0 {
-                        self.new_variable();
+            Instruction::UnifyVoid { n } => {
+                match self.structure_iteration_state.read_write_mode() {
+                    ReadWriteMode::None => panic!("Unknown read/write mode"),
+                    ReadWriteMode::Read => {
+                        self.structure_iteration_state.skip(n);
+                        Ok(())
                     }
-                    Ok(())
+                    ReadWriteMode::Write => {
+                        for _ in 0..n.0 {
+                            let address = self.new_variable();
+                            self.structure_iteration_state
+                                .write_next(&mut self.memory, address);
+                        }
+                        Ok(())
+                    }
                 }
-            },
+            }
             Instruction::Allocate { n } => {
                 self.new_environment(n);
                 Ok(())
@@ -1012,7 +1079,7 @@ impl<'m> Machine<'m> {
                         self.currently_executing = CurrentlyExecuting::Program;
                         self.new_environment(n);
                         for index in 0..n.0 {
-                            let value = self.lookup_register(Ai { ai: index }).0;
+                            let value = self.deref_register(Ai { ai: index }).0;
                             log_trace!("Saved Register Value: {}", value);
                             Environment::write_variable(
                                 &mut self.memory,
@@ -1053,11 +1120,11 @@ impl<'m> Machine<'m> {
         }
     }
 
-    pub fn lookup_register(&self, index: Ai) -> (Address, Value) {
-        self.lookup_memory(self.registers.load(index))
+    fn deref_register(&self, index: Ai) -> (Address, Value) {
+        self.deref_address(self.registers.load(index))
     }
 
-    pub fn lookup_memory(&self, mut address: Address) -> (Address, Value) {
+    fn deref_address(&self, mut address: Address) -> (Address, Value) {
         log_trace!("Looking up memory at {}", address);
         let value = loop {
             let value = Value::decode(&self.memory, address).unwrap();
@@ -1085,29 +1152,59 @@ impl<'m> Machine<'m> {
             .map(move |address| Address(self.memory[address] as u16))
     }
 
-    fn new_value(&mut self, factory: impl FnOnce(Address) -> Value) -> Address {
+    pub fn lookup_memory(
+        &self,
+        address: Address,
+    ) -> (Address, Value, impl Iterator<Item = Address> + '_) {
+        let (deref, value) = self.deref_address(address);
+        let (first_term, arity) = match value {
+            Value::Reference(..) => (Address::NULL, Arity::ZERO),
+            Value::Structure(_, n) => (deref.offset(1), n),
+            Value::Constant(..) => (Address::NULL, Arity::ZERO),
+        };
+
+        let terms = (0..arity.0)
+            .map(move |index| Address(self.memory[first_term.offset(index as u16)] as u16));
+
+        (deref, value, terms)
+    }
+
+    fn new_value(&mut self, factory: impl FnOnce(Address) -> (Value, Arity)) -> Address {
         let address = self.h;
-        let new_value = factory(address);
-        log_trace!("New value at {}: {:?}", self.h, new_value);
-        self.memory[address] = new_value.encode();
-        self.h = self.h.offset(1);
+        let (header, tail_size) = factory(address);
+        log_trace!("New value at {}: {:?}", self.h, header);
+        self.memory[address] = header.encode();
+        self.h = self.h.offset(1 + tail_size.0 as u16);
+        log_trace!("h = {}", self.h);
         address
     }
 
     fn new_variable(&mut self) -> Address {
-        self.new_value(Value::Reference)
+        self.new_value(|address| (Value::Reference(address), Arity::ZERO))
     }
 
-    fn new_variable_with_value(&mut self, address: Address) -> Address {
-        self.new_value(|_| Value::Reference(address))
-    }
+    // fn new_variable_with_value(&mut self, address: Address) -> Address {
+    //     self.new_value(|_| Value::Reference(address))
+    // }
 
     fn new_structure(&mut self, f: Functor, n: Arity) -> Address {
-        self.new_value(|_| Value::Structure(f, n))
+        let header_address = self.new_value(|_| (Value::Structure(f, n), n));
+
+        let mut term_address = header_address.offset(1);
+
+        self.structure_iteration_state
+            .start_writing(term_address, n);
+
+        for _ in 0..n.0 {
+            self.memory[term_address] = u32::MAX;
+            term_address = term_address.offset(1);
+        }
+
+        header_address
     }
 
     fn new_constant(&mut self, c: Constant) -> Address {
-        self.new_value(|_| Value::Constant(c))
+        self.new_value(|_| (Value::Constant(c), Arity::ZERO))
     }
 
     fn new_environment(&mut self, number_of_permanent_variables: Arity) {
@@ -1150,12 +1247,10 @@ impl<'m> Machine<'m> {
         index: I,
         store: impl FnOnce(&mut Self, I, Address),
     ) -> Result<(), ExecutionFailure> {
-        match self.read_write_mode {
-            ReadWriteMode::Unknown => panic!("Unknown read/write mode"),
-            ReadWriteMode::Read(read_mode) => {
-                let (term_address, next_mode) = read_mode.next_term();
-
-                self.read_write_mode = next_mode;
+        match self.structure_iteration_state.read_write_mode() {
+            ReadWriteMode::None => panic!("Unknown read/write mode"),
+            ReadWriteMode::Read => {
+                let term_address = self.structure_iteration_state.read_next(&self.memory);
 
                 store(self, index, term_address);
 
@@ -1164,6 +1259,8 @@ impl<'m> Machine<'m> {
             ReadWriteMode::Write => {
                 let address = self.new_variable();
                 store(self, index, address);
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address);
 
                 Ok(())
             }
@@ -1175,12 +1272,10 @@ impl<'m> Machine<'m> {
         index: I,
         load: impl FnOnce(&mut Self, I) -> Address,
     ) -> Result<(), ExecutionFailure> {
-        match self.read_write_mode {
-            ReadWriteMode::Unknown => panic!("Unknown read/write mode"),
-            ReadWriteMode::Read(read_mode) => {
-                let (term_address, next_mode) = read_mode.next_term();
-
-                self.read_write_mode = next_mode;
+        match self.structure_iteration_state.read_write_mode() {
+            ReadWriteMode::None => panic!("Unknown read/write mode"),
+            ReadWriteMode::Read => {
+                let term_address = self.structure_iteration_state.read_next(&self.memory);
 
                 let register_address = load(self, index);
 
@@ -1189,7 +1284,10 @@ impl<'m> Machine<'m> {
             }
             ReadWriteMode::Write => {
                 let address = load(self, index);
-                self.new_variable_with_value(address);
+                // TODO - Do we need a new variable?
+                // self.new_variable_with_value(address);
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address);
                 Ok(())
             }
         }
@@ -1197,10 +1295,10 @@ impl<'m> Machine<'m> {
 
     fn unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationFailure> {
         log_trace!("Unifying {} and {}", a1, a2);
-        let e1 = self.lookup_memory(a1);
-        let e2 = self.lookup_memory(a2);
+        let e1 = self.deref_address(a1);
+        let e2 = self.deref_address(a2);
         log_trace!("Resolved to {:?} and {:?}", e1, e2);
-        match (self.lookup_memory(a1), self.lookup_memory(a2)) {
+        match (e1, e2) {
             ((a1, Value::Reference(r1)), (a2, Value::Reference(r2))) => {
                 assert_eq!(a1, r1);
                 assert_eq!(a2, r2);
@@ -1225,9 +1323,11 @@ impl<'m> Machine<'m> {
             }
             ((a1, Value::Structure(f1, n1)), (a2, Value::Structure(f2, n2))) => {
                 if f1 == f2 && n1 == n2 {
-                    let terms_1 = structure_terms(a1, n1);
-                    let terms_2 = structure_terms(a2, n2);
-                    for (a1, a2) in terms_1.zip(terms_2) {
+                    let mut terms_1 = StructureIterationState::struct_reader(a1, n1);
+                    let mut terms_2 = StructureIterationState::struct_reader(a2, n2);
+                    for _ in 0..n1.0 {
+                        let a1 = terms_1.read_next(&self.memory);
+                        let a2 = terms_2.read_next(&self.memory);
                         self.unify(a1, a2)?;
                     }
 
