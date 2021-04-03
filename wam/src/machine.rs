@@ -702,42 +702,53 @@ mod heap {
 
         pub fn get_value(
             &self,
-            address: Address,
+            mut address: Address,
         ) -> (Address, Value, impl Iterator<Item = Address> + '_) {
-            let entry = self.registry[address]
-                .as_ref()
-                .expect("Uninitialized Entry");
+            loop {
+                crate::log_trace!("Looking up memory at {}", address);
+                let entry = self.registry[address]
+                    .as_ref()
+                    .expect("Uninitialized Entry");
 
-            let (value, metadata) = match entry.value_type {
-                ValueType::Reference => {
-                    let (value, metadata) =
-                        ReferenceValue::decode(&self.tuple_memory, entry.tuple_address);
-                    (Value::reference(value), metadata)
-                }
-                ValueType::Structure => {
-                    let (value, metadata) =
-                        StructureValue::decode(&self.tuple_memory, entry.tuple_address);
-                    (Value::structure(value), metadata)
-                }
-                ValueType::Constant => {
-                    let (value, metadata) =
-                        ConstantValue::decode(&self.tuple_memory, entry.tuple_address);
-                    (Value::constant(value), metadata)
-                }
-                ValueType::Environment => {
-                    panic!("Expected value, found environment")
-                }
-            };
+                let (value, metadata) = match entry.value_type {
+                    ValueType::Reference => {
+                        let (value, metadata) =
+                            ReferenceValue::decode(&self.tuple_memory, entry.tuple_address);
 
-            (
-                metadata.registry_address,
-                value,
-                (metadata.first_term.0..)
-                    .take(metadata.arity.0 as usize)
-                    .map(move |tuple_address| {
-                        Address::from(self.tuple_memory[TupleAddress(tuple_address)])
-                    }),
-            )
+                        if value.0 != address {
+                            address = value.0;
+                            continue;
+                        }
+
+                        (Value::reference(value), metadata)
+                    }
+                    ValueType::Structure => {
+                        let (value, metadata) =
+                            StructureValue::decode(&self.tuple_memory, entry.tuple_address);
+                        (Value::structure(value), metadata)
+                    }
+                    ValueType::Constant => {
+                        let (value, metadata) =
+                            ConstantValue::decode(&self.tuple_memory, entry.tuple_address);
+                        (Value::constant(value), metadata)
+                    }
+                    ValueType::Environment => {
+                        panic!("Expected value, found environment")
+                    }
+                };
+
+                crate::log_trace!("Value: {:?}", value);
+
+                break (
+                    metadata.registry_address,
+                    value,
+                    (metadata.first_term.0..)
+                        .take(metadata.arity.0 as usize)
+                        .map(move |tuple_address| {
+                            Address::from(self.tuple_memory[TupleAddress(tuple_address)])
+                        }),
+                );
+            }
         }
 
         fn structure_term_addresses(&self, structure_address: Address) -> (TupleAddress, Arity) {
@@ -1449,7 +1460,7 @@ impl<'m> Machine<'m> {
                 )
                 .or_else(|UnificationFailure| self.backtrack()),
             Instruction::GetStructure { ai, f, n } => {
-                let (address, value) = self.deref_register(ai);
+                let (address, value) = self.get_register_value(ai);
                 match value {
                     Value::Reference(variable_address) => {
                         log_trace!("Writing structure {}/{}", f, n);
@@ -1473,7 +1484,7 @@ impl<'m> Machine<'m> {
                 }
                 Ok(())
             }
-            Instruction::GetConstant { ai, c } => match self.deref_register(ai).1 {
+            Instruction::GetConstant { ai, c } => match self.get_register_value(ai).1 {
                 Value::Reference(variable_address) => {
                     let value_address = self.new_constant(c);
                     self.memory
@@ -1544,7 +1555,9 @@ impl<'m> Machine<'m> {
                     ReadWriteMode::Read => {
                         let term_address = self.structure_iteration_state.read_next(&self.memory);
 
-                        match self.deref_address(term_address).1 {
+                        let value = self.memory.get_value(term_address).1;
+
+                        match value {
                             Value::Reference(variable_address) => {
                                 let value_address = self.new_constant(c);
                                 self.memory
@@ -1646,28 +1659,8 @@ impl<'m> Machine<'m> {
         }
     }
 
-    fn deref_register(&self, index: Ai) -> (Address, Value) {
-        self.deref_address(self.registers.load(index))
-    }
-
-    fn deref_address(&self, mut address: Address) -> (Address, Value) {
-        log_trace!("Looking up memory at {}", address);
-        let value = loop {
-            let value = self.memory.get_value(address).1;
-            address = if let Value::Reference(new_address) = value {
-                if new_address == address {
-                    break value;
-                } else {
-                    new_address
-                }
-            } else {
-                break value;
-            };
-            log_trace!("Looking up memory at {}", address);
-        };
-
-        log_trace!("Value: {:?}", value);
-
+    fn get_register_value(&self, index: Ai) -> (Address, Value) {
+        let (address, value, _) = self.memory.get_value(self.registers.load(index));
         (address, value)
     }
 
@@ -1742,25 +1735,25 @@ impl<'m> Machine<'m> {
 
     fn unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationFailure> {
         log_trace!("Unifying {} and {}", a1, a2);
-        let e1 = self.deref_address(a1);
-        let e2 = self.deref_address(a2);
-        log_trace!("Resolved to {:?} and {:?}", e1, e2);
-        match (e1, e2) {
-            ((a1, Value::Reference(_)), (a2, Value::Reference(_))) => {
+        let (a1, v1, _) = self.memory.get_value(a1);
+        let (a2, v2, _) = self.memory.get_value(a2);
+        log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
+        match (a1, v1, a2, v2) {
+            (a1, Value::Reference(_), a2, Value::Reference(_)) => {
                 self.memory.bind_variables(a1, a2);
                 Ok(())
             }
-            ((a1, Value::Reference(_)), (a2, value)) => {
+            (a1, Value::Reference(_), a2, value) => {
                 assert!(!matches!(value, Value::Reference(_)));
                 self.memory.bind_variable_to_value(a1, a2);
                 Ok(())
             }
-            ((a1, value), (a2, Value::Reference(_))) => {
+            (a1, value, a2, Value::Reference(_)) => {
                 assert!(!matches!(value, Value::Reference(_)));
                 self.memory.bind_variable_to_value(a2, a1);
                 Ok(())
             }
-            ((a1, Value::Structure(f1, n1)), (a2, Value::Structure(f2, n2))) => {
+            (a1, Value::Structure(f1, n1), a2, Value::Structure(f2, n2)) => {
                 if f1 == f2 && n1 == n2 {
                     let mut terms_1 = StructureIterationState::structure_reader(a1);
                     let mut terms_2 = StructureIterationState::structure_reader(a2);
@@ -1775,7 +1768,7 @@ impl<'m> Machine<'m> {
                     Err(UnificationFailure)
                 }
             }
-            ((_, Value::Constant(c1)), (_, Value::Constant(c2))) => {
+            (_, Value::Constant(c1), _, Value::Constant(c2)) => {
                 if c1 == c2 {
                     Ok(())
                 } else {
