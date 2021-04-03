@@ -20,12 +20,6 @@ pub struct Ai {
     ai: u8,
 }
 
-impl Ai {
-    fn iter(self, arity: Arity) -> impl Iterator<Item = Self> {
-        (self.ai..).take(arity.value()).map(|ai| Self { ai })
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct RegisterIndex(u8);
 
@@ -38,12 +32,6 @@ impl fmt::Debug for RegisterIndex {
 impl fmt::Display for RegisterIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:02X}", self.0)
-    }
-}
-
-impl RegisterIndex {
-    fn to_index(self) -> usize {
-        self.0 as usize
     }
 }
 
@@ -115,10 +103,6 @@ impl SerializableWrapper for Arity {
 
 impl Arity {
     const ZERO: Self = Self(0);
-
-    fn value(self) -> usize {
-        self.0 as usize
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -137,82 +121,6 @@ impl fmt::Display for Constant {
 }
 
 impl SerializableWrapper for Constant {
-    type Inner = u16;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Self(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Address(u16);
-
-impl fmt::Debug for Address {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Address({})", self)
-    }
-}
-
-impl fmt::Display for Address {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04X}", self.0)
-    }
-}
-
-impl From<EnvironmentAddress> for Address {
-    fn from(e: EnvironmentAddress) -> Self {
-        Self(e.0)
-    }
-}
-
-impl Address {
-    const NULL: Self = Address(u16::MAX);
-
-    pub fn offset(self, offset: u16) -> Self {
-        Self(self.0 + offset)
-    }
-}
-
-impl SerializableWrapper for Address {
-    type Inner = u16;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Self(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct EnvironmentAddress(u16);
-
-impl EnvironmentAddress {
-    const NULL: Self = Self(u16::MAX);
-
-    fn new(address: Address) -> Self {
-        Self(address.0)
-    }
-
-    fn nth_variable_address(self, index: Yn) -> Address {
-        Address(self.0 + Environment::HEADER_SIZE + index.yn as u16)
-    }
-
-    fn variable_addresses(self, count: Arity) -> impl Iterator<Item = Address> {
-        (0..count.0).map(move |yn| self.nth_variable_address(Yn { yn }))
-    }
-
-    fn after(self, arity: Arity) -> Address {
-        self.nth_variable_address(Yn { yn: arity.0 })
-    }
-}
-
-impl SerializableWrapper for EnvironmentAddress {
     type Inner = u16;
 
     fn from_inner(inner: Self::Inner) -> Self {
@@ -259,33 +167,874 @@ impl SerializableWrapper for ProgramCounter {
     }
 }
 
-pub struct Heap<'m>(&'m mut [u32]);
+mod heap {
+    use core::{fmt, panic};
 
-impl<'m, A: Into<Address>> std::ops::Index<A> for Heap<'m> {
-    type Output = u32;
+    use super::{Arity, Constant, Functor, ProgramCounter, Serializable, SerializableWrapper, Yn};
 
-    fn index(&self, index: A) -> &Self::Output {
-        &self.0[index.into().0 as usize]
+    #[derive(Debug)]
+    enum ValueType {
+        Reference,
+        Structure,
+        Constant,
+        Environment,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct Address(u16);
+
+    impl fmt::Debug for Address {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "Address({})", self)
+        }
+    }
+
+    impl fmt::Display for Address {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{:04X}", self.0)
+        }
+    }
+
+    impl From<u32> for Address {
+        fn from(word: u32) -> Self {
+            Self(
+                std::convert::TryInto::try_into(word)
+                    .unwrap_or_else(|_| panic!("Bad word: {}", word)),
+            )
+        }
+    }
+
+    impl Address {
+        pub const NULL: Self = Self(u16::MAX);
+    }
+
+    impl SerializableWrapper for Address {
+        type Inner = u16;
+
+        fn from_inner(inner: Self::Inner) -> Self {
+            Self(inner)
+        }
+
+        fn into_inner(self) -> Self::Inner {
+            self.0
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct TupleAddress(u16);
+
+    impl fmt::Debug for TupleAddress {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "TupleAddress({})", self)
+        }
+    }
+
+    impl fmt::Display for TupleAddress {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{:04X}", self.0)
+        }
+    }
+
+    impl std::ops::Add<u16> for TupleAddress {
+        type Output = Self;
+
+        fn add(self, rhs: u16) -> Self::Output {
+            Self(self.0 + rhs)
+        }
+    }
+
+    impl std::ops::Add<Arity> for TupleAddress {
+        type Output = Self;
+
+        fn add(self, rhs: Arity) -> Self::Output {
+            Self(self.0 + rhs.0 as u16)
+        }
+    }
+
+    impl std::ops::Add<Yn> for TupleAddress {
+        type Output = Self;
+
+        fn add(self, rhs: Yn) -> Self::Output {
+            Self(self.0 + rhs.yn as u16)
+        }
+    }
+
+    impl TupleAddress {
+        const NULL: Self = Self(u16::MAX);
+    }
+
+    #[derive(Debug)]
+    pub struct RegistryEntry {
+        value_type: ValueType,
+        tuple_address: TupleAddress,
+    }
+
+    struct Registry<'m>(&'m mut [Option<RegistryEntry>]);
+
+    impl<'m> Registry<'m> {
+        fn new_registry_entry(&mut self) -> (Address, &mut Option<RegistryEntry>) {
+            let (index, slot) = self
+                .0
+                .iter_mut()
+                .enumerate()
+                .find(|(_, entry)| entry.is_none())
+                .expect("No more registry entries");
+
+            let address = Address(core::convert::TryInto::try_into(index).expect("Invalid index"));
+
+            (address, slot)
+        }
+    }
+
+    impl<'m> std::ops::Index<Address> for Registry<'m> {
+        type Output = Option<RegistryEntry>;
+
+        fn index(&self, index: Address) -> &Self::Output {
+            &self.0[index.0 as usize]
+        }
+    }
+
+    // impl<'m> std::ops::IndexMut<TupleAddress> for TupleMemory<'m> {
+    //     fn index_mut(&mut self, index: TupleAddress) -> &mut Self::Output {
+    //         &mut self.0[index.0 as usize]
+    //     }
+    // }
+
+    struct TupleMemory<'m>(&'m mut [u32]);
+
+    impl<'m> std::ops::Index<TupleAddress> for TupleMemory<'m> {
+        type Output = u32;
+
+        fn index(&self, index: TupleAddress) -> &Self::Output {
+            &self.0[index.0 as usize]
+        }
+    }
+
+    impl<'m> std::ops::IndexMut<TupleAddress> for TupleMemory<'m> {
+        fn index_mut(&mut self, index: TupleAddress) -> &mut Self::Output {
+            &mut self.0[index.0 as usize]
+        }
+    }
+
+    struct TupleMetadata {
+        registry_address: Address,
+        first_term: TupleAddress,
+        arity: Arity,
+        next_tuple: TupleAddress,
+    }
+
+    trait Tuple: Sized {
+        const VALUE_TYPE: ValueType;
+        type Terms: ?Sized;
+
+        fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress)
+            -> (Self, TupleMetadata);
+
+        fn encode(
+            &self,
+            registry_address: Address,
+            tuple_memory: &mut TupleMemory,
+            tuple_address: TupleAddress,
+            terms: &Self::Terms,
+        ) -> TupleAddress;
+    }
+
+    #[derive(Debug)]
+    pub struct ReferenceValue(Address);
+
+    impl Tuple for ReferenceValue {
+        const VALUE_TYPE: ValueType = ValueType::Reference;
+        type Terms = ();
+
+        fn decode(
+            tuple_memory: &TupleMemory,
+            tuple_address: TupleAddress,
+        ) -> (Self, TupleMetadata) {
+            let [a1, a0, r1, r0] = tuple_memory[tuple_address].to_be_bytes();
+
+            (
+                Self(Address::from_be_bytes([r1, r0])),
+                TupleMetadata {
+                    registry_address: Address::from_be_bytes([a1, a0]),
+                    first_term: TupleAddress::NULL,
+                    arity: Arity::ZERO,
+                    next_tuple: tuple_address + 1,
+                },
+            )
+        }
+
+        fn encode(
+            &self,
+            registry_address: Address,
+            tuple_memory: &mut TupleMemory,
+            tuple_address: TupleAddress,
+            _: &(),
+        ) -> TupleAddress {
+            let Self(r) = self;
+
+            let [a1, a0] = registry_address.into_be_bytes();
+            let [r1, r0] = r.into_be_bytes();
+
+            tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, r1, r0]);
+
+            tuple_address + 1
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct StructureValue(Functor, Arity);
+
+    impl Tuple for StructureValue {
+        const VALUE_TYPE: ValueType = ValueType::Structure;
+        type Terms = ();
+
+        fn decode(
+            tuple_memory: &TupleMemory,
+            tuple_address: TupleAddress,
+        ) -> (Self, TupleMetadata) {
+            let [a1, a0, f1, f0] = tuple_memory[tuple_address].to_be_bytes();
+            let [z2, z1, z0, n] = tuple_memory[tuple_address + 1].to_be_bytes();
+            assert_eq!(z2, 0);
+            assert_eq!(z1, 0);
+            assert_eq!(z0, 0);
+
+            let arity = Arity(n);
+            let first_term = tuple_address + 2;
+            (
+                Self(Functor::from_be_bytes([f1, f0]), arity),
+                TupleMetadata {
+                    registry_address: Address::from_be_bytes([a1, a0]),
+                    first_term,
+                    arity,
+                    next_tuple: first_term + arity,
+                },
+            )
+        }
+
+        fn encode(
+            &self,
+            registry_address: Address,
+            tuple_memory: &mut TupleMemory,
+            tuple_address: TupleAddress,
+            _: &(),
+        ) -> TupleAddress {
+            let Self(f, n) = self;
+
+            let [a1, a0] = registry_address.into_be_bytes();
+            let [f1, f0] = f.into_be_bytes();
+
+            tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, f1, f0]);
+            tuple_memory[tuple_address + 1] = u32::from_be_bytes([0, 0, 0, n.0]);
+
+            let first_term: TupleAddress = tuple_address + 2;
+
+            for term_address in (first_term.0..).take(n.0 as usize).map(TupleAddress) {
+                tuple_memory[term_address] = u32::MAX;
+            }
+
+            first_term + *n
+        }
+    }
+
+    #[derive(Debug)]
+    struct ConstantValue(Constant);
+
+    impl Tuple for ConstantValue {
+        const VALUE_TYPE: ValueType = ValueType::Constant;
+        type Terms = ();
+
+        fn decode(
+            tuple_memory: &TupleMemory,
+            tuple_address: TupleAddress,
+        ) -> (Self, TupleMetadata) {
+            let [a1, a0, c1, c0] = tuple_memory[tuple_address].to_be_bytes();
+            (
+                Self(Constant::from_be_bytes([c1, c0])),
+                TupleMetadata {
+                    registry_address: Address::from_be_bytes([a1, a0]),
+                    first_term: TupleAddress::NULL,
+                    arity: Arity(0),
+                    next_tuple: tuple_address + 1,
+                },
+            )
+        }
+
+        fn encode(
+            &self,
+            registry_address: Address,
+            tuple_memory: &mut TupleMemory,
+            tuple_address: TupleAddress,
+            _: &(),
+        ) -> TupleAddress {
+            let Self(c) = self;
+
+            let [a1, a0] = registry_address.into_be_bytes();
+            let [c1, c0] = c.into_be_bytes();
+
+            tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, c1, c0]);
+
+            tuple_address + 1
+        }
+    }
+
+    struct FirstEnvironmentWord {
+        registry_address: Address,
+        continuation_environment: Address,
+    }
+
+    impl FirstEnvironmentWord {
+        fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
+            let [a1, a0, ce1, ce0] = tuple_memory[tuple_address].to_be_bytes();
+            Self {
+                registry_address: Address::from_be_bytes([a1, a0]),
+                continuation_environment: Address::from_be_bytes([ce1, ce0]),
+            }
+        }
+
+        fn encode(
+            &self,
+            registry_address: Address,
+            tuple_memory: &mut TupleMemory,
+            tuple_address: TupleAddress,
+        ) {
+            let [a1, a0] = registry_address.into_be_bytes();
+            let [ce1, ce0] = self.continuation_environment.into_be_bytes();
+
+            tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, ce1, ce0]);
+        }
+    }
+
+    struct SecondEnvironmentWord {
+        continuation_point: ProgramCounter,
+        number_of_active_permanent_variables: Arity,
+        number_of_permanent_variables: Arity,
+    }
+
+    impl SecondEnvironmentWord {
+        fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
+            let [cp1, cp0, na, np] = tuple_memory[tuple_address + 1].to_be_bytes();
+
+            Self {
+                continuation_point: ProgramCounter::from_be_bytes([cp1, cp0]),
+                number_of_active_permanent_variables: Arity(na),
+                number_of_permanent_variables: Arity(np),
+            }
+        }
+
+        fn encode(&self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
+            let [cp1, cp0] = self.continuation_point.into_be_bytes();
+            let na = self.number_of_active_permanent_variables.0;
+            let np = self.number_of_permanent_variables.0;
+
+            tuple_memory[tuple_address + 1] = u32::from_be_bytes([cp1, cp0, na, np]);
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Environment {
+        continuation_environment: Address,
+        continuation_point: ProgramCounter,
+        number_of_active_permanent_variables: Arity,
+        number_of_permanent_variables: Arity,
+    }
+
+    impl Tuple for Environment {
+        const VALUE_TYPE: ValueType = ValueType::Environment;
+        type Terms = [Address];
+
+        fn decode(
+            tuple_memory: &TupleMemory,
+            tuple_address: TupleAddress,
+        ) -> (Self, TupleMetadata) {
+            let FirstEnvironmentWord {
+                registry_address,
+                continuation_environment,
+            } = FirstEnvironmentWord::decode(tuple_memory, tuple_address);
+
+            let SecondEnvironmentWord {
+                continuation_point,
+                number_of_active_permanent_variables,
+                number_of_permanent_variables,
+            } = SecondEnvironmentWord::decode(tuple_memory, tuple_address);
+
+            let first_term = tuple_address + 2;
+            (
+                Self {
+                    continuation_environment,
+                    continuation_point,
+                    number_of_active_permanent_variables,
+                    number_of_permanent_variables,
+                },
+                TupleMetadata {
+                    registry_address,
+                    first_term,
+                    arity: number_of_active_permanent_variables,
+                    next_tuple: first_term + number_of_permanent_variables,
+                },
+            )
+        }
+
+        fn encode(
+            &self,
+            registry_address: Address,
+            tuple_memory: &mut TupleMemory,
+            tuple_address: TupleAddress,
+            terms: &[Address],
+        ) -> TupleAddress {
+            assert!(
+                terms.is_empty() || (terms.len() == self.number_of_permanent_variables.0 as usize)
+            );
+
+            FirstEnvironmentWord {
+                registry_address,
+                continuation_environment: self.continuation_environment,
+            }
+            .encode(registry_address, tuple_memory, tuple_address);
+
+            SecondEnvironmentWord {
+                continuation_point: self.continuation_point,
+                number_of_active_permanent_variables: self.number_of_active_permanent_variables,
+                number_of_permanent_variables: self.number_of_permanent_variables,
+            }
+            .encode(tuple_memory, tuple_address);
+
+            let first_term_address: TupleAddress = tuple_address + 2;
+
+            for (tuple_address, value) in (first_term_address.0..)
+                .map(TupleAddress)
+                .zip(
+                    terms
+                        .iter()
+                        .copied()
+                        .chain(core::iter::repeat(Address::NULL)),
+                )
+                .take(self.number_of_permanent_variables.0 as usize)
+            {
+                tuple_memory[tuple_address] = value.0 as u32;
+            }
+
+            first_term_address + self.number_of_active_permanent_variables
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum Value {
+        Reference(Address),
+        Structure(Functor, Arity),
+        Constant(Constant),
+    }
+
+    impl Value {
+        fn reference(ReferenceValue(address): ReferenceValue) -> Self {
+            Self::Reference(address)
+        }
+
+        fn structure(StructureValue(f, n): StructureValue) -> Self {
+            Self::Structure(f, n)
+        }
+
+        fn constant(ConstantValue(c): ConstantValue) -> Self {
+            Self::Constant(c)
+        }
+    }
+
+    pub struct Heap<'m> {
+        registry: Registry<'m>,
+        tuple_memory: TupleMemory<'m>,
+        tuple_end: TupleAddress,
+        current_environment: Address,
+    }
+
+    impl<'m> Heap<'m> {
+        pub fn init(memory: &'m mut [u32]) -> Self {
+            let memory_size = memory.len();
+            let (registry, tuple_memory) = memory.split_at_mut(memory_size / 2);
+            let (_, registry, _) = unsafe { registry.align_to_mut() };
+
+            for entry in registry.iter_mut() {
+                unsafe { core::ptr::write(entry, None) };
+            }
+
+            Self {
+                registry: Registry(registry),
+                tuple_memory: TupleMemory(tuple_memory),
+                tuple_end: TupleAddress(0),
+                current_environment: Address::NULL,
+            }
+        }
+
+        fn new_value<T: Tuple + core::fmt::Debug>(
+            &mut self,
+            factory: impl FnOnce(Address) -> T,
+            terms: &T::Terms,
+        ) -> Address {
+            let (address, registry_entry) = self.registry.new_registry_entry();
+
+            let tuple_address = self.tuple_end;
+
+            let value = factory(address);
+
+            crate::log_trace!("New value at {}: {:?}", tuple_address, value);
+
+            self.tuple_end = value.encode(address, &mut self.tuple_memory, tuple_address, terms);
+
+            crate::log_trace!("h = {}", self.tuple_end);
+
+            *registry_entry = Some(RegistryEntry {
+                value_type: T::VALUE_TYPE,
+                tuple_address,
+            });
+
+            address
+        }
+
+        pub fn new_variable(&mut self) -> Address {
+            self.new_value(ReferenceValue, &())
+        }
+
+        pub fn new_structure(&mut self, f: Functor, n: Arity) -> Address {
+            self.new_value(|_| StructureValue(f, n), &())
+        }
+
+        pub fn new_constant(&mut self, c: Constant) -> Address {
+            self.new_value(|_| ConstantValue(c), &())
+        }
+
+        pub fn get_value(
+            &self,
+            address: Address,
+        ) -> (Address, Value, impl Iterator<Item = Address> + '_) {
+            let entry = self.registry[address]
+                .as_ref()
+                .expect("Uninitialized Entry");
+
+            let (value, metadata) = match entry.value_type {
+                ValueType::Reference => {
+                    let (value, metadata) =
+                        ReferenceValue::decode(&self.tuple_memory, entry.tuple_address);
+                    (Value::reference(value), metadata)
+                }
+                ValueType::Structure => {
+                    let (value, metadata) =
+                        StructureValue::decode(&self.tuple_memory, entry.tuple_address);
+                    (Value::structure(value), metadata)
+                }
+                ValueType::Constant => {
+                    let (value, metadata) =
+                        ConstantValue::decode(&self.tuple_memory, entry.tuple_address);
+                    (Value::constant(value), metadata)
+                }
+                ValueType::Environment => {
+                    panic!("Expected value, found environment")
+                }
+            };
+
+            (
+                metadata.registry_address,
+                value,
+                (metadata.first_term.0..)
+                    .take(metadata.arity.0 as usize)
+                    .map(move |tuple_address| {
+                        Address::from(self.tuple_memory[TupleAddress(tuple_address)])
+                    }),
+            )
+        }
+
+        fn structure_term_addresses(&self, structure_address: Address) -> (TupleAddress, Arity) {
+            let registry_entry = self.registry[structure_address]
+                .as_ref()
+                .expect("Structure not found");
+
+            match registry_entry.value_type {
+                ValueType::Structure => {
+                    let (StructureValue(_f, n), metadata) =
+                        StructureValue::decode(&self.tuple_memory, registry_entry.tuple_address);
+                    assert_eq!(structure_address, metadata.registry_address);
+                    (metadata.first_term, n)
+                }
+                ValueType::Environment => {
+                    let (environment, metadata) =
+                        Environment::decode(&self.tuple_memory, registry_entry.tuple_address);
+                    assert_eq!(structure_address, metadata.registry_address);
+                    (
+                        metadata.first_term,
+                        environment.number_of_active_permanent_variables,
+                    )
+                }
+                _ => panic!("Invalid value type: {:?}", registry_entry.value_type),
+            }
+        }
+
+        fn get_environment(&self) -> (Environment, TupleAddress, TupleMetadata) {
+            let entry = self.registry[self.current_environment]
+                .as_ref()
+                .expect("No Entry");
+            assert!(matches!(&entry.value_type, ValueType::Environment));
+
+            let (environment, metadata) =
+                Environment::decode(&self.tuple_memory, entry.tuple_address);
+            assert_eq!(metadata.registry_address, self.current_environment);
+
+            (environment, entry.tuple_address, metadata)
+        }
+
+        fn get_permanent_variable_address(&self, yn: Yn) -> TupleAddress {
+            let (environment, _, metadata) = self.get_environment();
+
+            assert!(yn.yn < environment.number_of_active_permanent_variables.0);
+
+            metadata.first_term + yn
+        }
+
+        pub fn load_permanent_variable(&self, yn: Yn) -> Address {
+            let term_address = self.get_permanent_variable_address(yn);
+
+            Address::from(self.tuple_memory[term_address])
+        }
+
+        pub fn store_permanent_variable(&mut self, yn: Yn, address: Address) {
+            let term_address = self.get_permanent_variable_address(yn);
+
+            self.tuple_memory[term_address] = address.0 as u32;
+        }
+
+        fn verify_is_free_variable(&self, address: Address) -> TupleAddress {
+            let entry = self.registry[address].as_ref().expect("No Entry");
+
+            assert!(matches!(&entry.value_type, ValueType::Reference));
+            let (reference, metadata) =
+                ReferenceValue::decode(&self.tuple_memory, entry.tuple_address);
+
+            assert_eq!(metadata.registry_address, address);
+            assert_eq!(reference.0, address);
+
+            entry.tuple_address
+        }
+
+        pub fn bind_variable_to_value(
+            &mut self,
+            variable_address: Address,
+            value_address: Address,
+        ) {
+            crate::log_trace!(
+                "Binding memory {} to value at {}",
+                variable_address,
+                value_address
+            );
+
+            let tuple_address = self.verify_is_free_variable(variable_address);
+
+            // TODO: add to trail
+            ReferenceValue(value_address).encode(
+                variable_address,
+                &mut self.tuple_memory,
+                tuple_address,
+                &(),
+            );
+        }
+
+        pub fn bind_variables(&mut self, a1: Address, a2: Address) {
+            let t1 = self.verify_is_free_variable(a1);
+            let t2 = self.verify_is_free_variable(a2);
+
+            if t1 < t2 {
+                self.bind_variable_to_value(a2, a1)
+            } else {
+                self.bind_variable_to_value(a1, a2)
+            }
+        }
+
+        pub fn allocate(
+            &mut self,
+            number_of_permanent_variables: Arity,
+            continuation_point: ProgramCounter,
+            terms: &[Address],
+        ) {
+            let continuation_environment = self.current_environment;
+
+            let new_environment = self.new_value(
+                |_| Environment {
+                    continuation_environment,
+                    continuation_point,
+                    number_of_active_permanent_variables: number_of_permanent_variables,
+                    number_of_permanent_variables,
+                },
+                terms,
+            );
+            self.current_environment = new_environment;
+        }
+
+        pub fn trim(&mut self, n: Arity) {
+            let (
+                Environment {
+                    continuation_point,
+                    number_of_active_permanent_variables,
+                    number_of_permanent_variables,
+                    ..
+                },
+                tuple_address,
+                _,
+            ) = self.get_environment();
+            assert!(number_of_active_permanent_variables >= n);
+
+            let number_of_active_permanent_variables =
+                Arity(number_of_active_permanent_variables.0 - n.0);
+
+            SecondEnvironmentWord {
+                continuation_point,
+                number_of_active_permanent_variables,
+                number_of_permanent_variables,
+            }
+            .encode(&mut self.tuple_memory, tuple_address)
+        }
+
+        pub fn deallocate(&mut self) -> ProgramCounter {
+            let Environment {
+                continuation_environment,
+                continuation_point,
+                ..
+            } = self.get_environment().0;
+
+            self.current_environment = continuation_environment;
+
+            crate::log_trace!("E => {}", self.current_environment);
+
+            continuation_point
+        }
+
+        pub fn solution_registers(&self) -> impl Iterator<Item = Address> + '_ {
+            let (environment, _, metadata) = self.get_environment();
+            (metadata.first_term.0..)
+                .map(TupleAddress)
+                .take(environment.number_of_permanent_variables.0 as usize)
+                .map(move |tuple_address| Address::from(self.tuple_memory[tuple_address]))
+        }
+    }
+
+    pub mod structure_iteration {
+        use super::{Address, Arity, Heap, TupleAddress};
+
+        pub enum ReadWriteMode {
+            Read,
+            Write,
+        }
+
+        struct InnerState {
+            read_write_mode: ReadWriteMode,
+            structure_address: Address,
+            index: Arity,
+        }
+
+        #[derive(Default)]
+        pub struct StructureIterationState(Option<InnerState>);
+
+        impl StructureIterationState {
+            pub fn read_write_mode(&self) -> &ReadWriteMode {
+                &self
+                    .0
+                    .as_ref()
+                    .expect("Not iterating over state!")
+                    .read_write_mode
+            }
+
+            pub fn structure_reader(structure_address: Address) -> Self {
+                Self(Some(InnerState {
+                    read_write_mode: ReadWriteMode::Read,
+                    structure_address,
+                    index: Arity::ZERO,
+                }))
+            }
+
+            pub fn start_reading_structure(&mut self, structure_address: Address) {
+                assert!(matches!(&self.0, None));
+                *self = Self::structure_reader(structure_address);
+            }
+
+            pub fn start_writing(&mut self, structure_address: Address) {
+                assert!(matches!(&self.0, None));
+                *self = Self(Some(InnerState {
+                    read_write_mode: ReadWriteMode::Write,
+                    structure_address,
+                    index: Arity::ZERO,
+                }));
+            }
+
+            fn check_done(&mut self, index: Arity, arity: Arity) {
+                if index == arity {
+                    crate::log_trace!("Finished iterating over structure");
+                    self.0 = None;
+                }
+            }
+
+            fn with_next<'m, T, H>(
+                &mut self,
+                heap: H,
+                action: impl FnOnce(H, TupleAddress) -> T,
+            ) -> T
+            where
+                H: core::ops::Deref<Target = Heap<'m>>,
+            {
+                let inner_state = self.0.as_mut().expect("Not reading or writing");
+
+                let (first_term, arity) =
+                    heap.structure_term_addresses(inner_state.structure_address);
+
+                if inner_state.index == arity {
+                    panic!("No more terms");
+                }
+
+                let term_address = first_term + inner_state.index;
+
+                inner_state.index.0 += 1;
+
+                let result = action(heap, term_address);
+
+                let index = inner_state.index;
+
+                self.check_done(index, arity);
+
+                result
+            }
+
+            pub fn read_next(&mut self, heap: &Heap) -> Address {
+                self.with_next(heap, |heap, address| {
+                    Address::from(heap.tuple_memory[address])
+                })
+            }
+
+            pub fn write_next(&mut self, heap: &mut Heap, address: Address) {
+                self.with_next(heap, |heap, term_address| {
+                    crate::log_trace!("Writing {} to {}", address, term_address);
+                    heap.tuple_memory[term_address] = address.0 as u32;
+                })
+            }
+
+            pub fn skip(&mut self, heap: &Heap, n: Arity) {
+                let inner_state = self.0.as_mut().expect("Not reading or writing");
+
+                let arity = heap
+                    .structure_term_addresses(inner_state.structure_address)
+                    .1;
+
+                inner_state.index.0 += n.0;
+
+                if inner_state.index > arity {
+                    panic!("No more terms to read");
+                }
+
+                let index = inner_state.index;
+
+                self.check_done(index, arity);
+            }
+        }
     }
 }
 
-impl<'m, A: Into<Address>> std::ops::IndexMut<A> for Heap<'m> {
-    fn index_mut(&mut self, index: A) -> &mut Self::Output {
-        &mut self.0[index.into().0 as usize]
-    }
-}
-
-impl<'m> Heap<'m> {
-    fn range(&self, start: impl Into<Address>, count: usize) -> &[u32] {
-        let start = start.into().0 as usize;
-        &self.0[start..(start + count)]
-    }
-}
-
-const REFERENCE_HEADER: u8 = b'R';
-const STRUCTURE_HEADER: u8 = b'S';
-const CONSTANT_HEADER: u8 = b'C';
-const ENVIRONMENT_HEADER: u8 = b'E';
+use heap::{
+    structure_iteration::{ReadWriteMode, StructureIterationState},
+    Heap,
+};
+pub use heap::{Address, Value};
 
 struct BadMemoryWord(u32);
 
@@ -310,230 +1059,6 @@ impl fmt::Debug for BadMemoryRange<'_> {
 #[derive(Debug)]
 pub enum Error<'m> {
     BadInstruction(ProgramCounter, BadMemoryRange<'m>),
-    BadValue(Address, BadMemoryRange<'m>),
-    BadEnvironment(EnvironmentAddress, BadMemoryRange<'m>),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Value {
-    Reference(Address),
-    Structure(Functor, Arity),
-    Constant(Constant),
-}
-
-impl Value {
-    fn decode<'a, 'm>(memory: &'a Heap<'m>, address: Address) -> Result<Self, Error<'a>> {
-        Ok(match memory[address].to_be_bytes() {
-            [REFERENCE_HEADER, 0, r1, r0] => Value::Reference(Address::from_be_bytes([r1, r0])),
-            [STRUCTURE_HEADER, n, f1, f0] => {
-                Value::Structure(Functor::from_be_bytes([f1, f0]), Arity(n))
-            }
-            [CONSTANT_HEADER, 0, c1, c0] => Value::Constant(Constant::from_be_bytes([c1, c0])),
-            _ => {
-                return Err(Error::BadValue(
-                    address,
-                    BadMemoryRange(memory.range(address, 1)),
-                ))
-            }
-        })
-    }
-
-    fn encode(self) -> u32 {
-        match self {
-            Value::Reference(r) => {
-                let [r1, r0] = r.into_be_bytes();
-                u32::from_be_bytes([REFERENCE_HEADER, 0, r1, r0])
-            }
-            Value::Structure(f, n) => {
-                let [f1, f0] = f.into_be_bytes();
-                u32::from_be_bytes([STRUCTURE_HEADER, n.0, f1, f0])
-            }
-            Value::Constant(c) => {
-                let [c1, c0] = c.into_be_bytes();
-                u32::from_be_bytes([CONSTANT_HEADER, 0, c1, c0])
-            }
-        }
-    }
-}
-
-mod structure_iteration {
-    use super::{log_trace, Address, Arity, Heap};
-
-    pub enum ReadWriteMode {
-        None,
-        Read,
-        Write,
-    }
-
-    pub struct StructureIterationState {
-        read_write_mode: ReadWriteMode,
-        first_term: Address,
-        index: Arity,
-        arity: Arity,
-    }
-
-    impl Default for StructureIterationState {
-        fn default() -> Self {
-            Self {
-                read_write_mode: ReadWriteMode::None,
-                first_term: Address::NULL,
-                index: Arity::ZERO,
-                arity: Arity::ZERO,
-            }
-        }
-    }
-
-    impl StructureIterationState {
-        pub fn read_write_mode(&self) -> &ReadWriteMode {
-            &self.read_write_mode
-        }
-
-        pub fn struct_reader(header_address: Address, arity: Arity) -> Self {
-            Self {
-                read_write_mode: ReadWriteMode::Read,
-                first_term: header_address.offset(1),
-                index: Arity::ZERO,
-                arity,
-            }
-        }
-
-        pub fn start_reading_struct(&mut self, header_address: Address, arity: Arity) {
-            assert!(matches!(&self.read_write_mode, ReadWriteMode::None));
-            *self = Self::struct_reader(header_address, arity);
-        }
-
-        pub fn start_writing(&mut self, first_term: Address, arity: Arity) {
-            assert!(matches!(&self.read_write_mode, ReadWriteMode::None));
-            *self = Self {
-                read_write_mode: ReadWriteMode::Write,
-                first_term,
-                index: Arity::ZERO,
-                arity,
-            };
-        }
-
-        fn check_done(&mut self) {
-            if self.index == self.arity {
-                log_trace!("Finished reading structure");
-                self.read_write_mode = ReadWriteMode::None;
-            }
-        }
-
-        fn with_next<T>(&mut self, action: impl FnOnce(Address) -> T) -> T {
-            if self.index == self.arity {
-                panic!("No more terms");
-            }
-
-            let address = self.first_term.offset(self.index.0 as u16);
-
-            self.index = Arity(self.index.0 + 1);
-
-            let result = action(address);
-
-            self.check_done();
-
-            result
-        }
-
-        pub fn read_next(&mut self, memory: &Heap) -> Address {
-            self.with_next(|address| Address(memory[address] as u16))
-        }
-
-        pub fn write_next(&mut self, memory: &mut Heap, address: Address) {
-            self.with_next(|term_address| {
-                log_trace!("Writing {} to {}", address, term_address);
-                memory[term_address] = address.0 as u32;
-            })
-        }
-
-        pub fn skip(&mut self, n: Arity) {
-            assert!(matches!(&self.read_write_mode, ReadWriteMode::Read));
-
-            self.index = Arity(self.index.0 + n.0);
-            if self.index > self.arity {
-                panic!("No more terms to read");
-            }
-
-            self.check_done();
-        }
-    }
-}
-
-use structure_iteration::{ReadWriteMode, StructureIterationState};
-
-struct Environment {
-    continuation_environment: EnvironmentAddress,
-    continuation_point: ProgramCounter,
-    number_of_active_permanent_variables: Arity,
-    number_of_permanent_variables: Arity,
-}
-
-impl Environment {
-    const HEADER_SIZE: u16 = 2;
-
-    fn decode<'a, 'm>(
-        memory: &'a Heap<'m>,
-        e: EnvironmentAddress,
-    ) -> Result<(Address, Self), Error<'a>> {
-        Ok(match memory[e].to_be_bytes() {
-            [ENVIRONMENT_HEADER, 0, a, n] => {
-                let [ce1, ce0, cp1, cp0] = memory[Address(e.0 + 1)].to_be_bytes();
-                (
-                    e.after(Arity(n)),
-                    Environment {
-                        continuation_environment: EnvironmentAddress::from_be_bytes([ce1, ce0]),
-                        continuation_point: ProgramCounter::from_be_bytes([cp1, cp0]),
-                        number_of_active_permanent_variables: Arity(a),
-                        number_of_permanent_variables: Arity(n),
-                    },
-                )
-            }
-            _ => return Err(Error::BadEnvironment(e, BadMemoryRange(memory.range(e, 1)))),
-        })
-    }
-
-    fn encode(self, memory: &mut Heap<'_>, e: EnvironmentAddress) -> Address {
-        memory[e] = u32::from_be_bytes([
-            ENVIRONMENT_HEADER,
-            0,
-            self.number_of_active_permanent_variables.0,
-            self.number_of_permanent_variables.0,
-        ]);
-        let [ce1, ce0] = self.continuation_environment.0.into_be_bytes();
-        let [cp1, cp0] = self.continuation_point.into_be_bytes();
-        memory[Address(e.0 + 1)] = u32::from_be_bytes([ce1, ce0, cp1, cp0]);
-
-        e.after(self.number_of_permanent_variables)
-    }
-
-    fn read_variable(memory: &Heap<'_>, e: EnvironmentAddress, yn: Yn) -> Address {
-        let environment = Self::decode(memory, e).unwrap().1;
-        assert!(yn.yn < environment.number_of_permanent_variables.0);
-        Address(memory[e.nth_variable_address(yn)] as u16)
-    }
-
-    fn write_variable(memory: &mut Heap<'_>, e: EnvironmentAddress, yn: Yn, address: Address) {
-        let environment = Self::decode(memory, e).unwrap().1;
-        assert!(yn.yn < environment.number_of_permanent_variables.0);
-        memory[e.nth_variable_address(yn)] = address.0 as u32;
-    }
-
-    fn trim(memory: &mut Heap<'_>, e: EnvironmentAddress, n: Arity) {
-        let mut environment = Self::decode(memory, e).unwrap().1;
-        environment.number_of_active_permanent_variables = Arity(
-            environment
-                .number_of_active_permanent_variables
-                .0
-                .checked_sub(n.0)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Too many variables trimmed: {} > {}",
-                        n, environment.number_of_active_permanent_variables
-                    )
-                }),
-        );
-        environment.encode(memory, e);
-    }
 }
 
 #[derive(Debug)]
@@ -749,9 +1274,9 @@ struct RegisterBlock([Address; 32]);
 
 impl RegisterBlock {
     fn load(&self, index: impl Into<RegisterIndex>) -> Address {
-        let index = index.into();
+        let index = index.into().0 as usize;
         log_trace!("Loading Register {}", index);
-        *self.0.get(index.to_index()).unwrap_or_else(|| {
+        *self.0.get(index).unwrap_or_else(|| {
             panic!(
                 "Register Index {} out of range ({})",
                 index,
@@ -761,12 +1286,16 @@ impl RegisterBlock {
     }
 
     fn store(&mut self, index: impl Into<RegisterIndex>, address: Address) {
-        let index = index.into();
+        let index = index.into().0 as usize;
         log_trace!("Storing {} in Register {}", address, index);
         let len = (&self.0[..]).len();
-        *self.0.get_mut(index.to_index()).unwrap_or_else(|| {
+        *self.0.get_mut(index).unwrap_or_else(|| {
             panic!("Register Index {} out of range ({})", index, len);
         }) = address;
+    }
+
+    fn query_registers(&self, n: Arity) -> &[Address] {
+        &self.0[0..n.0 as usize]
     }
 }
 
@@ -803,8 +1332,6 @@ pub struct Machine<'m> {
     structure_iteration_state: StructureIterationState,
     pc: ProgramCounter,
     cp: ProgramCounter,
-    h: Address,
-    e: EnvironmentAddress,
     argument_count: Arity,
     registers: RegisterBlock,
     program: &'m [u32],
@@ -825,13 +1352,11 @@ impl<'m> Machine<'m> {
             structure_iteration_state: StructureIterationState::default(),
             pc: ProgramCounter(0),
             cp: ProgramCounter::NULL,
-            h: Address(0),
-            e: EnvironmentAddress::NULL,
             argument_count: Arity::ZERO,
             registers: RegisterBlock([Address::NULL; 32]),
             program,
             query,
-            memory: Heap(memory),
+            memory: Heap::init(memory),
         };
 
         let execution_result = machine.continue_execution();
@@ -875,7 +1400,7 @@ impl<'m> Machine<'m> {
             Instruction::PutVariableYn { ai, yn } => {
                 let address = self.new_variable();
                 self.registers.store(ai, address);
-                Environment::write_variable(&mut self.memory, self.e, yn, address);
+                self.memory.store_permanent_variable(yn, address);
                 Ok(())
             }
             Instruction::PutValueXn { ai, xn } => {
@@ -884,7 +1409,7 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::PutValueYn { ai, yn } => {
-                let address = Environment::read_variable(&self.memory, self.e, yn);
+                let address = self.memory.load_permanent_variable(yn);
                 self.registers.store(ai, address);
                 Ok(())
             }
@@ -899,7 +1424,7 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::PutVoid { ai, n } => {
-                for ai in ai.iter(n) {
+                for ai in (ai.ai..).take(n.0 as usize).map(|ai| Ai { ai }) {
                     let address = self.new_variable();
                     self.registers.store(ai, address);
                 }
@@ -911,7 +1436,7 @@ impl<'m> Machine<'m> {
             }
             Instruction::GetVariableYn { ai, yn } => {
                 let address = self.registers.load(ai);
-                Environment::write_variable(&mut self.memory, self.e, yn, address);
+                self.memory.store_permanent_variable(yn, address);
                 Ok(())
             }
             Instruction::GetValueXn { ai, xn } => self
@@ -919,26 +1444,27 @@ impl<'m> Machine<'m> {
                 .or_else(|UnificationFailure| self.backtrack()),
             Instruction::GetValueYn { ai, yn } => self
                 .unify(
-                    Environment::read_variable(&self.memory, self.e, yn),
+                    self.memory.load_permanent_variable(yn),
                     self.registers.load(ai),
                 )
                 .or_else(|UnificationFailure| self.backtrack()),
             Instruction::GetStructure { ai, f, n } => {
                 let (address, value) = self.deref_register(ai);
                 match value {
-                    Value::Reference(r) => {
+                    Value::Reference(variable_address) => {
                         log_trace!("Writing structure {}/{}", f, n);
 
-                        let header_address = self.new_structure(f, n);
+                        let value_address = self.new_structure(f, n);
 
-                        self.bind_variable(r, header_address);
+                        self.memory
+                            .bind_variable_to_value(variable_address, value_address);
                     }
                     Value::Structure(found_f, found_n) => {
                         if f == found_f && n == found_n {
                             log_trace!("Reading structure {}/{}", f, n);
 
                             self.structure_iteration_state
-                                .start_reading_struct(address, n);
+                                .start_reading_structure(address);
                         } else {
                             self.backtrack()?;
                         }
@@ -948,8 +1474,10 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::GetConstant { ai, c } => match self.deref_register(ai).1 {
-                Value::Reference(address) => {
-                    self.bind_to_constant(address, c);
+                Value::Reference(variable_address) => {
+                    let value_address = self.new_constant(c);
+                    self.memory
+                        .bind_variable_to_value(variable_address, value_address);
                     Ok(())
                 }
                 Value::Constant(rc) if rc == c => Ok(()),
@@ -964,7 +1492,7 @@ impl<'m> Machine<'m> {
             }
             Instruction::SetVariableYn { yn } => {
                 let address = self.new_variable();
-                Environment::write_variable(&mut self.memory, self.e, yn, address);
+                self.memory.store_permanent_variable(yn, address);
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
                 Ok(())
@@ -976,7 +1504,7 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::SetValueYn { yn } => {
-                let address = Environment::read_variable(&self.memory, self.e, yn);
+                let address = self.memory.load_permanent_variable(yn);
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
                 Ok(())
@@ -996,26 +1524,31 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::UnifyVariableXn { xn } => {
-                self.unify_variable(xn, |this, xn, address| this.registers.store(xn, address))
+                self.unify_variable(xn, |this, xn, address| this.registers.store(xn, address));
+                Ok(())
             }
-            Instruction::UnifyVariableYn { yn } => self.unify_variable(yn, |this, yn, address| {
-                Environment::write_variable(&mut this.memory, this.e, yn, address)
-            }),
+            Instruction::UnifyVariableYn { yn } => {
+                self.unify_variable(yn, |this, yn, address| {
+                    this.memory.store_permanent_variable(yn, address);
+                });
+                Ok(())
+            }
             Instruction::UnifyValueXn { xn } => {
                 self.unify_value(xn, |this, xn| this.registers.load(xn))
             }
-            Instruction::UnifyValueYn { yn } => self.unify_value(yn, |this, yn| {
-                Environment::read_variable(&this.memory, this.e, yn)
-            }),
+            Instruction::UnifyValueYn { yn } => {
+                self.unify_value(yn, |this, yn| this.memory.load_permanent_variable(yn))
+            }
             Instruction::UnifyConstant { c } => {
                 match self.structure_iteration_state.read_write_mode() {
-                    ReadWriteMode::None => panic!("Unknown read/write mode"),
                     ReadWriteMode::Read => {
                         let term_address = self.structure_iteration_state.read_next(&self.memory);
 
                         match self.deref_address(term_address).1 {
-                            Value::Reference(address) => {
-                                self.memory[address] = Value::Constant(c).encode();
+                            Value::Reference(variable_address) => {
+                                let value_address = self.new_constant(c);
+                                self.memory
+                                    .bind_variable_to_value(variable_address, value_address);
                                 // trail(address)
                                 Ok(())
                             }
@@ -1040,9 +1573,8 @@ impl<'m> Machine<'m> {
             }
             Instruction::UnifyVoid { n } => {
                 match self.structure_iteration_state.read_write_mode() {
-                    ReadWriteMode::None => panic!("Unknown read/write mode"),
                     ReadWriteMode::Read => {
-                        self.structure_iteration_state.skip(n);
+                        self.structure_iteration_state.skip(&self.memory, n);
                         Ok(())
                     }
                     ReadWriteMode::Write => {
@@ -1056,20 +1588,17 @@ impl<'m> Machine<'m> {
                 }
             }
             Instruction::Allocate { n } => {
-                self.new_environment(n);
+                self.memory.allocate(n, self.cp, &[]);
                 Ok(())
             }
             Instruction::Trim { n } => {
-                Environment::trim(&mut self.memory, self.e, n);
+                self.memory.trim(n);
                 Ok(())
             }
             Instruction::Deallocate => {
-                let environment = Environment::decode(&self.memory, self.e).unwrap().1;
-                self.cp = environment.continuation_point;
-                self.e = environment.continuation_environment;
+                self.cp = self.memory.deallocate();
 
                 log_trace!("CP => {}", self.cp);
-                log_trace!("E => {}", self.e.0);
 
                 Ok(())
             }
@@ -1077,17 +1606,14 @@ impl<'m> Machine<'m> {
                 match self.currently_executing {
                     CurrentlyExecuting::Query => {
                         self.currently_executing = CurrentlyExecuting::Program;
-                        self.new_environment(n);
-                        for index in 0..n.0 {
-                            let value = self.deref_register(Ai { ai: index }).0;
+
+                        let registers = self.registers.query_registers(n);
+
+                        for &value in registers {
                             log_trace!("Saved Register Value: {}", value);
-                            Environment::write_variable(
-                                &mut self.memory,
-                                self.e,
-                                Yn { yn: index },
-                                value,
-                            );
                         }
+
+                        self.memory.allocate(n, ProgramCounter::NULL, registers);
 
                         self.cp = ProgramCounter::NULL;
                     }
@@ -1127,7 +1653,7 @@ impl<'m> Machine<'m> {
     fn deref_address(&self, mut address: Address) -> (Address, Value) {
         log_trace!("Looking up memory at {}", address);
         let value = loop {
-            let value = Value::decode(&self.memory, address).unwrap();
+            let value = self.memory.get_value(address).1;
             address = if let Value::Reference(new_address) = value {
                 if new_address == address {
                     break value;
@@ -1146,123 +1672,45 @@ impl<'m> Machine<'m> {
     }
 
     pub fn solution_registers(&self) -> impl Iterator<Item = Address> + '_ {
-        let environment = Environment::decode(&self.memory, self.e).unwrap().1;
-        self.e
-            .variable_addresses(environment.number_of_permanent_variables)
-            .map(move |address| Address(self.memory[address] as u16))
+        self.memory.solution_registers()
     }
 
     pub fn lookup_memory(
         &self,
         address: Address,
     ) -> (Address, Value, impl Iterator<Item = Address> + '_) {
-        let (deref, value) = self.deref_address(address);
-        let (first_term, arity) = match value {
-            Value::Reference(..) => (Address::NULL, Arity::ZERO),
-            Value::Structure(_, n) => (deref.offset(1), n),
-            Value::Constant(..) => (Address::NULL, Arity::ZERO),
-        };
-
-        let terms = (0..arity.0)
-            .map(move |index| Address(self.memory[first_term.offset(index as u16)] as u16));
-
-        (deref, value, terms)
-    }
-
-    fn new_value(&mut self, factory: impl FnOnce(Address) -> (Value, Arity)) -> Address {
-        let address = self.h;
-        let (header, tail_size) = factory(address);
-        log_trace!("New value at {}: {:?}", self.h, header);
-        self.memory[address] = header.encode();
-        self.h = self.h.offset(1 + tail_size.0 as u16);
-        log_trace!("h = {}", self.h);
-        address
+        self.memory.get_value(address)
     }
 
     fn new_variable(&mut self) -> Address {
-        self.new_value(|address| (Value::Reference(address), Arity::ZERO))
+        self.memory.new_variable()
     }
 
-    // fn new_variable_with_value(&mut self, address: Address) -> Address {
-    //     self.new_value(|_| Value::Reference(address))
-    // }
-
     fn new_structure(&mut self, f: Functor, n: Arity) -> Address {
-        let header_address = self.new_value(|_| (Value::Structure(f, n), n));
-
-        let mut term_address = header_address.offset(1);
+        let structure_address = self.memory.new_structure(f, n);
 
         self.structure_iteration_state
-            .start_writing(term_address, n);
+            .start_writing(structure_address);
 
-        for _ in 0..n.0 {
-            self.memory[term_address] = u32::MAX;
-            term_address = term_address.offset(1);
-        }
-
-        header_address
+        structure_address
     }
 
     fn new_constant(&mut self, c: Constant) -> Address {
-        self.new_value(|_| (Value::Constant(c), Arity::ZERO))
+        self.memory.new_constant(c)
     }
 
-    fn new_environment(&mut self, number_of_permanent_variables: Arity) {
-        let environment = Environment {
-            continuation_environment: self.e,
-            continuation_point: self.cp,
-            number_of_active_permanent_variables: number_of_permanent_variables,
-            number_of_permanent_variables,
-        };
-
-        self.e = EnvironmentAddress::new(self.h);
-        self.h = environment.encode(&mut self.memory, EnvironmentAddress::new(self.h));
-    }
-
-    fn bind_variable(&mut self, variable_address: Address, value_address: Address) {
-        assert!(matches!(
-            Value::decode(&self.memory, variable_address),
-            Ok(Value::Reference(_))
-        ));
-
-        log_trace!(
-            "Binding memory {} to value at {}",
-            variable_address,
-            value_address
-        );
-
-        self.memory[variable_address] = Value::Reference(value_address).encode();
-    }
-
-    fn bind_to_constant(&mut self, address: Address, c: Constant) {
-        match Value::decode(&self.memory, address).unwrap() {
-            Value::Reference(r) => assert_eq!(r, address),
-            value => panic!("Value at {} not a reference but a {:?}", address, value),
-        };
-        self.memory[address] = Value::Constant(c).encode();
-    }
-
-    fn unify_variable<I>(
-        &mut self,
-        index: I,
-        store: impl FnOnce(&mut Self, I, Address),
-    ) -> Result<(), ExecutionFailure> {
+    fn unify_variable<I>(&mut self, index: I, store: impl FnOnce(&mut Self, I, Address)) {
         match self.structure_iteration_state.read_write_mode() {
-            ReadWriteMode::None => panic!("Unknown read/write mode"),
             ReadWriteMode::Read => {
                 let term_address = self.structure_iteration_state.read_next(&self.memory);
 
                 store(self, index, term_address);
-
-                Ok(())
             }
             ReadWriteMode::Write => {
                 let address = self.new_variable();
                 store(self, index, address);
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
-
-                Ok(())
             }
         }
     }
@@ -1273,7 +1721,6 @@ impl<'m> Machine<'m> {
         load: impl FnOnce(&mut Self, I) -> Address,
     ) -> Result<(), ExecutionFailure> {
         match self.structure_iteration_state.read_write_mode() {
-            ReadWriteMode::None => panic!("Unknown read/write mode"),
             ReadWriteMode::Read => {
                 let term_address = self.structure_iteration_state.read_next(&self.memory);
 
@@ -1299,32 +1746,24 @@ impl<'m> Machine<'m> {
         let e2 = self.deref_address(a2);
         log_trace!("Resolved to {:?} and {:?}", e1, e2);
         match (e1, e2) {
-            ((a1, Value::Reference(r1)), (a2, Value::Reference(r2))) => {
-                assert_eq!(a1, r1);
-                assert_eq!(a2, r2);
-                if a2 < a1 {
-                    self.bind_variable(a1, a2);
-                } else {
-                    self.bind_variable(a2, a1);
-                }
+            ((a1, Value::Reference(_)), (a2, Value::Reference(_))) => {
+                self.memory.bind_variables(a1, a2);
                 Ok(())
             }
-            ((a1, Value::Reference(r1)), (a2, value)) => {
-                assert_eq!(a1, r1);
+            ((a1, Value::Reference(_)), (a2, value)) => {
                 assert!(!matches!(value, Value::Reference(_)));
-                self.bind_variable(a1, a2);
+                self.memory.bind_variable_to_value(a1, a2);
                 Ok(())
             }
-            ((a1, value), (a2, Value::Reference(r2))) => {
-                assert_eq!(a2, r2);
+            ((a1, value), (a2, Value::Reference(_))) => {
                 assert!(!matches!(value, Value::Reference(_)));
-                self.bind_variable(a2, a1);
+                self.memory.bind_variable_to_value(a2, a1);
                 Ok(())
             }
             ((a1, Value::Structure(f1, n1)), (a2, Value::Structure(f2, n2))) => {
                 if f1 == f2 && n1 == n2 {
-                    let mut terms_1 = StructureIterationState::struct_reader(a1, n1);
-                    let mut terms_2 = StructureIterationState::struct_reader(a2, n2);
+                    let mut terms_1 = StructureIterationState::structure_reader(a1);
+                    let mut terms_2 = StructureIterationState::structure_reader(a2);
                     for _ in 0..n1.0 {
                         let a1 = terms_1.read_next(&self.memory);
                         let a2 = terms_2.read_next(&self.memory);
