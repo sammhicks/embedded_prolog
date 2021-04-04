@@ -10,6 +10,7 @@ pub mod structure_iteration;
 enum ValueType {
     Reference,
     Structure,
+    List,
     Constant,
     Environment,
 }
@@ -124,12 +125,6 @@ impl<'m> std::ops::Index<Address> for Registry<'m> {
         &self.0[index.0 as usize]
     }
 }
-
-// impl<'m> std::ops::IndexMut<TupleAddress> for TupleMemory<'m> {
-//     fn index_mut(&mut self, index: TupleAddress) -> &mut Self::Output {
-//         &mut self.0[index.0 as usize]
-//     }
-// }
 
 struct TupleMemory<'m>(&'m mut [u32]);
 
@@ -257,6 +252,51 @@ impl Tuple for StructureValue {
         }
 
         first_term + *n
+    }
+}
+
+#[derive(Debug)]
+struct ListValue;
+
+impl ListValue {
+    const ARITY: Arity = Arity(2);
+}
+
+impl Tuple for ListValue {
+    const VALUE_TYPE: ValueType = ValueType::List;
+    type Terms = ();
+
+    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
+        let [a1, a0, z1, z0] = tuple_memory[tuple_address].to_be_bytes();
+        assert_eq!(z1, 0);
+        assert_eq!(z0, 0);
+
+        let first_term = tuple_address + 1;
+        (
+            Self,
+            TupleMetadata {
+                registry_address: Address::from_be_bytes([a1, a0]),
+                first_term,
+                arity: Self::ARITY,
+                next_tuple: first_term + Self::ARITY,
+            },
+        )
+    }
+
+    fn encode(
+        &self,
+        registry_address: Address,
+        tuple_memory: &mut TupleMemory,
+        tuple_address: TupleAddress,
+        _: &(),
+    ) -> TupleAddress {
+        let [a1, a0] = registry_address.into_be_bytes();
+
+        tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, 0, 0]);
+        tuple_memory[tuple_address + 1] = u32::MAX;
+        tuple_memory[tuple_address + 2] = u32::MAX;
+
+        tuple_address + 3
     }
 }
 
@@ -437,6 +477,7 @@ impl Tuple for Environment {
 pub enum Value {
     Reference(Address),
     Structure(Functor, Arity),
+    List,
     Constant(Constant),
 }
 
@@ -447,6 +488,10 @@ impl Value {
 
     fn structure(StructureValue(f, n): StructureValue) -> Self {
         Self::Structure(f, n)
+    }
+
+    fn list(_: ListValue) -> Self {
+        Self::List
     }
 
     fn constant(ConstantValue(c): ConstantValue) -> Self {
@@ -512,6 +557,10 @@ impl<'m> Heap<'m> {
         self.new_value(|_| StructureValue(f, n), &())
     }
 
+    pub fn new_list(&mut self) -> Address {
+        self.new_value(|_| ListValue, &())
+    }
+
     pub fn new_constant(&mut self, c: Constant) -> Address {
         self.new_value(|_| ConstantValue(c), &())
     }
@@ -543,6 +592,11 @@ impl<'m> Heap<'m> {
                         StructureValue::decode(&self.tuple_memory, entry.tuple_address);
                     (Value::structure(value), metadata)
                 }
+                ValueType::List => {
+                    let (value, metadata) =
+                        ListValue::decode(&self.tuple_memory, entry.tuple_address);
+                    (Value::list(value), metadata)
+                }
                 ValueType::Constant => {
                     let (value, metadata) =
                         ConstantValue::decode(&self.tuple_memory, entry.tuple_address);
@@ -567,8 +621,8 @@ impl<'m> Heap<'m> {
         }
     }
 
-    fn structure_term_addresses(&self, structure_address: Address) -> (TupleAddress, Arity) {
-        let registry_entry = self.registry[structure_address]
+    fn structure_term_addresses(&self, address: Address) -> (TupleAddress, Arity) {
+        let registry_entry = self.registry[address]
             .as_ref()
             .expect("Structure not found");
 
@@ -576,13 +630,19 @@ impl<'m> Heap<'m> {
             ValueType::Structure => {
                 let (StructureValue(_f, n), metadata) =
                     StructureValue::decode(&self.tuple_memory, registry_entry.tuple_address);
-                assert_eq!(structure_address, metadata.registry_address);
+                assert_eq!(address, metadata.registry_address);
                 (metadata.first_term, n)
+            }
+            ValueType::List => {
+                let (ListValue, metadata) =
+                    ListValue::decode(&self.tuple_memory, registry_entry.tuple_address);
+                assert_eq!(address, metadata.registry_address);
+                (metadata.first_term, ListValue::ARITY)
             }
             ValueType::Environment => {
                 let (environment, metadata) =
                     Environment::decode(&self.tuple_memory, registry_entry.tuple_address);
-                assert_eq!(structure_address, metadata.registry_address);
+                assert_eq!(address, metadata.registry_address);
                 (
                     metadata.first_term,
                     environment.number_of_active_permanent_variables,

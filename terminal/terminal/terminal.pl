@@ -175,12 +175,16 @@ read_answer_reference(Stream, Functors, Reference, _Resolved_References, New_Ref
 
 
 resolve_value_description(reference(_R), _Functors, _Value, [], []).
+
 resolve_value_description(structure(Functor, Arity, New_References), Functors, Value, New_References, Additional_Entries) :-
     nth0(Functor, Functors, Name),
     length(Arguments, Arity),
     compound_name_arguments(Value, Name, Arguments),
-    maplist(entry, New_References, Arguments, Additional_Entries),
-    true.
+    maplist(entry, New_References, Arguments, Additional_Entries).
+
+resolve_value_description(list(Head_Reference, Tail_Reference), _Functors, [Head|Tail], [Head_Reference, Tail_Reference], [Head_Entry, Tail_Entry]) :-
+    entry(Head_Reference, Head, Head_Entry),
+    entry(Tail_Reference, Tail, Tail_Entry).
 
 resolve_value_description(constant(C), Functors, Value, [], []) :-
     nth0(C, Functors, Value).
@@ -194,6 +198,10 @@ read_value('S', Stream, structure(F, N, Terms)) :-
     read_u8(Stream, N),
     length(Terms, N),
     maplist(read_u16(Stream), Terms).
+
+read_value('L', Stream, list(H, T)) :-
+    read_u16(Stream, H),
+    read_u16(Stream, T).
 
 read_value('C', Stream, constant(C)) :-
     read_u16(Stream, C).

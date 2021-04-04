@@ -146,6 +146,9 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
                 self.write_be_serializable_hex(f)?;
                 self.write_be_serializable_hex(n)?;
             }
+            machine::Value::List => {
+                self.write_char('L')?;
+            }
             machine::Value::Constant(c) => {
                 self.write_char('C')?;
                 self.write_be_serializable_hex(c)?;

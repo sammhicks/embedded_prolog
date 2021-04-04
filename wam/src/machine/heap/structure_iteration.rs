@@ -7,7 +7,7 @@ pub enum ReadWriteMode {
 
 struct InnerState {
     read_write_mode: ReadWriteMode,
-    structure_address: Address,
+    address: Address,
     index: Arity,
 }
 
@@ -23,24 +23,24 @@ impl StructureIterationState {
             .read_write_mode
     }
 
-    pub fn structure_reader(structure_address: Address) -> Self {
+    pub fn structure_reader(address: Address) -> Self {
         Self(Some(InnerState {
             read_write_mode: ReadWriteMode::Read,
-            structure_address,
+            address,
             index: Arity::ZERO,
         }))
     }
 
-    pub fn start_reading_structure(&mut self, structure_address: Address) {
+    pub fn start_reading(&mut self, address: Address) {
         assert!(matches!(&self.0, None));
-        *self = Self::structure_reader(structure_address);
+        *self = Self::structure_reader(address);
     }
 
-    pub fn start_writing(&mut self, structure_address: Address) {
+    pub fn start_writing(&mut self, address: Address) {
         assert!(matches!(&self.0, None));
         *self = Self(Some(InnerState {
             read_write_mode: ReadWriteMode::Write,
-            structure_address,
+            address,
             index: Arity::ZERO,
         }));
     }
@@ -58,7 +58,7 @@ impl StructureIterationState {
     {
         let inner_state = self.0.as_mut().expect("Not reading or writing");
 
-        let (first_term, arity) = heap.structure_term_addresses(inner_state.structure_address);
+        let (first_term, arity) = heap.structure_term_addresses(inner_state.address);
 
         if inner_state.index == arity {
             panic!("No more terms");
@@ -93,9 +93,7 @@ impl StructureIterationState {
     pub fn skip(&mut self, heap: &Heap, n: Arity) {
         let inner_state = self.0.as_mut().expect("Not reading or writing");
 
-        let arity = heap
-            .structure_term_addresses(inner_state.structure_address)
-            .1;
+        let arity = heap.structure_term_addresses(inner_state.address).1;
 
         inner_state.index.0 += n.0;
 

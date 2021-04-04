@@ -47,6 +47,7 @@ enum Instruction {
     PutValueXn { ai: Ai, xn: Xn },
     PutValueYn { ai: Ai, yn: Yn },
     PutStructure { ai: Ai, f: Functor, n: Arity },
+    PutList { ai: Ai },
     PutConstant { ai: Ai, c: Constant },
     PutVoid { ai: Ai, n: Arity },
     GetVariableXn { ai: Ai, xn: Xn },
@@ -54,6 +55,7 @@ enum Instruction {
     GetValueXn { ai: Ai, xn: Xn },
     GetValueYn { ai: Ai, yn: Yn },
     GetStructure { ai: Ai, f: Functor, n: Arity },
+    GetList { ai: Ai },
     GetConstant { ai: Ai, c: Constant },
     SetVariableXn { xn: Xn },
     SetVariableYn { yn: Yn },
@@ -133,6 +135,7 @@ impl Instruction {
                     n: Arity(n),
                 },
             ),
+            [0x06, ai, 0, 0] => (pc.offset(1), Instruction::PutList { ai: Ai { ai } }),
             [0x07, ai, c1, c0] => (
                 pc.offset(1),
                 Instruction::PutConstant {
@@ -191,6 +194,7 @@ impl Instruction {
                     n: Arity(n),
                 },
             ),
+            [0x16, ai, 0, 0] => (pc.offset(1), Instruction::GetList { ai: Ai { ai } }),
             [0x17, ai, c1, c0] => (
                 pc.offset(1),
                 Instruction::GetConstant {
@@ -403,6 +407,11 @@ impl<'m> Machine<'m> {
                 self.registers.store(ai, address);
                 Ok(())
             }
+            Instruction::PutList { ai } => {
+                let address = self.new_list();
+                self.registers.store(ai, address);
+                Ok(())
+            }
             Instruction::PutConstant { ai, c } => {
                 let address = self.new_constant(c);
                 self.registers.store(ai, address);
@@ -448,13 +457,31 @@ impl<'m> Machine<'m> {
                         if f == found_f && n == found_n {
                             log_trace!("Reading structure {}/{}", f, n);
 
-                            self.structure_iteration_state
-                                .start_reading_structure(address);
+                            self.structure_iteration_state.start_reading(address);
                         } else {
                             self.backtrack()?;
                         }
                     }
-                    Value::Constant(_) => self.backtrack()?,
+                    Value::List | Value::Constant(_) => self.backtrack()?,
+                }
+                Ok(())
+            }
+            Instruction::GetList { ai } => {
+                let (address, value) = self.get_register_value(ai);
+                match value {
+                    Value::Reference(variable_address) => {
+                        log_trace!("Writing list");
+
+                        let value_address = self.new_list();
+
+                        self.memory
+                            .bind_variable_to_value(variable_address, value_address);
+                    }
+                    Value::List => {
+                        log_trace!("Reading list");
+                        self.structure_iteration_state.start_reading(address);
+                    }
+                    Value::Structure(..) | Value::Constant(_) => self.backtrack()?,
                 }
                 Ok(())
             }
@@ -546,7 +573,7 @@ impl<'m> Machine<'m> {
                                     self.backtrack()
                                 }
                             }
-                            Value::Structure(_, _) => self.backtrack(),
+                            Value::Structure(..) | Value::List => self.backtrack(),
                         }
                     }
                     ReadWriteMode::Write => {
@@ -656,12 +683,17 @@ impl<'m> Machine<'m> {
     }
 
     fn new_structure(&mut self, f: Functor, n: Arity) -> Address {
-        let structure_address = self.memory.new_structure(f, n);
+        let address = self.memory.new_structure(f, n);
+        self.structure_iteration_state.start_writing(address);
 
-        self.structure_iteration_state
-            .start_writing(structure_address);
+        address
+    }
 
-        structure_address
+    fn new_list(&mut self) -> Address {
+        let address = self.memory.new_list();
+        self.structure_iteration_state.start_writing(address);
+
+        address
     }
 
     fn new_constant(&mut self, c: Constant) -> Address {
@@ -743,6 +775,17 @@ impl<'m> Machine<'m> {
                 } else {
                     Err(UnificationFailure)
                 }
+            }
+            (a1, Value::List, a2, Value::List) => {
+                let mut terms_1 = StructureIterationState::structure_reader(a1);
+                let mut terms_2 = StructureIterationState::structure_reader(a2);
+                for _ in 0..2 {
+                    let a1 = terms_1.read_next(&self.memory);
+                    let a2 = terms_2.read_next(&self.memory);
+                    self.unify(a1, a2)?;
+                }
+
+                Ok(())
             }
             (_, Value::Constant(c1), _, Value::Constant(c2)) => {
                 if c1 == c2 {

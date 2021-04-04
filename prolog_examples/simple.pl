@@ -1,3 +1,5 @@
+same(A, A).
+
 foo(A, B, A, D, D) :-
     a(A),
     b(B).
