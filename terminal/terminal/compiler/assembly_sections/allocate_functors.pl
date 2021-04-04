@@ -4,8 +4,6 @@
 	      allocate_functors/4           % +Codes, -Mapped_Codes, +Current_State, -Final_State
 	  ]).
 
-:- use_module(library(ordsets)).
-
 init_functors_state(State) :-
 	special_functors(State).
 

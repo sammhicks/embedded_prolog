@@ -14,7 +14,8 @@ assemble_query(Codes0, State, Word_Components, Functors) :-
 	apply_labels(Codes1, Labels, Codes3),
 	assemble_codes(Codes3, Word_Components_With_Program_Locations, []),
 	assemble_program_locations(Word_Components_With_Program_Locations, Word_Components),
-	maplist(is_valid_word, Word_Components).
+	maplist(is_valid_word, Word_Components),
+	!.
 
 
 assemble_program(Codes0, State, Word_Components) :-
@@ -26,14 +27,14 @@ assemble_program(Codes0, State, Word_Components) :-
 	remove_labels(Word_Components_With_Labels, Word_Components_With_Program_Locations, Labels),
 	assemble_program_locations(Word_Components_With_Program_Locations, Word_Components),
 	assembly_state(State, Functors, Labels),
-	maplist(is_valid_word, Word_Components).
+	maplist(is_valid_word, Word_Components),
+	!.
 
 
 assemble_codes([]) -->
 	[].
 assemble_codes([Code|Codes]) -->
 	assemble_code(Code),
-	!,
 	assemble_codes(Codes).
 
 
@@ -43,7 +44,9 @@ assemble_code(put_value(x(N), a(Ai)))    --> [[0x02,   Ai, 0x00,    N]].
 assemble_code(put_value(y(N), a(Ai)))    --> [[0x03,   Ai, 0x00,    N]].
 assemble_code(put_structure(F/N, a(Ai))) --> [[0x04,   Ai,   F0,    N]], { uint(F, F0) }, !.
 assemble_code(put_structure(F/N, a(Ai))) --> [[0x05,   Ai, 0x00,    N], [0x00, 0x00, F1, F0]], { uint(F, F1, F0) }.
+assemble_code(put_structure(F/N, x(Ai))) --> assemble_code(put_structure(F/N, a(Ai))).
 assemble_code(put_list(a(Ai)))           --> [[0x06,   Ai, 0x00, 0x00]].
+assemble_code(put_list(x(Ai)))		 --> assemble_code(put_list(a(Ai))).
 assemble_code(put_constant(C, a(Ai)))    --> [[0x07,   Ai,   C1,   C0]], { uint(C, C1, C0) }.
 assemble_code(put_integer(I, a(Ai)))     --> [[0x08,   Ai,   I1,   I0]], { sint(I, I1, I0) }, !.
 assemble_code(put_integer(I, a(Ai)))     --> [[0x09,   Ai,    S,    N]], wsint(I, S, N).
@@ -55,7 +58,9 @@ assemble_code(get_value(x(N), a(Ai)))    --> [[0x12,   Ai, 0x00,    N]].
 assemble_code(get_value(y(N), a(Ai)))    --> [[0x13,   Ai, 0x00,    N]].
 assemble_code(get_structure(F/N, a(Ai))) --> [[0x14,   Ai,    F,    N]].
 assemble_code(get_structure(F/N, a(Ai))) --> [[0x15,   Ai, 0x00,    N], [0x00, 0x00, F1, F0]], { uint(F, F1, F0) }.
+assemble_code(get_structure(F/N, x(Ai))) --> assemble_code(get_structure(F/N, a(Ai))).
 assemble_code(get_list(a(Ai)))           --> [[0x16,   Ai, 0x00, 0x00]].
+assemble_code(get_list(x(Ai)))		 --> assemble_code(get_list(a(Ai))).
 assemble_code(get_constant(C, a(Ai)))    --> [[0x17,   Ai,   C1,   C0]], { uint(C, C1, C0) }.
 assemble_code(get_integer(I, a(Ai)))     --> [[0x18,   Ai,   I1,   I0]], { sint(I, I1, I0) }.
 assemble_code(get_integer(I, a(Ai)))     --> [[0x19,   Ai,    S,    N]], wsint(I, S, N).
@@ -111,6 +116,9 @@ assemble_code(digital_input_pullup)   --> [[0x80, 0x00, 0x00, 0x02]].
 assemble_code(digital_input_pulldown) --> [[0x80, 0x00, 0x00, 0x03]].
 assemble_code(digital_read)           --> [[0x81, 0x00, 0x00, 0x00]].
 assemble_code(digital_write)          --> [[0x82, 0x00, 0x00, 0x00]].
+
+assemble_code(Unhandled_Value, Codes, Codes) :-
+	throw(unhandled_value(Unhandled_Value)).
 
 
 assemble_program_locations(Word_Components_With_Program_Locations, Word_Components) :-

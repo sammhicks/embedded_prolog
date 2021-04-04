@@ -1305,6 +1305,12 @@ impl RegisterBlock {
         }) = address;
     }
 
+    fn clear_above(&mut self, n: Arity) {
+        for register in &mut self.0[(n.0 as usize)..] {
+            *register = Address::NULL;
+        }
+    }
+
     fn query_registers(&self, n: Arity) -> &[Address] {
         &self.0[0..n.0 as usize]
     }
@@ -1637,7 +1643,8 @@ impl<'m> Machine<'m> {
                 self.pc = p;
                 self.argument_count = n;
 
-                // TODO - Clear registers above "n"
+                self.registers.clear_above(n);
+
                 // TODO - Set cut point
 
                 Ok(())
@@ -1646,7 +1653,8 @@ impl<'m> Machine<'m> {
                 self.pc = p;
                 self.argument_count = n;
 
-                // TODO - Clear registers above "n"
+                self.registers.clear_above(n);
+
                 // TODO - Set cut point
 
                 Ok(())
