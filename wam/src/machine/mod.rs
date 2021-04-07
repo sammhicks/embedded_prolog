@@ -8,7 +8,9 @@ use crate::{
 mod basic_types;
 mod heap;
 
-use basic_types::{Ai, Arity, Constant, Functor, ProgramCounter, RegisterIndex, Xn, Yn};
+use basic_types::{
+    Ai, Arity, Constant, Functor, OptionDisplay, ProgramCounter, RegisterIndex, Xn, Yn,
+};
 use heap::{
     structure_iteration::{ReadWriteMode, StructureIterationState},
     Heap,
@@ -75,6 +77,12 @@ enum Instruction {
     Call { p: ProgramCounter, n: Arity },
     Execute { p: ProgramCounter, n: Arity },
     Proceed,
+    TryMeElse { p: ProgramCounter },
+    RetryMeElse { p: ProgramCounter },
+    TrustMe,
+    NeckCut,
+    GetLevel { yn: Yn },
+    Cut { yn: Yn },
 }
 
 impl Instruction {
@@ -242,6 +250,22 @@ impl Instruction {
                 },
             ),
             [0x45, 0, 0, 0] => (pc.offset(1), Instruction::Proceed),
+            [0x50, 0, p1, p0] => (
+                pc.offset(1),
+                Instruction::TryMeElse {
+                    p: ProgramCounter::from_be_bytes([p1, p0]),
+                },
+            ),
+            [0x51, 0, p1, p0] => (
+                pc.offset(1),
+                Instruction::RetryMeElse {
+                    p: ProgramCounter::from_be_bytes([p1, p0]),
+                },
+            ),
+            [0x52, 0, 0, 0] => (pc.offset(1), Instruction::TrustMe),
+            [0x53, 0, 0, 0] => (pc.offset(1), Instruction::NeckCut),
+            [0x54, 0, 0, yn] => (pc.offset(1), Instruction::GetLevel { yn: Yn { yn } }),
+            [0x55, 0, 0, yn] => (pc.offset(1), Instruction::Cut { yn: Yn { yn } }),
             _ => {
                 return Err(Error::BadInstruction(
                     pc,
@@ -259,13 +283,19 @@ impl RegisterBlock {
     fn load(&self, index: impl Into<RegisterIndex>) -> Address {
         let index = index.into().0 as usize;
         log_trace!("Loading Register {}", index);
-        *self.0.get(index).unwrap_or_else(|| {
+        let entry = *self.0.get(index).unwrap_or_else(|| {
             panic!(
                 "Register Index {} out of range ({})",
                 index,
                 (&self.0[..]).len()
             );
-        })
+        });
+
+        if entry == unsafe { Address::none() } {
+            panic!("No register value @ {}", index);
+        }
+
+        entry
     }
 
     fn store(&mut self, index: impl Into<RegisterIndex>, address: Address) {
@@ -279,11 +309,19 @@ impl RegisterBlock {
 
     fn clear_above(&mut self, n: Arity) {
         for register in &mut self.0[(n.0 as usize)..] {
-            *register = Address::NULL;
+            *register = unsafe { Address::none() };
         }
     }
 
-    fn query_registers(&self, n: Arity) -> &[Address] {
+    fn all_mut(&mut self) -> &mut [Address] {
+        &mut self.0
+    }
+}
+
+impl core::ops::Index<Arity> for RegisterBlock {
+    type Output = [Address];
+
+    fn index(&self, n: Arity) -> &Self::Output {
         &self.0[0..n.0 as usize]
     }
 }
@@ -294,13 +332,13 @@ enum CurrentlyExecuting {
     Program,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 #[repr(u8)]
 pub enum ExecutionFailure {
     Failed = b'F',
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Copy, Clone, Debug)]
 #[repr(u8)]
 pub enum ExecutionSuccess {
     SingleAnswer = b'A',
@@ -319,8 +357,8 @@ pub struct MachineMemory<'m> {
 pub struct Machine<'m> {
     currently_executing: CurrentlyExecuting,
     structure_iteration_state: StructureIterationState,
-    pc: ProgramCounter,
-    cp: ProgramCounter,
+    pc: Option<ProgramCounter>,
+    cp: Option<ProgramCounter>,
     argument_count: Arity,
     registers: RegisterBlock,
     program: &'m [u32],
@@ -329,48 +367,52 @@ pub struct Machine<'m> {
 }
 
 impl<'m> Machine<'m> {
-    pub fn run(
+    pub fn new(
         MachineMemory {
             program,
             query,
             memory,
         }: MachineMemory<'m>,
-    ) -> Result<(Self, ExecutionSuccess), ExecutionFailure> {
-        let mut machine = Self {
+    ) -> Self {
+        Self {
             currently_executing: CurrentlyExecuting::Query,
             structure_iteration_state: StructureIterationState::default(),
-            pc: ProgramCounter(0),
-            cp: ProgramCounter::NULL,
+            pc: Some(ProgramCounter(0)),
+            cp: None,
             argument_count: Arity::ZERO,
-            registers: RegisterBlock([Address::NULL; 32]),
+            registers: RegisterBlock([unsafe { Address::none() }; 32]),
             program,
             query,
             memory: Heap::init(memory),
-        };
-
-        let execution_result = machine.continue_execution();
-        execution_result.map(|success| (machine, success))
+        }
     }
 
     fn continue_execution(&mut self) -> Result<ExecutionSuccess, ExecutionFailure> {
         loop {
-            if self.pc == ProgramCounter::NULL {
-                return Ok(ExecutionSuccess::SingleAnswer);
-            }
+            let pc = match self.pc {
+                Some(pc) => pc,
+                None => {
+                    return Ok(if self.memory.query_has_multiple_solutions() {
+                        ExecutionSuccess::MultipleAnswers
+                    } else {
+                        ExecutionSuccess::SingleAnswer
+                    });
+                }
+            };
 
             let (new_pc, instruction) = match &self.currently_executing {
-                CurrentlyExecuting::Query => Instruction::decode(self.query, self.pc).unwrap(),
-                CurrentlyExecuting::Program => Instruction::decode(self.program, self.pc).unwrap(),
+                CurrentlyExecuting::Query => Instruction::decode(self.query, pc).unwrap(),
+                CurrentlyExecuting::Program => Instruction::decode(self.program, pc).unwrap(),
             };
 
             log_debug!(
                 "{:?} Instruction @{} : {:?}",
                 self.currently_executing,
-                self.pc,
+                pc,
                 instruction
             );
 
-            self.pc = new_pc;
+            self.pc = Some(new_pc);
 
             self.execute_instruction(instruction)?;
 
@@ -563,7 +605,6 @@ impl<'m> Machine<'m> {
                                 let value_address = self.new_constant(c);
                                 self.memory
                                     .bind_variable_to_value(variable_address, value_address);
-                                // trail(address)
                                 Ok(())
                             }
                             Value::Constant(c1) => {
@@ -610,9 +651,7 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::Deallocate => {
-                self.cp = self.memory.deallocate();
-
-                log_trace!("CP => {}", self.cp);
+                self.memory.deallocate(&mut self.cp);
 
                 Ok(())
             }
@@ -621,21 +660,21 @@ impl<'m> Machine<'m> {
                     CurrentlyExecuting::Query => {
                         self.currently_executing = CurrentlyExecuting::Program;
 
-                        let registers = self.registers.query_registers(n);
+                        let registers = &self.registers[n];
 
                         for &value in registers {
                             log_trace!("Saved Register Value: {}", value);
                         }
 
-                        self.memory.allocate(n, ProgramCounter::NULL, registers);
+                        self.memory.allocate(n, None, registers);
 
-                        self.cp = ProgramCounter::NULL;
+                        self.cp = None;
                     }
                     CurrentlyExecuting::Program => {
                         self.cp = self.pc;
                     }
                 }
-                self.pc = p;
+                self.pc = Some(p);
                 self.argument_count = n;
 
                 self.registers.clear_above(n);
@@ -645,7 +684,7 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::Execute { p, n } => {
-                self.pc = p;
+                self.pc = Some(p);
                 self.argument_count = n;
 
                 self.registers.clear_above(n);
@@ -655,9 +694,33 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::Proceed => {
-                log_trace!("Proceeding to {}", self.cp);
+                log_trace!("Proceeding to {}", OptionDisplay(self.cp));
                 self.pc = self.cp;
                 Ok(())
+            }
+            Instruction::TryMeElse { p } => {
+                self.memory
+                    .new_choice_point(p, self.cp, &self.registers[self.argument_count]);
+                Ok(())
+            }
+            Instruction::RetryMeElse { p } => {
+                self.memory
+                    .retry_choice_point(self.registers.all_mut(), &mut self.cp, p);
+                Ok(())
+            }
+            Instruction::TrustMe => {
+                self.memory
+                    .remove_choice_point(self.registers.all_mut(), &mut self.cp);
+                Ok(())
+            }
+            Instruction::NeckCut => {
+                todo!()
+            }
+            Instruction::GetLevel { yn } => {
+                todo!()
+            }
+            Instruction::Cut { yn } => {
+                todo!()
             }
         }
     }
@@ -799,7 +862,13 @@ impl<'m> Machine<'m> {
     }
 
     fn backtrack(&mut self) -> Result<(), ExecutionFailure> {
-        log_debug!("BACKTRACK!");
-        Err(ExecutionFailure::Failed)
+        self.memory.backtrack(&mut self.pc)
+    }
+
+    pub fn next_solution(&mut self) -> Result<ExecutionSuccess, ExecutionFailure> {
+        if let CurrentlyExecuting::Program = self.currently_executing {
+            self.backtrack()?;
+        }
+        self.continue_execution()
     }
 }

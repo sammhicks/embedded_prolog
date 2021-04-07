@@ -1,6 +1,21 @@
 use core::fmt;
 
-use crate::serializable::SerializableWrapper;
+use crate::serializable::{Serializable, SerializableWrapper};
+
+pub trait NoneRepresents: fmt::Display {
+    const NONE_REPRESENTS: &'static str;
+}
+
+pub struct OptionDisplay<T: NoneRepresents>(pub Option<T>);
+
+impl<T: NoneRepresents> fmt::Display for OptionDisplay<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.as_ref() {
+            Some(t) => fmt::Display::fmt(t, f),
+            None => f.write_str(T::NONE_REPRESENTS),
+        }
+    }
+}
 
 /// A Register Index
 #[derive(Clone, Copy, Debug)]
@@ -147,8 +162,12 @@ impl fmt::Display for ProgramCounter {
     }
 }
 
+impl NoneRepresents for ProgramCounter {
+    const NONE_REPRESENTS: &'static str = "End of Program";
+}
+
 impl ProgramCounter {
-    pub const NULL: Self = Self(u16::MAX);
+    const END_OF_PROGRAM: u16 = u16::MAX;
 
     pub fn offset(self, offset: u16) -> Self {
         Self(self.0 + offset)
@@ -164,5 +183,23 @@ impl SerializableWrapper for ProgramCounter {
 
     fn into_inner(self) -> Self::Inner {
         self.0
+    }
+}
+
+impl Serializable for Option<ProgramCounter> {
+    type Bytes = <ProgramCounter as Serializable>::Bytes;
+
+    fn from_be_bytes(bytes: Self::Bytes) -> Self {
+        let pc = ProgramCounter::from_be_bytes(bytes);
+        if pc.0 == ProgramCounter::END_OF_PROGRAM {
+            None
+        } else {
+            Some(pc)
+        }
+    }
+
+    fn into_be_bytes(self) -> Self::Bytes {
+        self.unwrap_or(ProgramCounter(ProgramCounter::END_OF_PROGRAM))
+            .into_be_bytes()
     }
 }

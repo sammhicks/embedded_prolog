@@ -134,6 +134,8 @@ handle_query_result('A', Stream, Query, Functors, single_answer) :-
 handle_query_result('C', Stream, Query, Functors, multiple_answers) :-
     read_answer(Stream, Query, Functors).
 handle_query_result('C', Stream, Query, Functors, Result) :-
+    write(Stream, 'C'),
+    flush_output(Stream),
     read_query_result(Stream, Query, Functors, Result).
 handle_query_result('F', _Stream, _Query, _Functors, no_answer).
 handle_query_result('E', Stream, _Query, _Functors, error(Message)) :-

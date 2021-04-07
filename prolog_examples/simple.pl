@@ -34,3 +34,8 @@ deep_chain(A, a(b(c(d(e(f(g(A))))))), a(b(c(d(e(f(g(A)))))))).
 
 other_test(X) :-
     also_chainedA(X, a(b(c(d(e(a, _))))), a(b(c(d(e(_, b)))))).
+
+abc(a).
+abc(b).
+abc(c).
+

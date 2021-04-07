@@ -18,50 +18,57 @@ pub struct Device<'a, 's1, 's2, S> {
 
 impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> {
     pub fn run(self) -> Result<UnhandledCommand, ProcessInputError> {
-        let (machine, success) = match super::machine::Machine::run(super::machine::MachineMemory {
+        let mut machine = super::machine::Machine::new(super::machine::MachineMemory {
             program: self.program,
             query: self.query,
             memory: self.memory,
-        }) {
-            Ok(success) => success,
-            Err(failure) => {
-                self.serial_connection
-                    .write_single_char(failure as u8 as char)?;
-                return Ok(UnhandledCommand::ProcessNextCommand);
-            }
-        };
+        });
 
-        self.serial_connection.write_char(success as u8 as char)?;
-        for address in machine.solution_registers() {
-            log_trace!("Solution Register: {}", address);
-            self.serial_connection.write_be_serializable_hex(address)?;
-        }
-        self.serial_connection.flush()?;
+        let mut execution_result = machine.next_solution();
 
         loop {
-            let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;
-
-            log::debug!("Processing command {:?}", command);
-
-            match command {
-                CommandHeader::ReportStatus => {
-                    log::debug!("Status: Waiting for Query");
+            let success = match execution_result {
+                Ok(success) => success,
+                Err(failure) => {
                     self.serial_connection
-                        .write_single_char(success as u8 as char)?;
+                        .write_single_char(failure as u8 as char)?;
+                    return Ok(UnhandledCommand::ProcessNextCommand);
                 }
-                CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
-                CommandHeader::SubmitQuery => return Ok(UnhandledCommand::SubmitQuery),
-                CommandHeader::LookupMemory => {
-                    let (address, value, subterms) =
-                        machine.lookup_memory(self.serial_connection.read_be_serializable_hex()?);
-                    self.serial_connection
-                        .write_value(address, value, subterms)?;
-                    self.serial_connection.flush()?;
-                }
-                CommandHeader::NextSolution => {
-                    todo!()
-                }
+            };
+
+            let success_code = success as u8 as char;
+
+            self.serial_connection.write_char(success_code)?;
+            for address in machine.solution_registers() {
+                log_trace!("Solution Register: {}", address);
+                self.serial_connection.write_be_serializable_hex(address)?;
             }
+            self.serial_connection.flush()?;
+
+            execution_result = loop {
+                let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;
+
+                log::debug!("Processing command {:?}", command);
+
+                match command {
+                    CommandHeader::ReportStatus => {
+                        log::debug!("Status: {:?}", success);
+                        self.serial_connection.write_single_char(success_code)?;
+                    }
+                    CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
+                    CommandHeader::SubmitQuery => return Ok(UnhandledCommand::SubmitQuery),
+                    CommandHeader::LookupMemory => {
+                        let (address, value, subterms) = machine
+                            .lookup_memory(self.serial_connection.read_be_serializable_hex()?);
+                        self.serial_connection
+                            .write_value(address, value, subterms)?;
+                        self.serial_connection.flush()?;
+                    }
+                    CommandHeader::NextSolution => {
+                        break machine.next_solution();
+                    }
+                }
+            };
         }
     }
 }
