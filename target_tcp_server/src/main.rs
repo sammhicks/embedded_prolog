@@ -43,7 +43,7 @@ fn do_main() -> std::io::Result<wam::Never> {
 
         wam::log::info!("Connection from {}", remote);
 
-        let mut memory = [0; 2048];
+        let mut memory = [0; 32768];
 
         let _ = wam::Device {
             memory: &mut memory,

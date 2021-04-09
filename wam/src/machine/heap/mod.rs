@@ -1,5 +1,4 @@
 use core::{fmt, panic};
-use std::usize;
 
 use crate::{
     log_trace,
@@ -23,7 +22,7 @@ enum ValueType {
     Trail,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Address(u16);
 
 impl fmt::Debug for Address {
@@ -128,7 +127,7 @@ impl std::ops::Add<Yn> for TupleAddress {
 impl TupleAddress {
     const NULL: Self = Self(u16::MAX);
 
-    fn iter(self, arity: Arity) -> impl Iterator<Item = Self> {
+    fn iter(self, arity: Arity) -> impl Iterator<Item = Self> + Clone {
         (self.0..).take(arity.0 as usize).map(Self)
     }
 }
@@ -210,12 +209,13 @@ impl Tuple for ReferenceValue {
     type Terms = ();
 
     fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let [a1, a0, r1, r0] = tuple_memory[tuple_address].to_be_bytes();
+        let (registry_address, r) =
+            Serializable::from_be_bytes(tuple_memory[tuple_address].to_be_bytes());
 
         (
-            Self(Address::from_be_bytes([r1, r0])),
+            Self(r),
             TupleMetadata {
-                registry_address: Address::from_be_bytes([a1, a0]),
+                registry_address,
                 first_term: TupleAddress::NULL,
                 arity: Arity::ZERO,
                 next_tuple: tuple_address + 1,
@@ -346,11 +346,12 @@ impl Tuple for ConstantValue {
     type Terms = ();
 
     fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let [a1, a0, c1, c0] = tuple_memory[tuple_address].to_be_bytes();
+        let (registry_address, c) =
+            Serializable::from_be_bytes(tuple_memory[tuple_address].to_be_bytes());
         (
-            Self(Constant::from_be_bytes([c1, c0])),
+            Self(c),
             TupleMetadata {
-                registry_address: Address::from_be_bytes([a1, a0]),
+                registry_address,
                 first_term: TupleAddress::NULL,
                 arity: Arity(0),
                 next_tuple: tuple_address + 1,
@@ -367,10 +368,7 @@ impl Tuple for ConstantValue {
     ) -> TupleAddress {
         let Self(c) = *self;
 
-        let [a1, a0] = registry_address.into_be_bytes();
-        let [c1, c0] = c.into_be_bytes();
-
-        tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, c1, c0]);
+        tuple_memory[tuple_address] = u32::from_be_bytes((registry_address, c).into_be_bytes());
 
         tuple_address + 1
     }
@@ -383,10 +381,12 @@ struct FirstEnvironmentWord {
 
 impl FirstEnvironmentWord {
     fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let [a1, a0, ce1, ce0] = tuple_memory[tuple_address].to_be_bytes();
+        let (registry_address, continuation_environment) =
+            Serializable::from_be_bytes(tuple_memory[tuple_address].to_be_bytes());
+
         Self {
-            registry_address: Address::from_be_bytes([a1, a0]),
-            continuation_environment: Option::<Address>::from_be_bytes([ce1, ce0]),
+            registry_address,
+            continuation_environment,
         }
     }
 
@@ -396,10 +396,8 @@ impl FirstEnvironmentWord {
             continuation_environment,
         } = self;
 
-        let [a1, a0] = registry_address.into_be_bytes();
-        let [ce1, ce0] = continuation_environment.into_be_bytes();
-
-        tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, ce1, ce0]);
+        tuple_memory[tuple_address] =
+            u32::from_be_bytes((registry_address, continuation_environment).into_be_bytes());
     }
 }
 
@@ -415,8 +413,8 @@ impl SecondEnvironmentWord {
 
         Self {
             continuation_point: Option::<ProgramCounter>::from_be_bytes([cp1, cp0]),
-            number_of_active_permanent_variables: Arity(na),
-            number_of_permanent_variables: Arity(np),
+            number_of_active_permanent_variables: Arity::from_be_bytes([na]),
+            number_of_permanent_variables: Arity::from_be_bytes([np]),
         }
     }
 
@@ -428,8 +426,8 @@ impl SecondEnvironmentWord {
         } = self;
 
         let [cp1, cp0] = continuation_point.into_be_bytes();
-        let na = number_of_active_permanent_variables.0;
-        let np = number_of_permanent_variables.0;
+        let [na] = number_of_active_permanent_variables.into_be_bytes();
+        let [np] = number_of_permanent_variables.into_be_bytes();
 
         tuple_memory[tuple_address + 1] = u32::from_be_bytes([cp1, cp0, na, np]);
     }
@@ -554,68 +552,95 @@ impl FirstChoicePointWord {
 }
 
 struct SecondChoicePointWord {
+    current_environment: Option<Address>,
     continuation_point: Option<ProgramCounter>,
-    next_choice_point: Option<Address>,
 }
 
 impl SecondChoicePointWord {
     fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let [cp1, cp0, ncp1, ncp0] = tuple_memory[tuple_address + 1].to_be_bytes();
+        let (current_environment, continuation_point) =
+            Serializable::from_be_bytes(tuple_memory[tuple_address + 1].to_be_bytes());
 
         Self {
-            continuation_point: Option::<ProgramCounter>::from_be_bytes([cp1, cp0]),
-            next_choice_point: Option::<Address>::from_be_bytes([ncp1, ncp0]),
+            current_environment,
+            continuation_point,
         }
     }
 
     fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
         let Self {
+            current_environment,
             continuation_point,
-            next_choice_point,
         } = self;
 
-        let [cp1, cp0] = continuation_point.into_be_bytes();
-        let [ncp1, ncp0] = next_choice_point.into_be_bytes();
-
-        tuple_memory[tuple_address + 1] = u32::from_be_bytes([cp1, cp0, ncp1, ncp0]);
+        tuple_memory[tuple_address + 1] =
+            u32::from_be_bytes((current_environment, continuation_point).into_be_bytes());
     }
 }
 
 struct ThirdChoicePointWord {
+    next_choice_point: Option<Address>,
     next_clause: ProgramCounter,
-    current_environment: Option<Address>,
 }
 
 impl ThirdChoicePointWord {
     fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let [nc1, nc0, ce1, ce0] = tuple_memory[tuple_address + 2].to_be_bytes();
+        let (next_choice_point, next_clause) =
+            Serializable::from_be_bytes(tuple_memory[tuple_address + 2].to_be_bytes());
 
         Self {
-            next_clause: ProgramCounter::from_be_bytes([nc1, nc0]),
-            current_environment: Option::<Address>::from_be_bytes([ce1, ce0]),
+            next_choice_point,
+            next_clause,
         }
     }
 
     fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
         let Self {
+            next_choice_point,
             next_clause,
-            current_environment,
         } = self;
 
-        let [nc1, nc0] = next_clause.into_be_bytes();
-        let [ce1, ce0] = current_environment.into_be_bytes();
+        tuple_memory[tuple_address + 2] =
+            u32::from_be_bytes((next_choice_point, next_clause).into_be_bytes());
+    }
+}
 
-        tuple_memory[tuple_address + 2] = u32::from_be_bytes([nc1, nc0, ce1, ce0]);
+struct FourthChoicePointWord {
+    trail_top: Option<Address>,
+    cut_register: Option<Address>,
+}
+
+impl FourthChoicePointWord {
+    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
+        let (trail_top, cut_register) =
+            Serializable::from_be_bytes(tuple_memory[tuple_address + 3].to_be_bytes());
+
+        Self {
+            trail_top,
+            cut_register,
+        }
+    }
+
+    fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
+        let Self {
+            trail_top,
+            cut_register,
+        } = self;
+
+        tuple_memory[tuple_address + 3] =
+            u32::from_be_bytes((trail_top, cut_register).into_be_bytes());
     }
 }
 
 #[derive(Debug)]
 struct ChoicePoint {
     number_of_saved_registers: Arity,
+    current_environment: Option<Address>,
     continuation_point: Option<ProgramCounter>,
     next_choice_point: Option<Address>,
     next_clause: ProgramCounter,
-    current_environment: Option<Address>,
+    trail_top: Option<Address>,
+    cut_register: Option<Address>,
 }
 
 impl Tuple for ChoicePoint {
@@ -630,25 +655,32 @@ impl Tuple for ChoicePoint {
         } = FirstChoicePointWord::decode(tuple_memory, tuple_address);
 
         let SecondChoicePointWord {
+            current_environment,
             continuation_point,
-            next_choice_point,
         } = SecondChoicePointWord::decode(tuple_memory, tuple_address);
 
         let ThirdChoicePointWord {
+            next_choice_point,
             next_clause,
-            current_environment,
         } = ThirdChoicePointWord::decode(tuple_memory, tuple_address);
 
+        let FourthChoicePointWord {
+            trail_top,
+            cut_register,
+        } = FourthChoicePointWord::decode(tuple_memory, tuple_address);
+
         let arity = number_of_saved_registers;
-        let first_term = tuple_address + 3;
+        let first_term = tuple_address + 4;
         let next_tuple = first_term + arity;
         (
             Self {
                 number_of_saved_registers,
+                current_environment,
                 continuation_point,
                 next_choice_point,
                 next_clause,
-                current_environment,
+                trail_top,
+                cut_register,
             },
             TupleMetadata {
                 registry_address,
@@ -668,10 +700,12 @@ impl Tuple for ChoicePoint {
     ) -> TupleAddress {
         let Self {
             number_of_saved_registers,
+            current_environment,
             continuation_point,
             next_choice_point,
             next_clause,
-            current_environment,
+            trail_top,
+            cut_register,
         } = *self;
 
         assert_eq!(number_of_saved_registers.0 as usize, saved_registers.len());
@@ -683,18 +717,24 @@ impl Tuple for ChoicePoint {
         .encode(tuple_memory, tuple_address);
 
         SecondChoicePointWord {
+            current_environment,
             continuation_point,
-            next_choice_point,
         }
         .encode(tuple_memory, tuple_address);
 
         ThirdChoicePointWord {
+            next_choice_point,
             next_clause,
-            current_environment,
         }
         .encode(tuple_memory, tuple_address);
 
-        let first_term = tuple_address + 3;
+        FourthChoicePointWord {
+            trail_top,
+            cut_register,
+        }
+        .encode(tuple_memory, tuple_address);
+
+        let first_term = tuple_address + 4;
 
         for (term_address, &value) in first_term
             .iter(number_of_saved_registers)
@@ -788,6 +828,7 @@ pub struct Heap<'m> {
     current_environment: Option<Address>,
     latest_choice_point: Option<Address>,
     trail_top: Option<Address>,
+    cut_register: Option<Address>,
 }
 
 impl<'m> Heap<'m> {
@@ -807,6 +848,7 @@ impl<'m> Heap<'m> {
             current_environment: None,
             latest_choice_point: None,
             trail_top: None,
+            cut_register: None,
         }
     }
 
@@ -952,10 +994,19 @@ impl<'m> Heap<'m> {
         metadata.first_term + yn
     }
 
-    pub fn load_permanent_variable(&self, yn: Yn) -> Address {
+    unsafe fn load_permanent_variable_unchecked(&self, yn: Yn) -> Address {
         let term_address = self.get_permanent_variable_address(yn);
 
         Address::from(self.tuple_memory[term_address])
+    }
+
+    pub fn load_permanent_variable(&self, yn: Yn) -> Address {
+        let address = unsafe { self.load_permanent_variable_unchecked(yn) };
+        if address == unsafe { Address::none() } {
+            panic!("No permanent variable @ {}", yn.yn);
+        }
+
+        address
     }
 
     pub fn store_permanent_variable(&mut self, yn: Yn, address: Address) {
@@ -1046,6 +1097,20 @@ impl<'m> Heap<'m> {
         ) = self.get_environment();
         assert!(number_of_active_permanent_variables >= n);
 
+        if let Some(latest_choice_point) = self.latest_choice_point {
+            let latest_choice_point = self.registry[latest_choice_point]
+                .as_ref()
+                .expect("No Entry");
+
+            log_trace!("latest_choice_point: {}", latest_choice_point.tuple_address);
+            log_trace!("current_environment: {}", tuple_address);
+
+            if latest_choice_point.tuple_address > tuple_address {
+                log_trace!("Not trimming conditional environment");
+                return;
+            }
+        }
+
         let number_of_active_permanent_variables =
             Arity(number_of_active_permanent_variables.0 - n.0);
 
@@ -1078,15 +1143,21 @@ impl<'m> Heap<'m> {
         continuation_point: Option<ProgramCounter>,
         saved_registers: &[Address],
     ) {
-        let next_choice_point = self.latest_choice_point;
+        let number_of_saved_registers = Arity(saved_registers.len() as u8);
         let current_environment = self.current_environment;
+        let next_choice_point = self.latest_choice_point;
+        let trail_top = self.trail_top;
+        let cut_register = self.cut_register;
+
         let new_choice_point = self.new_value(
             |_| ChoicePoint {
-                number_of_saved_registers: Arity(saved_registers.len() as u8),
+                number_of_saved_registers,
+                current_environment,
                 continuation_point,
                 next_choice_point,
                 next_clause,
-                current_environment,
+                trail_top,
+                cut_register,
             },
             saved_registers,
         );
@@ -1125,7 +1196,7 @@ impl<'m> Heap<'m> {
         &mut self,
         registers: &mut [Address],
         continuation_point: &mut Option<ProgramCounter>,
-    ) -> (TupleAddress, Option<Address>) {
+    ) -> (ChoicePoint, TupleAddress, Option<Address>) {
         let (choice_point, tuple_address, metadata) = self.get_latest_choice_point();
 
         for (register, value_address) in registers.iter_mut().zip(
@@ -1139,12 +1210,15 @@ impl<'m> Heap<'m> {
         self.current_environment = choice_point.current_environment;
         *continuation_point = choice_point.continuation_point;
 
+        self.unwind_trail(tuple_address);
+
+        self.trail_top = choice_point.trail_top;
+        let next_choice_point = choice_point.next_choice_point;
+
         crate::log_trace!("E => {}", OptionDisplay(self.current_environment));
         crate::log_trace!("CP => {}", OptionDisplay(*continuation_point));
 
-        self.unwind_trail(tuple_address);
-
-        (tuple_address, choice_point.next_choice_point)
+        (choice_point, tuple_address, next_choice_point)
     }
 
     pub fn retry_choice_point(
@@ -1153,12 +1227,16 @@ impl<'m> Heap<'m> {
         continuation_point: &mut Option<ProgramCounter>,
         next_clause: ProgramCounter,
     ) {
-        let tuple_address = self
-            .wind_back_to_choice_point(registers, continuation_point)
-            .0;
+        let (
+            ChoicePoint {
+                next_choice_point, ..
+            },
+            tuple_address,
+            _metadata,
+        ) = self.wind_back_to_choice_point(registers, continuation_point);
 
         ThirdChoicePointWord {
-            current_environment: self.current_environment,
+            next_choice_point,
             next_clause,
         }
         .encode(&mut self.tuple_memory, tuple_address);
@@ -1173,7 +1251,7 @@ impl<'m> Heap<'m> {
     ) {
         let next_choice_point = self
             .wind_back_to_choice_point(registers, continuation_point)
-            .1;
+            .2;
 
         self.latest_choice_point = next_choice_point;
     }
@@ -1223,15 +1301,87 @@ impl<'m> Heap<'m> {
         log_trace!("Finished Unwinding Trail");
     }
 
+    pub fn update_cut_register(&mut self) {
+        log_trace!("B0 => {}", OptionDisplay(self.latest_choice_point));
+        self.cut_register = self.latest_choice_point;
+    }
+
+    fn do_cut(&mut self, cut_register: Option<Address>) {
+        log_trace!("Cutting at {}", OptionDisplay(cut_register));
+
+        let new_choice_point = match (self.latest_choice_point, cut_register) {
+            (None, None) => None,
+            (Some(_), None) => None,
+            (None, Some(_)) => {
+                log_trace!("Not cutting");
+                return;
+            }
+            (Some(latest_choice_point), Some(cut_register)) => {
+                let latest_choice_point_entry = self.registry[latest_choice_point]
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("No choice point entry"));
+
+                let cut_register_entry = self.registry[cut_register]
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("No cut register entry"));
+
+                assert!(matches!(
+                    latest_choice_point_entry.value_type,
+                    ValueType::ChoicePoint
+                ));
+
+                assert!(matches!(
+                    cut_register_entry.value_type,
+                    ValueType::ChoicePoint
+                ));
+
+                if latest_choice_point_entry.tuple_address > cut_register_entry.tuple_address {
+                    Some(cut_register)
+                } else {
+                    log_trace!("Not cutting");
+                    return;
+                }
+            }
+        };
+
+        log_trace!(
+            "Latest Choice Point: {} => {}",
+            OptionDisplay(self.latest_choice_point),
+            OptionDisplay(new_choice_point)
+        );
+
+        self.latest_choice_point = new_choice_point;
+    }
+
+    pub fn neck_cut(&mut self) {
+        self.do_cut(self.cut_register)
+    }
+
+    pub fn get_level(&mut self, yn: Yn) {
+        self.store_permanent_variable(yn, self.cut_register.unwrap_or(unsafe { Address::none() }));
+    }
+
+    pub fn cut(&mut self, yn: Yn) {
+        let address = unsafe { self.load_permanent_variable_unchecked(yn) };
+
+        self.do_cut(if address == unsafe { Address::none() } {
+            None
+        } else {
+            Some(address)
+        });
+    }
+
     pub fn query_has_multiple_solutions(&self) -> bool {
         self.latest_choice_point.is_some()
     }
 
     pub fn solution_registers(&self) -> impl Iterator<Item = Address> + '_ {
         let (environment, _, metadata) = self.get_environment();
-        (metadata.first_term.0..)
-            .map(TupleAddress)
-            .take(environment.number_of_permanent_variables.0 as usize)
+        assert!(environment.continuation_environment.is_none());
+
+        metadata
+            .first_term
+            .iter(environment.number_of_permanent_variables)
             .map(move |tuple_address| Address::from(self.tuple_memory[tuple_address]))
     }
 }

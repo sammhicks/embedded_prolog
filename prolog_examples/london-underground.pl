@@ -26,17 +26,18 @@ same_line(Station1, Station2, Line) :-
 
 
 journey_to(From, To, Route) :-
-	journey_to(From, To, Route, []).
+	journey_to(From, To, Route, [station(From)]).
 
 
 journey_to(From, To, [(Line:(From-To))], Already_Visited) :-
 	same_line(From, To, Line),
-	not_member(Line, Already_Visited).
+	not_member(line(Line), Already_Visited).
 
 journey_to(From, To, [(Line:(From-Intermediate))|Route], Already_Visited) :-
 	same_line(From, Intermediate, Line),
-	not_member(Line, Already_Visited),
-	journey_to(Intermediate, To, Route, [Line|Already_Visited]).
+	not_member(station(Intermediate), Already_Visited),
+	not_member(line(Line), Already_Visited),
+	journey_to(Intermediate, To, Route, [station(Intermediate),line(Line)|Already_Visited]).
 
 
 not_member(_Item, []) :-

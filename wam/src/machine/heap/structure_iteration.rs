@@ -15,6 +15,10 @@ struct InnerState {
 pub struct StructureIterationState(Option<InnerState>);
 
 impl StructureIterationState {
+    pub fn verify_not_active(&self) {
+        assert!(self.0.is_none())
+    }
+
     pub fn read_write_mode(&self) -> &ReadWriteMode {
         &self
             .0
@@ -29,6 +33,10 @@ impl StructureIterationState {
             address,
             index: Arity::ZERO,
         }))
+    }
+
+    pub fn reset(&mut self) {
+        self.0 = None;
     }
 
     pub fn start_reading(&mut self, address: Address) {

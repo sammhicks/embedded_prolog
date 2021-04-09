@@ -83,6 +83,8 @@ enum Instruction {
     NeckCut,
     GetLevel { yn: Yn },
     Cut { yn: Yn },
+    True,
+    Fail,
 }
 
 impl Instruction {
@@ -266,6 +268,8 @@ impl Instruction {
             [0x53, 0, 0, 0] => (pc.offset(1), Instruction::NeckCut),
             [0x54, 0, 0, yn] => (pc.offset(1), Instruction::GetLevel { yn: Yn { yn } }),
             [0x55, 0, 0, yn] => (pc.offset(1), Instruction::Cut { yn: Yn { yn } }),
+            [0x70, 0, 0, 0] => (pc.offset(1), Instruction::True),
+            [0x71, 0, 0, 0] => (pc.offset(1), Instruction::Fail),
             _ => {
                 return Err(Error::BadInstruction(
                     pc,
@@ -674,22 +678,21 @@ impl<'m> Machine<'m> {
                         self.cp = self.pc;
                     }
                 }
+
+                self.memory.update_cut_register();
                 self.pc = Some(p);
                 self.argument_count = n;
 
                 self.registers.clear_above(n);
-
-                // TODO - Set cut point
 
                 Ok(())
             }
             Instruction::Execute { p, n } => {
+                self.memory.update_cut_register();
                 self.pc = Some(p);
                 self.argument_count = n;
 
                 self.registers.clear_above(n);
-
-                // TODO - Set cut point
 
                 Ok(())
             }
@@ -699,29 +702,37 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::TryMeElse { p } => {
+                self.structure_iteration_state.verify_not_active();
                 self.memory
                     .new_choice_point(p, self.cp, &self.registers[self.argument_count]);
                 Ok(())
             }
             Instruction::RetryMeElse { p } => {
+                self.structure_iteration_state.verify_not_active();
                 self.memory
                     .retry_choice_point(self.registers.all_mut(), &mut self.cp, p);
                 Ok(())
             }
             Instruction::TrustMe => {
+                self.structure_iteration_state.verify_not_active();
                 self.memory
                     .remove_choice_point(self.registers.all_mut(), &mut self.cp);
                 Ok(())
             }
             Instruction::NeckCut => {
-                todo!()
+                self.memory.neck_cut();
+                Ok(())
             }
             Instruction::GetLevel { yn } => {
-                todo!()
+                self.memory.get_level(yn);
+                Ok(())
             }
             Instruction::Cut { yn } => {
-                todo!()
+                self.memory.cut(yn);
+                Ok(())
             }
+            Instruction::True => Ok(()),
+            Instruction::Fail => self.backtrack(),
         }
     }
 
@@ -862,6 +873,7 @@ impl<'m> Machine<'m> {
     }
 
     fn backtrack(&mut self) -> Result<(), ExecutionFailure> {
+        self.structure_iteration_state.reset();
         self.memory.backtrack(&mut self.pc)
     }
 
