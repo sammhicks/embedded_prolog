@@ -2,8 +2,11 @@ use super::{
     log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead, SerialWrite,
 };
 
+use crate::machine::ExecutionFailure;
+
 #[derive(Debug)]
 pub enum UnhandledCommand {
+    Reset,
     ProcessNextCommand,
     SubmitProgram,
     SubmitQuery,
@@ -17,8 +20,8 @@ pub struct Device<'a, 's1, 's2, S> {
 }
 
 impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> {
-    pub fn run(self) -> Result<UnhandledCommand, ProcessInputError> {
-        let mut machine = super::machine::Machine::new(super::machine::MachineMemory {
+    pub fn run(mut self) -> Result<UnhandledCommand, ProcessInputError> {
+        let mut machine = crate::machine::Machine::new(super::machine::MachineMemory {
             program: self.program,
             query: self.query,
             memory: self.memory,
@@ -29,14 +32,20 @@ impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> 
         loop {
             let success = match execution_result {
                 Ok(success) => success,
-                Err(failure) => {
-                    self.serial_connection
-                        .write_single_char(failure as u8 as char)?;
+                Err(ExecutionFailure::Failed) => {
+                    self.serial_connection.write_single_char('F')?;
                     return Ok(UnhandledCommand::ProcessNextCommand);
+                }
+                Err(ExecutionFailure::Error(err)) => {
+                    crate::error!(&mut self.serial_connection, "{:?}", err)?;
+                    return Ok(UnhandledCommand::Reset);
                 }
             };
 
-            let success_code = success as u8 as char;
+            let success_code = match success {
+                crate::machine::ExecutionSuccess::SingleAnswer => 'A',
+                crate::machine::ExecutionSuccess::MultipleAnswers => 'C',
+            };
 
             self.serial_connection.write_char(success_code)?;
             for address in machine.solution_registers() {
@@ -58,8 +67,15 @@ impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> 
                     CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
                     CommandHeader::SubmitQuery => return Ok(UnhandledCommand::SubmitQuery),
                     CommandHeader::LookupMemory => {
-                        let (address, value, subterms) = machine
-                            .lookup_memory(self.serial_connection.read_be_serializable_hex()?);
+                        let (address, value, subterms) = match machine
+                            .lookup_memory(self.serial_connection.read_be_serializable_hex()?)
+                        {
+                            Ok(result) => result,
+                            Err(err) => {
+                                crate::error!(&mut self.serial_connection, "{:?}", err)?;
+                                return Ok(UnhandledCommand::Reset);
+                            }
+                        };
                         self.serial_connection
                             .write_value(address, value, subterms)?;
                         self.serial_connection.flush()?;

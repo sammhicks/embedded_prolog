@@ -40,6 +40,9 @@ impl fmt::Debug for BadMemoryRange<'_> {
 #[derive(Debug)]
 pub enum Error<'m> {
     BadInstruction(ProgramCounter, BadMemoryRange<'m>),
+    RegisterBlockError(RegisterBlockError),
+    MemoryError(heap::MemoryError),
+    PermanentVariableError(heap::PermanentVariableError),
 }
 
 #[derive(Debug)]
@@ -281,34 +284,56 @@ impl Instruction {
 }
 
 #[derive(Debug)]
+pub enum RegisterBlockError {
+    IndexOutOfRange {
+        index: RegisterIndex,
+        register_count: usize,
+    },
+    NoValue {
+        index: RegisterIndex,
+    },
+}
+
+#[derive(Debug)]
 struct RegisterBlock([Address; 32]);
 
 impl RegisterBlock {
-    fn load(&self, index: impl Into<RegisterIndex>) -> Address {
-        let index = index.into().0 as usize;
+    fn load(&self, index: impl Into<RegisterIndex>) -> Result<Address, RegisterBlockError> {
+        let index = index.into();
         log_trace!("Loading Register {}", index);
-        let entry = *self.0.get(index).unwrap_or_else(|| {
-            panic!(
-                "Register Index {} out of range ({})",
-                index,
-                (&self.0[..]).len()
-            );
-        });
+        let entry =
+            *self
+                .0
+                .get(index.0 as usize)
+                .ok_or_else(|| RegisterBlockError::IndexOutOfRange {
+                    index,
+                    register_count: (&self.0[..]).len(),
+                })?;
 
         if entry == unsafe { Address::none() } {
-            panic!("No register value @ {}", index);
+            return Err(RegisterBlockError::NoValue { index });
         }
 
-        entry
+        Ok(entry)
     }
 
-    fn store(&mut self, index: impl Into<RegisterIndex>, address: Address) {
-        let index = index.into().0 as usize;
+    fn store(
+        &mut self,
+        index: impl Into<RegisterIndex>,
+        address: Address,
+    ) -> Result<(), RegisterBlockError> {
+        let index = index.into();
         log_trace!("Storing {} in Register {}", address, index);
-        let len = (&self.0[..]).len();
-        *self.0.get_mut(index).unwrap_or_else(|| {
-            panic!("Register Index {} out of range ({})", index, len);
-        }) = address;
+        let register_count = (&self.0[..]).len();
+        let register =
+            self.0
+                .get_mut(index.0 as usize)
+                .ok_or(RegisterBlockError::IndexOutOfRange {
+                    index,
+                    register_count,
+                })?;
+        *register = address;
+        Ok(())
     }
 
     fn clear_above(&mut self, n: Arity) {
@@ -337,16 +362,39 @@ enum CurrentlyExecuting {
 }
 
 #[derive(Debug)]
-#[repr(u8)]
-pub enum ExecutionFailure {
-    Failed = b'F',
+pub enum ExecutionFailure<'m> {
+    Failed,
+    Error(Error<'m>),
+}
+
+impl<'m> From<Error<'m>> for ExecutionFailure<'m> {
+    fn from(err: Error<'m>) -> Self {
+        Self::Error(err)
+    }
+}
+
+impl<'m> From<RegisterBlockError> for ExecutionFailure<'m> {
+    fn from(err: RegisterBlockError) -> Self {
+        Self::Error(Error::RegisterBlockError(err))
+    }
+}
+
+impl<'m> From<heap::MemoryError> for ExecutionFailure<'m> {
+    fn from(err: heap::MemoryError) -> Self {
+        Self::Error(Error::MemoryError(err))
+    }
+}
+
+impl<'m> From<heap::PermanentVariableError> for ExecutionFailure<'m> {
+    fn from(err: heap::PermanentVariableError) -> Self {
+        Self::Error(Error::PermanentVariableError(err))
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
-#[repr(u8)]
 pub enum ExecutionSuccess {
-    SingleAnswer = b'A',
-    MultipleAnswers = b'C',
+    SingleAnswer,
+    MultipleAnswers,
 }
 
 #[derive(Debug)]
@@ -424,80 +472,83 @@ impl<'m> Machine<'m> {
         }
     }
 
-    fn execute_instruction(&mut self, instruction: Instruction) -> Result<(), ExecutionFailure> {
+    fn execute_instruction(
+        &mut self,
+        instruction: Instruction,
+    ) -> Result<(), ExecutionFailure<'m>> {
         match instruction {
             Instruction::PutVariableXn { ai, xn } => {
-                let address = self.new_variable();
-                self.registers.store(ai, address);
-                self.registers.store(xn, address);
+                let address = self.new_variable()?;
+                self.registers.store(ai, address)?;
+                self.registers.store(xn, address)?;
                 Ok(())
             }
             Instruction::PutVariableYn { ai, yn } => {
-                let address = self.new_variable();
-                self.registers.store(ai, address);
-                self.memory.store_permanent_variable(yn, address);
+                let address = self.new_variable()?;
+                self.registers.store(ai, address)?;
+                self.memory.store_permanent_variable(yn, address)?;
                 Ok(())
             }
             Instruction::PutValueXn { ai, xn } => {
-                let address = self.registers.load(xn);
-                self.registers.store(ai, address);
+                let address = self.registers.load(xn)?;
+                self.registers.store(ai, address)?;
                 Ok(())
             }
             Instruction::PutValueYn { ai, yn } => {
-                let address = self.memory.load_permanent_variable(yn);
-                self.registers.store(ai, address);
+                let address = self.memory.load_permanent_variable(yn)?;
+                self.registers.store(ai, address)?;
                 Ok(())
             }
             Instruction::PutStructure { ai, f, n } => {
-                let address = self.new_structure(f, n);
-                self.registers.store(ai, address);
+                let address = self.new_structure(f, n)?;
+                self.registers.store(ai, address)?;
                 Ok(())
             }
             Instruction::PutList { ai } => {
-                let address = self.new_list();
-                self.registers.store(ai, address);
+                let address = self.new_list()?;
+                self.registers.store(ai, address)?;
                 Ok(())
             }
             Instruction::PutConstant { ai, c } => {
-                let address = self.new_constant(c);
-                self.registers.store(ai, address);
+                let address = self.new_constant(c)?;
+                self.registers.store(ai, address)?;
                 Ok(())
             }
             Instruction::PutVoid { ai, n } => {
                 for ai in (ai.ai..).take(n.0 as usize).map(|ai| Ai { ai }) {
-                    let address = self.new_variable();
-                    self.registers.store(ai, address);
+                    let address = self.new_variable()?;
+                    self.registers.store(ai, address)?;
                 }
                 Ok(())
             }
             Instruction::GetVariableXn { ai, xn } => {
-                self.registers.store(xn, self.registers.load(ai));
+                self.registers.store(xn, self.registers.load(ai)?)?;
                 Ok(())
             }
             Instruction::GetVariableYn { ai, yn } => {
-                let address = self.registers.load(ai);
-                self.memory.store_permanent_variable(yn, address);
+                let address = self.registers.load(ai)?;
+                self.memory.store_permanent_variable(yn, address)?;
                 Ok(())
             }
             Instruction::GetValueXn { ai, xn } => self
-                .unify(self.registers.load(xn), self.registers.load(ai))
+                .unify(self.registers.load(xn)?, self.registers.load(ai)?)?
                 .or_else(|UnificationFailure| self.backtrack()),
             Instruction::GetValueYn { ai, yn } => self
                 .unify(
-                    self.memory.load_permanent_variable(yn),
-                    self.registers.load(ai),
-                )
+                    self.memory.load_permanent_variable(yn)?,
+                    self.registers.load(ai)?,
+                )?
                 .or_else(|UnificationFailure| self.backtrack()),
             Instruction::GetStructure { ai, f, n } => {
-                let (address, value) = self.get_register_value(ai);
+                let (address, value) = self.get_register_value(ai)?;
                 match value {
                     Value::Reference(variable_address) => {
                         log_trace!("Writing structure {}/{}", f, n);
 
-                        let value_address = self.new_structure(f, n);
+                        let value_address = self.new_structure(f, n)?;
 
                         self.memory
-                            .bind_variable_to_value(variable_address, value_address);
+                            .bind_variable_to_value(variable_address, value_address)?;
                     }
                     Value::Structure(found_f, found_n) => {
                         if f == found_f && n == found_n {
@@ -513,15 +564,15 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::GetList { ai } => {
-                let (address, value) = self.get_register_value(ai);
+                let (address, value) = self.get_register_value(ai)?;
                 match value {
                     Value::Reference(variable_address) => {
                         log_trace!("Writing list");
 
-                        let value_address = self.new_list();
+                        let value_address = self.new_list()?;
 
                         self.memory
-                            .bind_variable_to_value(variable_address, value_address);
+                            .bind_variable_to_value(variable_address, value_address)?;
                     }
                     Value::List => {
                         log_trace!("Reading list");
@@ -531,66 +582,62 @@ impl<'m> Machine<'m> {
                 }
                 Ok(())
             }
-            Instruction::GetConstant { ai, c } => match self.get_register_value(ai).1 {
+            Instruction::GetConstant { ai, c } => match self.get_register_value(ai)?.1 {
                 Value::Reference(variable_address) => {
-                    let value_address = self.new_constant(c);
+                    let value_address = self.new_constant(c)?;
                     self.memory
-                        .bind_variable_to_value(variable_address, value_address);
+                        .bind_variable_to_value(variable_address, value_address)?;
                     Ok(())
                 }
                 Value::Constant(rc) if rc == c => Ok(()),
                 _ => self.backtrack(),
             },
             Instruction::SetVariableXn { xn } => {
-                let address = self.new_variable();
-                self.registers.store(xn, address);
+                let address = self.new_variable()?;
+                self.registers.store(xn, address)?;
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetVariableYn { yn } => {
-                let address = self.new_variable();
-                self.memory.store_permanent_variable(yn, address);
+                let address = self.new_variable()?;
+                self.memory.store_permanent_variable(yn, address)?;
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetValueXn { xn } => {
-                let address = self.registers.load(xn);
+                let address = self.registers.load(xn)?;
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetValueYn { yn } => {
-                let address = self.memory.load_permanent_variable(yn);
+                let address = self.memory.load_permanent_variable(yn)?;
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetConstant { c } => {
-                let address = self.new_constant(c);
+                let address = self.new_constant(c)?;
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
                 Ok(())
             }
             Instruction::SetVoid { n } => {
                 for _ in 0..n.into_inner() {
-                    let address = self.new_variable();
+                    let address = self.new_variable()?;
                     self.structure_iteration_state
                         .write_next(&mut self.memory, address);
                 }
                 Ok(())
             }
             Instruction::UnifyVariableXn { xn } => {
-                self.unify_variable(xn, |this, xn, address| this.registers.store(xn, address));
-                Ok(())
+                self.unify_variable(xn, |this, xn, address| this.registers.store(xn, address))
             }
-            Instruction::UnifyVariableYn { yn } => {
-                self.unify_variable(yn, |this, yn, address| {
-                    this.memory.store_permanent_variable(yn, address);
-                });
-                Ok(())
-            }
+            Instruction::UnifyVariableYn { yn } => self.unify_variable(yn, |this, yn, address| {
+                this.memory.store_permanent_variable(yn, address)
+            }),
             Instruction::UnifyValueXn { xn } => {
                 self.unify_value(xn, |this, xn| this.registers.load(xn))
             }
@@ -602,13 +649,13 @@ impl<'m> Machine<'m> {
                     ReadWriteMode::Read => {
                         let term_address = self.structure_iteration_state.read_next(&self.memory);
 
-                        let value = self.memory.get_value(term_address).1;
+                        let value = self.memory.get_value(term_address)?.1;
 
                         match value {
                             Value::Reference(variable_address) => {
-                                let value_address = self.new_constant(c);
+                                let value_address = self.new_constant(c)?;
                                 self.memory
-                                    .bind_variable_to_value(variable_address, value_address);
+                                    .bind_variable_to_value(variable_address, value_address)?;
                                 Ok(())
                             }
                             Value::Constant(c1) => {
@@ -622,7 +669,7 @@ impl<'m> Machine<'m> {
                         }
                     }
                     ReadWriteMode::Write => {
-                        let address = self.new_constant(c);
+                        let address = self.new_constant(c)?;
                         self.structure_iteration_state
                             .write_next(&mut self.memory, address);
 
@@ -638,7 +685,7 @@ impl<'m> Machine<'m> {
                     }
                     ReadWriteMode::Write => {
                         for _ in 0..n.0 {
-                            let address = self.new_variable();
+                            let address = self.new_variable()?;
                             self.structure_iteration_state
                                 .write_next(&mut self.memory, address);
                         }
@@ -647,11 +694,11 @@ impl<'m> Machine<'m> {
                 }
             }
             Instruction::Allocate { n } => {
-                self.memory.allocate(n, self.cp, &[]);
+                self.memory.allocate(n, self.cp, &[])?;
                 Ok(())
             }
             Instruction::Trim { n } => {
-                self.memory.trim(n);
+                self.memory.trim(n)?;
                 Ok(())
             }
             Instruction::Deallocate => {
@@ -670,7 +717,7 @@ impl<'m> Machine<'m> {
                             log_trace!("Saved Register Value: {}", value);
                         }
 
-                        self.memory.allocate(n, None, registers);
+                        self.memory.allocate(n, None, registers)?;
 
                         self.cp = None;
                     }
@@ -704,7 +751,7 @@ impl<'m> Machine<'m> {
             Instruction::TryMeElse { p } => {
                 self.structure_iteration_state.verify_not_active();
                 self.memory
-                    .new_choice_point(p, self.cp, &self.registers[self.argument_count]);
+                    .new_choice_point(p, self.cp, &self.registers[self.argument_count])?;
                 Ok(())
             }
             Instruction::RetryMeElse { p } => {
@@ -724,11 +771,11 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::GetLevel { yn } => {
-                self.memory.get_level(yn);
+                self.memory.get_level(yn)?;
                 Ok(())
             }
             Instruction::Cut { yn } => {
-                self.memory.cut(yn);
+                self.memory.cut(yn)?;
                 Ok(())
             }
             Instruction::True => Ok(()),
@@ -736,9 +783,9 @@ impl<'m> Machine<'m> {
         }
     }
 
-    fn get_register_value(&self, index: Ai) -> (Address, Value) {
-        let (address, value, _) = self.memory.get_value(self.registers.load(index));
-        (address, value)
+    fn get_register_value(&self, index: Ai) -> Result<(Address, Value), ExecutionFailure<'m>> {
+        let (address, value, _) = self.memory.get_value(self.registers.load(index)?)?;
+        Ok((address, value))
     }
 
     pub fn solution_registers(&self) -> impl Iterator<Item = Address> + '_ {
@@ -748,66 +795,50 @@ impl<'m> Machine<'m> {
     pub fn lookup_memory(
         &self,
         address: Address,
-    ) -> (Address, Value, impl Iterator<Item = Address> + '_) {
+    ) -> Result<(Address, Value, impl Iterator<Item = Address> + '_), heap::MemoryError> {
         self.memory.get_value(address)
     }
 
-    fn new_variable(&mut self) -> Address {
-        self.memory.new_variable()
+    fn new_variable(&mut self) -> Result<Address, ExecutionFailure<'m>> {
+        Ok(self.memory.new_variable()?)
     }
 
-    fn new_structure(&mut self, f: Functor, n: Arity) -> Address {
-        let address = self.memory.new_structure(f, n);
+    fn new_structure(&mut self, f: Functor, n: Arity) -> Result<Address, ExecutionFailure<'m>> {
+        let address = self.memory.new_structure(f, n)?;
         self.structure_iteration_state.start_writing(address);
 
-        address
+        Ok(address)
     }
 
-    fn new_list(&mut self) -> Address {
-        let address = self.memory.new_list();
+    fn new_list(&mut self) -> Result<Address, ExecutionFailure<'m>> {
+        let address = self.memory.new_list()?;
         self.structure_iteration_state.start_writing(address);
 
-        address
+        Ok(address)
     }
 
-    fn new_constant(&mut self, c: Constant) -> Address {
-        self.memory.new_constant(c)
+    fn new_constant(&mut self, c: Constant) -> Result<Address, ExecutionFailure<'m>> {
+        Ok(self.memory.new_constant(c)?)
     }
 
-    fn unify_variable<I>(&mut self, index: I, store: impl FnOnce(&mut Self, I, Address)) {
-        match self.structure_iteration_state.read_write_mode() {
-            ReadWriteMode::Read => {
-                let term_address = self.structure_iteration_state.read_next(&self.memory);
-
-                store(self, index, term_address);
-            }
-            ReadWriteMode::Write => {
-                let address = self.new_variable();
-                store(self, index, address);
-                self.structure_iteration_state
-                    .write_next(&mut self.memory, address);
-            }
-        }
-    }
-
-    fn unify_value<I>(
+    fn unify_variable<I, E>(
         &mut self,
         index: I,
-        load: impl FnOnce(&mut Self, I) -> Address,
-    ) -> Result<(), ExecutionFailure> {
+        store: impl FnOnce(&mut Self, I, Address) -> Result<(), E>,
+    ) -> Result<(), ExecutionFailure<'m>>
+    where
+        ExecutionFailure<'m>: From<E>,
+    {
         match self.structure_iteration_state.read_write_mode() {
             ReadWriteMode::Read => {
                 let term_address = self.structure_iteration_state.read_next(&self.memory);
 
-                let register_address = load(self, index);
-
-                self.unify(register_address, term_address)
-                    .or_else(|UnificationFailure| self.backtrack())
+                store(self, index, term_address)?;
+                Ok(())
             }
             ReadWriteMode::Write => {
-                let address = load(self, index);
-                // TODO - Do we need a new variable?
-                // self.new_variable_with_value(address);
+                let address = self.new_variable()?;
+                store(self, index, address)?;
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address);
                 Ok(())
@@ -815,24 +846,54 @@ impl<'m> Machine<'m> {
         }
     }
 
-    fn unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationFailure> {
+    fn unify_value<I, E>(
+        &mut self,
+        index: I,
+        load: impl FnOnce(&mut Self, I) -> Result<Address, E>,
+    ) -> Result<(), ExecutionFailure<'m>>
+    where
+        ExecutionFailure<'m>: From<E>,
+    {
+        match self.structure_iteration_state.read_write_mode() {
+            ReadWriteMode::Read => {
+                let term_address = self.structure_iteration_state.read_next(&self.memory);
+
+                let register_address = load(self, index)?;
+
+                self.unify(register_address, term_address)?
+                    .or_else(|UnificationFailure| self.backtrack())
+            }
+            ReadWriteMode::Write => {
+                let address = load(self, index)?;
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address);
+                Ok(())
+            }
+        }
+    }
+
+    fn unify(
+        &mut self,
+        a1: Address,
+        a2: Address,
+    ) -> Result<Result<(), UnificationFailure>, heap::MemoryError> {
         log_trace!("Unifying {} and {}", a1, a2);
-        let (a1, v1, _) = self.memory.get_value(a1);
-        let (a2, v2, _) = self.memory.get_value(a2);
+        let (a1, v1, _) = self.memory.get_value(a1)?;
+        let (a2, v2, _) = self.memory.get_value(a2)?;
         log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
-        match (a1, v1, a2, v2) {
+        Ok(match (a1, v1, a2, v2) {
             (a1, Value::Reference(_), a2, Value::Reference(_)) => {
-                self.memory.bind_variables(a1, a2);
+                self.memory.bind_variables(a1, a2)?;
                 Ok(())
             }
             (a1, Value::Reference(_), a2, value) => {
                 assert!(!matches!(value, Value::Reference(_)));
-                self.memory.bind_variable_to_value(a1, a2);
+                self.memory.bind_variable_to_value(a1, a2)?;
                 Ok(())
             }
             (a1, value, a2, Value::Reference(_)) => {
                 assert!(!matches!(value, Value::Reference(_)));
-                self.memory.bind_variable_to_value(a2, a1);
+                self.memory.bind_variable_to_value(a2, a1)?;
                 Ok(())
             }
             (a1, Value::Structure(f1, n1), a2, Value::Structure(f2, n2)) => {
@@ -842,7 +903,11 @@ impl<'m> Machine<'m> {
                     for _ in 0..n1.0 {
                         let a1 = terms_1.read_next(&self.memory);
                         let a2 = terms_2.read_next(&self.memory);
-                        self.unify(a1, a2)?;
+                        match self.unify(a1, a2) {
+                            Ok(Ok(())) => (),
+                            Ok(Err(err)) => return Ok(Err(err)),
+                            Err(err) => return Err(err),
+                        }
                     }
 
                     Ok(())
@@ -856,7 +921,11 @@ impl<'m> Machine<'m> {
                 for _ in 0..2 {
                     let a1 = terms_1.read_next(&self.memory);
                     let a2 = terms_2.read_next(&self.memory);
-                    self.unify(a1, a2)?;
+                    match self.unify(a1, a2) {
+                        Ok(Ok(())) => (),
+                        Ok(Err(err)) => return Ok(Err(err)),
+                        Err(err) => return Err(err),
+                    }
                 }
 
                 Ok(())
@@ -869,10 +938,10 @@ impl<'m> Machine<'m> {
                 }
             }
             _ => Err(UnificationFailure),
-        }
+        })
     }
 
-    fn backtrack(&mut self) -> Result<(), ExecutionFailure> {
+    fn backtrack(&mut self) -> Result<(), ExecutionFailure<'static>> {
         self.structure_iteration_state.reset();
         self.memory.backtrack(&mut self.pc)
     }

@@ -1,9 +1,6 @@
-use core::{fmt, panic};
+use core::fmt;
 
-use crate::{
-    log_trace,
-    serializable::{Serializable, SerializableWrapper},
-};
+use crate::{log_trace, serializable::SerializableWrapper};
 
 use super::basic_types::{
     Arity, Constant, Functor, NoneRepresents, OptionDisplay, ProgramCounter, Yn,
@@ -19,7 +16,7 @@ enum ValueType {
     Constant,
     Environment,
     ChoicePoint,
-    Trail,
+    TrailVariable,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,12 +38,6 @@ impl NoneRepresents for Address {
     const NONE_REPRESENTS: &'static str = "NULL";
 }
 
-impl From<u32> for Address {
-    fn from(word: u32) -> Self {
-        Self(std::convert::TryInto::try_into(word).unwrap_or_else(|_| panic!("Bad word: {}", word)))
-    }
-}
-
 impl Address {
     const NO_ADDRESS: u16 = u16::MAX;
 
@@ -65,23 +56,6 @@ impl SerializableWrapper for Address {
 
     fn into_inner(self) -> Self::Inner {
         self.0
-    }
-}
-
-impl Serializable for Option<Address> {
-    type Bytes = <Address as Serializable>::Bytes;
-
-    fn from_be_bytes(bytes: Self::Bytes) -> Self {
-        let address = Address::from_be_bytes(bytes);
-        if address.0 == Address::NO_ADDRESS {
-            None
-        } else {
-            Some(address)
-        }
-    }
-
-    fn into_be_bytes(self) -> Self::Bytes {
-        self.unwrap_or(Address(Address::NO_ADDRESS)).into_be_bytes()
     }
 }
 
@@ -141,17 +115,16 @@ struct RegistryEntry {
 struct Registry<'m>(&'m mut [Option<RegistryEntry>]);
 
 impl<'m> Registry<'m> {
-    fn new_registry_entry(&mut self) -> (Address, &mut Option<RegistryEntry>) {
+    fn new_registry_entry(&mut self) -> Option<(Address, &mut Option<RegistryEntry>)> {
         let (index, slot) = self
             .0
             .iter_mut()
             .enumerate()
-            .find(|(_, entry)| entry.is_none())
-            .expect("No more registry entries");
+            .find(|(_, entry)| entry.is_none())?;
 
         let address = Address(core::convert::TryInto::try_into(index).expect("Invalid index"));
 
-        (address, slot)
+        Some((address, slot))
     }
 }
 
@@ -163,19 +136,241 @@ impl<'m> std::ops::Index<Address> for Registry<'m> {
     }
 }
 
-struct TupleMemory<'m>(&'m mut [u32]);
+type TupleWord = u16;
+type TupleHalfWord = u8;
 
-impl<'m> std::ops::Index<TupleAddress> for TupleMemory<'m> {
-    type Output = u32;
+#[derive(Debug)]
+pub enum TupleEntryError {
+    BadHalfWord {
+        expected: TupleHalfWord,
+        actual: TupleHalfWord,
+    },
+    BadWord {
+        expected: TupleWord,
+        actual: TupleWord,
+    },
+}
 
-    fn index(&self, index: TupleAddress) -> &Self::Output {
-        &self.0[index.0 as usize]
+trait TupleHalfEntry: Sized {
+    fn decode(half_word: TupleHalfWord) -> Result<Self, TupleEntryError>;
+    fn encode(self) -> TupleHalfWord;
+}
+
+impl<T: SerializableWrapper<Inner = TupleHalfWord>> TupleHalfEntry for T {
+    fn decode(half_word: TupleHalfWord) -> Result<Self, TupleEntryError> {
+        Ok(Self::from_inner(half_word))
+    }
+
+    fn encode(self) -> TupleHalfWord {
+        self.into_inner()
     }
 }
 
-impl<'m> std::ops::IndexMut<TupleAddress> for TupleMemory<'m> {
-    fn index_mut(&mut self, index: TupleAddress) -> &mut Self::Output {
-        &mut self.0[index.0 as usize]
+struct MustBeZero;
+
+trait TupleEntry: Sized {
+    fn decode(word: TupleWord) -> Result<Self, TupleEntryError>;
+    fn encode(self) -> TupleWord;
+}
+
+impl TupleEntry for Option<Address> {
+    fn decode(word: TupleWord) -> Result<Self, TupleEntryError> {
+        Ok(if word == Address::NO_ADDRESS {
+            None
+        } else {
+            Some(Address(word))
+        })
+    }
+
+    fn encode(self) -> TupleWord {
+        self.map_or(Address::NO_ADDRESS, SerializableWrapper::into_inner)
+    }
+}
+
+impl TupleEntry for Option<ProgramCounter> {
+    fn decode(word: TupleWord) -> Result<Self, TupleEntryError> {
+        Ok(if word == ProgramCounter::END_OF_PROGRAM {
+            None
+        } else {
+            Some(ProgramCounter(word))
+        })
+    }
+
+    fn encode(self) -> TupleWord {
+        self.map_or(Address::NO_ADDRESS, SerializableWrapper::into_inner)
+    }
+}
+
+impl<A: TupleHalfEntry, B: TupleHalfEntry> TupleEntry for (A, B) {
+    fn decode(word: TupleWord) -> Result<Self, TupleEntryError> {
+        let [a, b] = word.to_be_bytes();
+        Ok((A::decode(a)?, B::decode(b)?))
+    }
+
+    fn encode(self) -> TupleWord {
+        let (a, b) = self;
+        TupleWord::from_be_bytes([a.encode(), b.encode()])
+    }
+}
+
+impl<T: SerializableWrapper<Inner = u16>> TupleEntry for T {
+    fn decode(word: TupleWord) -> Result<Self, TupleEntryError> {
+        Ok(Self::from_inner(word))
+    }
+
+    fn encode(self) -> TupleWord {
+        self.into_inner()
+    }
+}
+
+impl TupleHalfEntry for MustBeZero {
+    fn decode(half_word: TupleHalfWord) -> Result<Self, TupleEntryError> {
+        if half_word == 0 {
+            Ok(Self)
+        } else {
+            Err(TupleEntryError::BadHalfWord {
+                expected: 0,
+                actual: half_word,
+            })
+        }
+    }
+
+    fn encode(self) -> TupleHalfWord {
+        0
+    }
+}
+
+impl TupleEntry for MustBeZero {
+    fn decode(word: TupleWord) -> Result<Self, TupleEntryError> {
+        if word == 0 {
+            Ok(Self)
+        } else {
+            Err(TupleEntryError::BadWord {
+                expected: 0,
+                actual: word,
+            })
+        }
+    }
+
+    fn encode(self) -> TupleWord {
+        0
+    }
+}
+
+#[derive(Debug)]
+pub enum TupleMemoryError {
+    AddressOutOfRange {
+        address: u16,
+        size: usize,
+    },
+    BadEntry {
+        address: u16,
+        inner: TupleEntryError,
+    },
+}
+
+trait TupleEntries: Sized {
+    fn decode(
+        tuple_memory: &TupleMemory,
+        address: TupleAddress,
+    ) -> Result<(Self, TupleAddress), TupleMemoryError>;
+
+    fn encode(
+        self,
+        tuple_memory: &mut TupleMemory,
+        address: TupleAddress,
+    ) -> Result<TupleAddress, TupleMemoryError>;
+}
+
+struct SingleEntry<T: TupleEntry>(T);
+
+impl<T: TupleEntry> TupleEntries for SingleEntry<T> {
+    fn decode(
+        tuple_memory: &TupleMemory,
+        address: TupleAddress,
+    ) -> Result<(Self, TupleAddress), TupleMemoryError> {
+        T::decode(tuple_memory.load(address)?)
+            .map(|entry| (SingleEntry(entry), address + 1))
+            .map_err(|inner| TupleMemoryError::BadEntry {
+                address: address.0,
+                inner,
+            })
+    }
+
+    fn encode(
+        self,
+        tuple_memory: &mut TupleMemory,
+        address: TupleAddress,
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        tuple_memory.store(address, self.0.encode())?;
+        Ok(address + 1)
+    }
+}
+
+impl<A: TupleEntry, B: TupleEntries> TupleEntries for (A, B) {
+    fn decode(
+        tuple_memory: &TupleMemory,
+        address: TupleAddress,
+    ) -> Result<(Self, TupleAddress), TupleMemoryError> {
+        let (SingleEntry(a), address) = SingleEntry::decode(tuple_memory, address)?;
+        let (b, address) = B::decode(tuple_memory, address)?;
+        Ok(((a, b), address))
+    }
+
+    fn encode(
+        self,
+        tuple_memory: &mut TupleMemory,
+        address: TupleAddress,
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        let (a, b) = self;
+        let address = SingleEntry(a).encode(tuple_memory, address)?;
+        b.encode(tuple_memory, address)
+    }
+}
+
+struct TupleMemory<'m>(&'m mut [TupleWord]);
+
+impl<'m> TupleMemory<'m> {
+    fn load(&self, address: TupleAddress) -> Result<TupleWord, TupleMemoryError> {
+        let size = self.0.len();
+        self.0
+            .get(address.0 as usize)
+            .copied()
+            .ok_or(TupleMemoryError::AddressOutOfRange {
+                address: address.0,
+                size,
+            })
+    }
+
+    fn store(&mut self, address: TupleAddress, value: TupleWord) -> Result<(), TupleMemoryError> {
+        let size = self.0.len();
+
+        let entry =
+            self.0
+                .get_mut(address.0 as usize)
+                .ok_or(TupleMemoryError::AddressOutOfRange {
+                    address: address.0,
+                    size,
+                })?;
+
+        *entry = value;
+
+        Ok(())
+    }
+
+    fn decode<T: TupleEntries>(
+        &self,
+        address: TupleAddress,
+    ) -> Result<(T, TupleAddress), TupleMemoryError> {
+        T::decode(self, address)
+    }
+
+    fn encode(
+        &mut self,
+        address: TupleAddress,
+        entry: impl TupleEntries,
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        entry.encode(self, address)
     }
 }
 
@@ -190,7 +385,10 @@ trait Tuple: Sized {
     const VALUE_TYPE: ValueType;
     type Terms: ?Sized;
 
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata);
+    fn decode(
+        tuple_memory: &TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata), TupleMemoryError>;
 
     fn encode(
         &self,
@@ -198,7 +396,7 @@ trait Tuple: Sized {
         tuple_memory: &mut TupleMemory,
         tuple_address: TupleAddress,
         terms: &Self::Terms,
-    ) -> TupleAddress;
+    ) -> Result<TupleAddress, TupleMemoryError>;
 }
 
 #[derive(Debug)]
@@ -208,19 +406,22 @@ impl Tuple for ReferenceValue {
     const VALUE_TYPE: ValueType = ValueType::Reference;
     type Terms = ();
 
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let (registry_address, r) =
-            Serializable::from_be_bytes(tuple_memory[tuple_address].to_be_bytes());
+    fn decode(
+        tuple_memory: &TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata), TupleMemoryError> {
+        let ((registry_address, SingleEntry(r)), next_tuple) =
+            tuple_memory.decode(tuple_address)?;
 
-        (
+        Ok((
             Self(r),
             TupleMetadata {
                 registry_address,
                 first_term: TupleAddress::NULL,
                 arity: Arity::ZERO,
-                next_tuple: tuple_address + 1,
+                next_tuple,
             },
-        )
+        ))
     }
 
     fn encode(
@@ -229,15 +430,10 @@ impl Tuple for ReferenceValue {
         tuple_memory: &mut TupleMemory,
         tuple_address: TupleAddress,
         _: &(),
-    ) -> TupleAddress {
+    ) -> Result<TupleAddress, TupleMemoryError> {
         let Self(r) = *self;
 
-        let [a1, a0] = registry_address.into_be_bytes();
-        let [r1, r0] = r.into_be_bytes();
-
-        tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, r1, r0]);
-
-        tuple_address + 1
+        tuple_memory.encode(tuple_address, (registry_address, SingleEntry(r)))
     }
 }
 
@@ -248,24 +444,22 @@ impl Tuple for StructureValue {
     const VALUE_TYPE: ValueType = ValueType::Structure;
     type Terms = ();
 
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let [a1, a0, f1, f0] = tuple_memory[tuple_address].to_be_bytes();
-        let [z2, z1, z0, n] = tuple_memory[tuple_address + 1].to_be_bytes();
-        assert_eq!(z2, 0);
-        assert_eq!(z1, 0);
-        assert_eq!(z0, 0);
+    fn decode(
+        tuple_memory: &TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata), TupleMemoryError> {
+        let ((registry_address, (f, SingleEntry((MustBeZero, arity)))), first_term) =
+            tuple_memory.decode(tuple_address)?;
 
-        let arity = Arity(n);
-        let first_term = tuple_address + 2;
-        (
-            Self(Functor::from_be_bytes([f1, f0]), arity),
+        Ok((
+            Self(f, arity),
             TupleMetadata {
-                registry_address: Address::from_be_bytes([a1, a0]),
+                registry_address,
                 first_term,
                 arity,
                 next_tuple: first_term + arity,
             },
-        )
+        ))
     }
 
     fn encode(
@@ -274,22 +468,19 @@ impl Tuple for StructureValue {
         tuple_memory: &mut TupleMemory,
         tuple_address: TupleAddress,
         _: &(),
-    ) -> TupleAddress {
+    ) -> Result<TupleAddress, TupleMemoryError> {
         let Self(f, n) = *self;
 
-        let [a1, a0] = registry_address.into_be_bytes();
-        let [f1, f0] = f.into_be_bytes();
-
-        tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, f1, f0]);
-        tuple_memory[tuple_address + 1] = u32::from_be_bytes([0, 0, 0, n.0]);
-
-        let first_term: TupleAddress = tuple_address + 2;
+        let first_term = tuple_memory.encode(
+            tuple_address,
+            (registry_address, (f, SingleEntry((MustBeZero, n)))),
+        )?;
 
         for term_address in first_term.iter(n) {
-            tuple_memory[term_address] = u32::MAX;
+            tuple_memory.store(term_address, Address::NO_ADDRESS)?;
         }
 
-        first_term + n
+        Ok(first_term + n)
     }
 }
 
@@ -304,21 +495,21 @@ impl Tuple for ListValue {
     const VALUE_TYPE: ValueType = ValueType::List;
     type Terms = ();
 
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let [a1, a0, z1, z0] = tuple_memory[tuple_address].to_be_bytes();
-        assert_eq!(z1, 0);
-        assert_eq!(z0, 0);
+    fn decode(
+        tuple_memory: &TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata), TupleMemoryError> {
+        let (SingleEntry(registry_address), first_term) = tuple_memory.decode(tuple_address)?;
 
-        let first_term = tuple_address + 1;
-        (
+        Ok((
             Self,
             TupleMetadata {
-                registry_address: Address::from_be_bytes([a1, a0]),
+                registry_address,
                 first_term,
                 arity: Self::ARITY,
                 next_tuple: first_term + Self::ARITY,
             },
-        )
+        ))
     }
 
     fn encode(
@@ -327,14 +518,14 @@ impl Tuple for ListValue {
         tuple_memory: &mut TupleMemory,
         tuple_address: TupleAddress,
         _: &(),
-    ) -> TupleAddress {
-        let [a1, a0] = registry_address.into_be_bytes();
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        let first_term = tuple_memory.encode(tuple_address, SingleEntry(registry_address))?;
 
-        tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, 0, 0]);
-        tuple_memory[tuple_address + 1] = u32::MAX;
-        tuple_memory[tuple_address + 2] = u32::MAX;
+        for term_address in first_term.iter(Self::ARITY) {
+            tuple_memory.store(term_address, Address::NO_ADDRESS)?;
+        }
 
-        tuple_address + 3
+        Ok(first_term + Self::ARITY)
     }
 }
 
@@ -345,18 +536,22 @@ impl Tuple for ConstantValue {
     const VALUE_TYPE: ValueType = ValueType::Constant;
     type Terms = ();
 
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let (registry_address, c) =
-            Serializable::from_be_bytes(tuple_memory[tuple_address].to_be_bytes());
-        (
+    fn decode(
+        tuple_memory: &TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata), TupleMemoryError> {
+        let ((registry_address, SingleEntry(c)), next_tuple) =
+            tuple_memory.decode(tuple_address)?;
+
+        Ok((
             Self(c),
             TupleMetadata {
                 registry_address,
                 first_term: TupleAddress::NULL,
-                arity: Arity(0),
-                next_tuple: tuple_address + 1,
+                arity: Arity::ZERO,
+                next_tuple,
             },
-        )
+        ))
     }
 
     fn encode(
@@ -365,71 +560,10 @@ impl Tuple for ConstantValue {
         tuple_memory: &mut TupleMemory,
         tuple_address: TupleAddress,
         _: &(),
-    ) -> TupleAddress {
+    ) -> Result<TupleAddress, TupleMemoryError> {
         let Self(c) = *self;
 
-        tuple_memory[tuple_address] = u32::from_be_bytes((registry_address, c).into_be_bytes());
-
-        tuple_address + 1
-    }
-}
-
-struct FirstEnvironmentWord {
-    registry_address: Address,
-    continuation_environment: Option<Address>,
-}
-
-impl FirstEnvironmentWord {
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let (registry_address, continuation_environment) =
-            Serializable::from_be_bytes(tuple_memory[tuple_address].to_be_bytes());
-
-        Self {
-            registry_address,
-            continuation_environment,
-        }
-    }
-
-    fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
-        let Self {
-            registry_address,
-            continuation_environment,
-        } = self;
-
-        tuple_memory[tuple_address] =
-            u32::from_be_bytes((registry_address, continuation_environment).into_be_bytes());
-    }
-}
-
-struct SecondEnvironmentWord {
-    continuation_point: Option<ProgramCounter>,
-    number_of_active_permanent_variables: Arity,
-    number_of_permanent_variables: Arity,
-}
-
-impl SecondEnvironmentWord {
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let [cp1, cp0, na, np] = tuple_memory[tuple_address + 1].to_be_bytes();
-
-        Self {
-            continuation_point: Option::<ProgramCounter>::from_be_bytes([cp1, cp0]),
-            number_of_active_permanent_variables: Arity::from_be_bytes([na]),
-            number_of_permanent_variables: Arity::from_be_bytes([np]),
-        }
-    }
-
-    fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
-        let Self {
-            continuation_point,
-            number_of_active_permanent_variables,
-            number_of_permanent_variables,
-        } = self;
-
-        let [cp1, cp0] = continuation_point.into_be_bytes();
-        let [na] = number_of_active_permanent_variables.into_be_bytes();
-        let [np] = number_of_permanent_variables.into_be_bytes();
-
-        tuple_memory[tuple_address + 1] = u32::from_be_bytes([cp1, cp0, na, np]);
+        tuple_memory.encode(tuple_address, (registry_address, SingleEntry(c)))
     }
 }
 
@@ -441,24 +575,65 @@ struct Environment {
     number_of_permanent_variables: Arity,
 }
 
+impl Environment {
+    fn encode_head(
+        &self,
+        registry_address: Address,
+        tuple_memory: &mut TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        let Self {
+            continuation_environment,
+            continuation_point,
+            number_of_active_permanent_variables,
+            number_of_permanent_variables,
+        } = *self;
+
+        tuple_memory.encode(
+            tuple_address,
+            (
+                registry_address,
+                (
+                    continuation_environment,
+                    (
+                        continuation_point,
+                        SingleEntry((
+                            number_of_active_permanent_variables,
+                            number_of_permanent_variables,
+                        )),
+                    ),
+                ),
+            ),
+        )
+    }
+}
+
 impl Tuple for Environment {
     const VALUE_TYPE: ValueType = ValueType::Environment;
     type Terms = [Address];
 
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let FirstEnvironmentWord {
-            registry_address,
-            continuation_environment,
-        } = FirstEnvironmentWord::decode(tuple_memory, tuple_address);
+    fn decode(
+        tuple_memory: &TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata), TupleMemoryError> {
+        let (
+            (
+                registry_address,
+                (
+                    continuation_environment,
+                    (
+                        continuation_point,
+                        SingleEntry((
+                            number_of_active_permanent_variables,
+                            number_of_permanent_variables,
+                        )),
+                    ),
+                ),
+            ),
+            first_term,
+        ) = tuple_memory.decode(tuple_address)?;
 
-        let SecondEnvironmentWord {
-            continuation_point,
-            number_of_active_permanent_variables,
-            number_of_permanent_variables,
-        } = SecondEnvironmentWord::decode(tuple_memory, tuple_address);
-
-        let first_term = tuple_address + 2;
-        (
+        Ok((
             Self {
                 continuation_environment,
                 continuation_point,
@@ -471,7 +646,7 @@ impl Tuple for Environment {
                 arity: number_of_active_permanent_variables,
                 next_tuple: first_term + number_of_permanent_variables,
             },
-        )
+        ))
     }
 
     fn encode(
@@ -479,156 +654,20 @@ impl Tuple for Environment {
         registry_address: Address,
         tuple_memory: &mut TupleMemory,
         tuple_address: TupleAddress,
-        terms: &[Address],
-    ) -> TupleAddress {
-        let Self {
-            continuation_environment,
-            continuation_point,
-            number_of_active_permanent_variables,
-            number_of_permanent_variables,
-        } = *self;
+        terms: &Self::Terms,
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        let first_term = self.encode_head(registry_address, tuple_memory, tuple_address)?;
 
-        assert!(terms.is_empty() || (terms.len() == self.number_of_permanent_variables.0 as usize));
-
-        FirstEnvironmentWord {
-            registry_address,
-            continuation_environment,
-        }
-        .encode(tuple_memory, tuple_address);
-
-        SecondEnvironmentWord {
-            continuation_point,
-            number_of_active_permanent_variables,
-            number_of_permanent_variables,
-        }
-        .encode(tuple_memory, tuple_address);
-
-        let first_term_address: TupleAddress = tuple_address + 2;
-
-        for (tuple_address, value) in first_term_address
-            .iter(self.number_of_permanent_variables)
-            .zip(
-                terms
-                    .iter()
-                    .copied()
-                    .chain(core::iter::repeat(unsafe { Address::none() })),
-            )
-        {
-            tuple_memory[tuple_address] = value.0 as u32;
+        for (tuple_address, value) in first_term.iter(self.number_of_permanent_variables).zip(
+            terms
+                .iter()
+                .copied()
+                .chain(core::iter::repeat(unsafe { Address::none() })),
+        ) {
+            tuple_memory.store(tuple_address, value.0)?;
         }
 
-        first_term_address + self.number_of_active_permanent_variables
-    }
-}
-
-struct FirstChoicePointWord {
-    registry_address: Address,
-    number_of_saved_registers: Arity,
-}
-
-impl FirstChoicePointWord {
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let [a1, a0, z, n] = tuple_memory[tuple_address].to_be_bytes();
-
-        assert_eq!(z, 0);
-
-        Self {
-            registry_address: Address::from_be_bytes([a1, a0]),
-            number_of_saved_registers: Arity::from_be_bytes([n]),
-        }
-    }
-
-    fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
-        let Self {
-            registry_address,
-            number_of_saved_registers,
-        } = self;
-
-        let [a1, a0] = registry_address.into_be_bytes();
-        let [n] = number_of_saved_registers.into_be_bytes();
-
-        tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, 0, n]);
-    }
-}
-
-struct SecondChoicePointWord {
-    current_environment: Option<Address>,
-    continuation_point: Option<ProgramCounter>,
-}
-
-impl SecondChoicePointWord {
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let (current_environment, continuation_point) =
-            Serializable::from_be_bytes(tuple_memory[tuple_address + 1].to_be_bytes());
-
-        Self {
-            current_environment,
-            continuation_point,
-        }
-    }
-
-    fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
-        let Self {
-            current_environment,
-            continuation_point,
-        } = self;
-
-        tuple_memory[tuple_address + 1] =
-            u32::from_be_bytes((current_environment, continuation_point).into_be_bytes());
-    }
-}
-
-struct ThirdChoicePointWord {
-    next_choice_point: Option<Address>,
-    next_clause: ProgramCounter,
-}
-
-impl ThirdChoicePointWord {
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let (next_choice_point, next_clause) =
-            Serializable::from_be_bytes(tuple_memory[tuple_address + 2].to_be_bytes());
-
-        Self {
-            next_choice_point,
-            next_clause,
-        }
-    }
-
-    fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
-        let Self {
-            next_choice_point,
-            next_clause,
-        } = self;
-
-        tuple_memory[tuple_address + 2] =
-            u32::from_be_bytes((next_choice_point, next_clause).into_be_bytes());
-    }
-}
-
-struct FourthChoicePointWord {
-    trail_top: Option<Address>,
-    cut_register: Option<Address>,
-}
-
-impl FourthChoicePointWord {
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> Self {
-        let (trail_top, cut_register) =
-            Serializable::from_be_bytes(tuple_memory[tuple_address + 3].to_be_bytes());
-
-        Self {
-            trail_top,
-            cut_register,
-        }
-    }
-
-    fn encode(self, tuple_memory: &mut TupleMemory, tuple_address: TupleAddress) {
-        let Self {
-            trail_top,
-            cut_register,
-        } = self;
-
-        tuple_memory[tuple_address + 3] =
-            u32::from_be_bytes((trail_top, cut_register).into_be_bytes());
+        Ok(first_term + self.number_of_active_permanent_variables)
     }
 }
 
@@ -643,36 +682,78 @@ struct ChoicePoint {
     cut_register: Option<Address>,
 }
 
+impl ChoicePoint {
+    fn encode_head(
+        &self,
+        registry_address: Address,
+        tuple_memory: &mut TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        let Self {
+            number_of_saved_registers,
+            current_environment,
+            continuation_point,
+            next_choice_point,
+            next_clause,
+            trail_top,
+            cut_register,
+        } = *self;
+
+        tuple_memory.encode(
+            tuple_address,
+            (
+                registry_address,
+                (
+                    (MustBeZero, number_of_saved_registers),
+                    (
+                        current_environment,
+                        (
+                            continuation_point,
+                            (
+                                next_choice_point,
+                                (next_clause, (trail_top, SingleEntry(cut_register))),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    }
+}
+
 impl Tuple for ChoicePoint {
     const VALUE_TYPE: ValueType = ValueType::ChoicePoint;
 
     type Terms = [Address];
 
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let FirstChoicePointWord {
-            registry_address,
-            number_of_saved_registers,
-        } = FirstChoicePointWord::decode(tuple_memory, tuple_address);
-
-        let SecondChoicePointWord {
-            current_environment,
-            continuation_point,
-        } = SecondChoicePointWord::decode(tuple_memory, tuple_address);
-
-        let ThirdChoicePointWord {
-            next_choice_point,
-            next_clause,
-        } = ThirdChoicePointWord::decode(tuple_memory, tuple_address);
-
-        let FourthChoicePointWord {
-            trail_top,
-            cut_register,
-        } = FourthChoicePointWord::decode(tuple_memory, tuple_address);
+    fn decode(
+        tuple_memory: &TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata), TupleMemoryError> {
+        let (
+            (
+                registry_address,
+                (
+                    (MustBeZero, number_of_saved_registers),
+                    (
+                        current_environment,
+                        (
+                            continuation_point,
+                            (
+                                next_choice_point,
+                                (next_clause, (trail_top, SingleEntry(cut_register))),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            first_term,
+        ) = tuple_memory.decode(tuple_address)?;
 
         let arity = number_of_saved_registers;
-        let first_term = tuple_address + 4;
         let next_tuple = first_term + arity;
-        (
+
+        Ok((
             Self {
                 number_of_saved_registers,
                 current_environment,
@@ -688,7 +769,7 @@ impl Tuple for ChoicePoint {
                 arity,
                 next_tuple,
             },
-        )
+        ))
     }
 
     fn encode(
@@ -697,84 +778,54 @@ impl Tuple for ChoicePoint {
         tuple_memory: &mut TupleMemory,
         tuple_address: TupleAddress,
         saved_registers: &[Address],
-    ) -> TupleAddress {
-        let Self {
-            number_of_saved_registers,
-            current_environment,
-            continuation_point,
-            next_choice_point,
-            next_clause,
-            trail_top,
-            cut_register,
-        } = *self;
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        assert_eq!(
+            self.number_of_saved_registers.0 as usize,
+            saved_registers.len()
+        );
 
-        assert_eq!(number_of_saved_registers.0 as usize, saved_registers.len());
-
-        FirstChoicePointWord {
-            registry_address,
-            number_of_saved_registers,
-        }
-        .encode(tuple_memory, tuple_address);
-
-        SecondChoicePointWord {
-            current_environment,
-            continuation_point,
-        }
-        .encode(tuple_memory, tuple_address);
-
-        ThirdChoicePointWord {
-            next_choice_point,
-            next_clause,
-        }
-        .encode(tuple_memory, tuple_address);
-
-        FourthChoicePointWord {
-            trail_top,
-            cut_register,
-        }
-        .encode(tuple_memory, tuple_address);
-
-        let first_term = tuple_address + 4;
+        let first_term = self.encode_head(registry_address, tuple_memory, tuple_address)?;
 
         for (term_address, &value) in first_term
-            .iter(number_of_saved_registers)
+            .iter(self.number_of_saved_registers)
             .zip(saved_registers)
         {
-            tuple_memory[term_address] = value.0 as u32;
+            tuple_memory.store(term_address, value.0)?;
         }
 
-        first_term + number_of_saved_registers
+        Ok(first_term + self.number_of_saved_registers)
     }
 }
 
 #[derive(Debug)]
-struct TrailItem {
-    item: Address,
+struct TrailVariable {
+    variable: Address,
     next_trail_item: Option<Address>,
 }
 
-impl Tuple for TrailItem {
-    const VALUE_TYPE: ValueType = ValueType::Trail;
+impl Tuple for TrailVariable {
+    const VALUE_TYPE: ValueType = ValueType::TrailVariable;
     type Terms = ();
 
-    fn decode(tuple_memory: &TupleMemory, tuple_address: TupleAddress) -> (Self, TupleMetadata) {
-        let [a1, a0, z1, z0] = tuple_memory[tuple_address].to_be_bytes();
-        let [i1, i0, n1, n0] = tuple_memory[tuple_address + 1].to_be_bytes();
-        assert_eq!(z1, 0);
-        assert_eq!(z0, 0);
+    fn decode(
+        tuple_memory: &TupleMemory,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata), TupleMemoryError> {
+        let ((registry_address, (variable, SingleEntry(next_trail_item))), next_tuple) =
+            tuple_memory.decode(tuple_address)?;
 
-        (
+        Ok((
             Self {
-                item: Address::from_be_bytes([i1, i0]),
-                next_trail_item: Option::<Address>::from_be_bytes([n1, n0]),
+                variable,
+                next_trail_item,
             },
             TupleMetadata {
-                registry_address: Address::from_be_bytes([a1, a0]),
+                registry_address,
                 first_term: TupleAddress::NULL,
                 arity: Arity::ZERO,
-                next_tuple: tuple_address + 2,
+                next_tuple,
             },
-        )
+        ))
     }
 
     fn encode(
@@ -783,15 +834,16 @@ impl Tuple for TrailItem {
         tuple_memory: &mut TupleMemory,
         tuple_address: TupleAddress,
         _: &(),
-    ) -> TupleAddress {
-        let [a1, a0] = registry_address.into_be_bytes();
-        let [i1, i0] = self.item.into_be_bytes();
-        let [n1, n0] = self.next_trail_item.into_be_bytes();
+    ) -> Result<TupleAddress, TupleMemoryError> {
+        let Self {
+            variable,
+            next_trail_item,
+        } = *self;
 
-        tuple_memory[tuple_address] = u32::from_be_bytes([a1, a0, 0, 0]);
-        tuple_memory[tuple_address + 1] = u32::from_be_bytes([i1, i0, n1, n0]);
-
-        tuple_address + 2
+        tuple_memory.encode(
+            tuple_address,
+            (registry_address, (variable, SingleEntry(next_trail_item))),
+        )
     }
 }
 
@@ -821,6 +873,34 @@ impl Value {
     }
 }
 
+#[derive(Debug)]
+pub enum PermanentVariableError {
+    IndexOutOfRange {
+        yn: Yn,
+        permanent_variable_count: Arity,
+    },
+    NoValue {
+        yn: Yn,
+    },
+    TupleMemoryError {
+        yn: Yn,
+        inner: TupleMemoryError,
+    },
+}
+
+#[derive(Debug)]
+pub enum MemoryError {
+    TupleMemoryError(TupleMemoryError),
+    OutOfRegistryEntries,
+    OutOfTupleSpace,
+}
+
+impl From<TupleMemoryError> for MemoryError {
+    fn from(inner: TupleMemoryError) -> Self {
+        Self::TupleMemoryError(inner)
+    }
+}
+
 pub struct Heap<'m> {
     registry: Registry<'m>,
     tuple_memory: TupleMemory<'m>,
@@ -836,6 +916,7 @@ impl<'m> Heap<'m> {
         let memory_size = memory.len();
         let (registry, tuple_memory) = memory.split_at_mut(memory_size / 2);
         let (_, registry, _) = unsafe { registry.align_to_mut() };
+        let (_, tuple_memory, _) = unsafe { tuple_memory.align_to_mut() };
 
         for entry in registry.iter_mut() {
             unsafe { core::ptr::write(entry, None) };
@@ -856,8 +937,11 @@ impl<'m> Heap<'m> {
         &mut self,
         factory: impl FnOnce(Address) -> T,
         terms: &T::Terms,
-    ) -> Address {
-        let (address, registry_entry) = self.registry.new_registry_entry();
+    ) -> Result<Address, MemoryError> {
+        let (address, registry_entry) = self
+            .registry
+            .new_registry_entry()
+            .ok_or(MemoryError::OutOfRegistryEntries)?;
 
         let tuple_address = self.tuple_end;
 
@@ -865,7 +949,9 @@ impl<'m> Heap<'m> {
 
         crate::log_trace!("New value at {}: {:?}", tuple_address, value);
 
-        self.tuple_end = value.encode(address, &mut self.tuple_memory, tuple_address, terms);
+        self.tuple_end = value
+            .encode(address, &mut self.tuple_memory, tuple_address, terms)
+            .map_err(|_| MemoryError::OutOfTupleSpace)?;
 
         crate::log_trace!("h = {}", self.tuple_end);
 
@@ -874,29 +960,29 @@ impl<'m> Heap<'m> {
             tuple_address,
         });
 
-        address
+        Ok(address)
     }
 
-    pub fn new_variable(&mut self) -> Address {
+    pub fn new_variable(&mut self) -> Result<Address, MemoryError> {
         self.new_value(ReferenceValue, &())
     }
 
-    pub fn new_structure(&mut self, f: Functor, n: Arity) -> Address {
+    pub fn new_structure(&mut self, f: Functor, n: Arity) -> Result<Address, MemoryError> {
         self.new_value(|_| StructureValue(f, n), &())
     }
 
-    pub fn new_list(&mut self) -> Address {
+    pub fn new_list(&mut self) -> Result<Address, MemoryError> {
         self.new_value(|_| ListValue, &())
     }
 
-    pub fn new_constant(&mut self, c: Constant) -> Address {
+    pub fn new_constant(&mut self, c: Constant) -> Result<Address, MemoryError> {
         self.new_value(|_| ConstantValue(c), &())
     }
 
     pub fn get_value(
         &self,
         mut address: Address,
-    ) -> (Address, Value, impl Iterator<Item = Address> + '_) {
+    ) -> Result<(Address, Value, impl Iterator<Item = Address> + '_), MemoryError> {
         loop {
             crate::log_trace!("Looking up memory at {}", address);
             let entry = self.registry[address]
@@ -906,7 +992,7 @@ impl<'m> Heap<'m> {
             let (value, metadata) = match &entry.value_type {
                 ValueType::Reference => {
                     let (value, metadata) =
-                        ReferenceValue::decode(&self.tuple_memory, entry.tuple_address);
+                        ReferenceValue::decode(&self.tuple_memory, entry.tuple_address)?;
 
                     if value.0 != address {
                         address = value.0;
@@ -917,34 +1003,36 @@ impl<'m> Heap<'m> {
                 }
                 ValueType::Structure => {
                     let (value, metadata) =
-                        StructureValue::decode(&self.tuple_memory, entry.tuple_address);
+                        StructureValue::decode(&self.tuple_memory, entry.tuple_address)?;
                     (Value::structure(value), metadata)
                 }
                 ValueType::List => {
                     let (value, metadata) =
-                        ListValue::decode(&self.tuple_memory, entry.tuple_address);
+                        ListValue::decode(&self.tuple_memory, entry.tuple_address)?;
                     (Value::list(value), metadata)
                 }
                 ValueType::Constant => {
                     let (value, metadata) =
-                        ConstantValue::decode(&self.tuple_memory, entry.tuple_address);
+                        ConstantValue::decode(&self.tuple_memory, entry.tuple_address)?;
                     (Value::constant(value), metadata)
                 }
-                ValueType::Environment | ValueType::ChoicePoint | ValueType::Trail => {
+                ValueType::Environment | ValueType::ChoicePoint | ValueType::TrailVariable => {
                     panic!("Expected value, found {:?}", entry.value_type);
                 }
             };
 
             crate::log_trace!("Value: {:?}", value);
 
-            break (
+            break Ok((
                 metadata.registry_address,
                 value,
                 metadata
                     .first_term
                     .iter(metadata.arity)
-                    .map(move |tuple_address| Address::from(self.tuple_memory[tuple_address])),
-            );
+                    .map(move |tuple_address| {
+                        Address(self.tuple_memory.load(tuple_address).unwrap())
+                    }),
+            ));
         }
     }
 
@@ -956,13 +1044,14 @@ impl<'m> Heap<'m> {
         match registry_entry.value_type {
             ValueType::Structure => {
                 let (StructureValue(_f, n), metadata) =
-                    StructureValue::decode(&self.tuple_memory, registry_entry.tuple_address);
+                    StructureValue::decode(&self.tuple_memory, registry_entry.tuple_address)
+                        .unwrap();
                 assert_eq!(address, metadata.registry_address);
                 (metadata.first_term, n)
             }
             ValueType::List => {
                 let (ListValue, metadata) =
-                    ListValue::decode(&self.tuple_memory, registry_entry.tuple_address);
+                    ListValue::decode(&self.tuple_memory, registry_entry.tuple_address).unwrap();
                 assert_eq!(address, metadata.registry_address);
                 (metadata.first_term, ListValue::ARITY)
             }
@@ -980,46 +1069,67 @@ impl<'m> Heap<'m> {
             .expect("No Entry");
         assert!(matches!(&entry.value_type, ValueType::Environment));
 
-        let (environment, metadata) = Environment::decode(&self.tuple_memory, entry.tuple_address);
+        let (environment, metadata) =
+            Environment::decode(&self.tuple_memory, entry.tuple_address).unwrap();
         assert_eq!(metadata.registry_address, current_environment);
 
         (environment, entry.tuple_address, metadata)
     }
 
-    fn get_permanent_variable_address(&self, yn: Yn) -> TupleAddress {
+    fn get_permanent_variable_address(
+        &self,
+        yn: Yn,
+    ) -> Result<TupleAddress, PermanentVariableError> {
         let (environment, _, metadata) = self.get_environment();
 
-        assert!(yn.yn < environment.number_of_active_permanent_variables.0);
-
-        metadata.first_term + yn
-    }
-
-    unsafe fn load_permanent_variable_unchecked(&self, yn: Yn) -> Address {
-        let term_address = self.get_permanent_variable_address(yn);
-
-        Address::from(self.tuple_memory[term_address])
-    }
-
-    pub fn load_permanent_variable(&self, yn: Yn) -> Address {
-        let address = unsafe { self.load_permanent_variable_unchecked(yn) };
-        if address == unsafe { Address::none() } {
-            panic!("No permanent variable @ {}", yn.yn);
+        if yn.yn >= environment.number_of_active_permanent_variables.0 {
+            return Err(PermanentVariableError::IndexOutOfRange {
+                yn,
+                permanent_variable_count: environment.number_of_active_permanent_variables,
+            });
         }
 
-        address
+        Ok(metadata.first_term + yn)
     }
 
-    pub fn store_permanent_variable(&mut self, yn: Yn, address: Address) {
-        let term_address = self.get_permanent_variable_address(yn);
+    unsafe fn load_permanent_variable_unchecked(
+        &self,
+        yn: Yn,
+    ) -> Result<Address, PermanentVariableError> {
+        let term_address = self.get_permanent_variable_address(yn)?;
 
-        self.tuple_memory[term_address] = address.0 as u32;
+        Ok(Address(self.tuple_memory.load(term_address).map_err(
+            |inner| PermanentVariableError::TupleMemoryError { yn, inner },
+        )?))
+    }
+
+    pub fn load_permanent_variable(&self, yn: Yn) -> Result<Address, PermanentVariableError> {
+        let address = unsafe { self.load_permanent_variable_unchecked(yn)? };
+        if address == unsafe { Address::none() } {
+            return Err(PermanentVariableError::NoValue { yn });
+        }
+
+        Ok(address)
+    }
+
+    pub fn store_permanent_variable(
+        &mut self,
+        yn: Yn,
+        address: Address,
+    ) -> Result<(), PermanentVariableError> {
+        let term_address = self.get_permanent_variable_address(yn)?;
+
+        self.tuple_memory
+            .store(term_address, address.0)
+            .map_err(|inner| PermanentVariableError::TupleMemoryError { inner, yn })
     }
 
     fn verify_is_reference(&self, address: Address) -> (ReferenceValue, TupleAddress) {
         let entry = self.registry[address].as_ref().expect("No Entry");
 
         assert!(matches!(&entry.value_type, ValueType::Reference));
-        let (reference, metadata) = ReferenceValue::decode(&self.tuple_memory, entry.tuple_address);
+        let (reference, metadata) =
+            ReferenceValue::decode(&self.tuple_memory, entry.tuple_address).unwrap();
 
         assert_eq!(metadata.registry_address, address);
 
@@ -1034,7 +1144,11 @@ impl<'m> Heap<'m> {
         tuple_address
     }
 
-    pub fn bind_variable_to_value(&mut self, variable_address: Address, value_address: Address) {
+    pub fn bind_variable_to_value(
+        &mut self,
+        variable_address: Address,
+        value_address: Address,
+    ) -> Result<(), MemoryError> {
         crate::log_trace!(
             "Binding memory {} to value at {}",
             variable_address,
@@ -1048,12 +1162,12 @@ impl<'m> Heap<'m> {
             &mut self.tuple_memory,
             tuple_address,
             &(),
-        );
+        )?;
 
-        self.add_variable_to_trail(variable_address);
+        self.add_variable_to_trail(variable_address, tuple_address)
     }
 
-    pub fn bind_variables(&mut self, a1: Address, a2: Address) {
+    pub fn bind_variables(&mut self, a1: Address, a2: Address) -> Result<(), MemoryError> {
         let t1 = self.verify_is_free_variable(a1);
         let t2 = self.verify_is_free_variable(a2);
 
@@ -1069,7 +1183,7 @@ impl<'m> Heap<'m> {
         number_of_permanent_variables: Arity,
         continuation_point: Option<ProgramCounter>,
         terms: &[Address],
-    ) {
+    ) -> Result<(), MemoryError> {
         let continuation_environment = self.current_environment;
 
         let new_environment = self.new_value(
@@ -1080,46 +1194,36 @@ impl<'m> Heap<'m> {
                 number_of_permanent_variables,
             },
             terms,
-        );
+        )?;
         self.current_environment = Some(new_environment);
+
+        Ok(())
     }
 
-    pub fn trim(&mut self, n: Arity) {
-        let (
-            Environment {
-                continuation_point,
-                number_of_active_permanent_variables,
-                number_of_permanent_variables,
-                ..
-            },
-            tuple_address,
-            _,
-        ) = self.get_environment();
-        assert!(number_of_active_permanent_variables >= n);
+    pub fn trim(&mut self, n: Arity) -> Result<(), MemoryError> {
+        let (mut environment, tuple_address, metadata) = self.get_environment();
+        assert!(environment.number_of_active_permanent_variables >= n);
 
-        if let Some(latest_choice_point) = self.latest_choice_point {
-            let latest_choice_point = self.registry[latest_choice_point]
-                .as_ref()
-                .expect("No Entry");
-
-            log_trace!("latest_choice_point: {}", latest_choice_point.tuple_address);
+        if let Some((_, latest_choice_point, _)) = self.get_latest_choice_point() {
+            log_trace!("latest_choice_point: {}", latest_choice_point);
             log_trace!("current_environment: {}", tuple_address);
 
-            if latest_choice_point.tuple_address > tuple_address {
+            if latest_choice_point > tuple_address {
                 log_trace!("Not trimming conditional environment");
-                return;
+                return Ok(());
             }
         }
 
-        let number_of_active_permanent_variables =
-            Arity(number_of_active_permanent_variables.0 - n.0);
+        environment.number_of_active_permanent_variables =
+            Arity(environment.number_of_active_permanent_variables.0 - n.0);
 
-        SecondEnvironmentWord {
-            continuation_point,
-            number_of_active_permanent_variables,
-            number_of_permanent_variables,
-        }
-        .encode(&mut self.tuple_memory, tuple_address)
+        environment.encode_head(
+            metadata.registry_address,
+            &mut self.tuple_memory,
+            tuple_address,
+        )?;
+
+        Ok(())
     }
 
     pub fn deallocate(&mut self, continuation_point: &mut Option<ProgramCounter>) {
@@ -1142,7 +1246,7 @@ impl<'m> Heap<'m> {
         next_clause: ProgramCounter,
         continuation_point: Option<ProgramCounter>,
         saved_registers: &[Address],
-    ) {
+    ) -> Result<(), MemoryError> {
         let number_of_saved_registers = Arity(saved_registers.len() as u8);
         let current_environment = self.current_environment;
         let next_choice_point = self.latest_choice_point;
@@ -1160,51 +1264,51 @@ impl<'m> Heap<'m> {
                 cut_register,
             },
             saved_registers,
-        );
+        )?;
 
         self.latest_choice_point = Some(new_choice_point);
+
+        Ok(())
     }
 
-    fn get_latest_choice_point(&self) -> (ChoicePoint, TupleAddress, TupleMetadata) {
-        let latest_choice_point = self
-            .latest_choice_point
-            .unwrap_or_else(|| panic!("No choice point"));
+    fn get_latest_choice_point(&self) -> Option<(ChoicePoint, TupleAddress, TupleMetadata)> {
+        let latest_choice_point = self.latest_choice_point?;
 
         let entry = self.registry[latest_choice_point]
             .as_ref()
             .expect("No Entry");
         assert!(matches!(&entry.value_type, ValueType::ChoicePoint));
 
-        let (choice_point, metadata) = ChoicePoint::decode(&self.tuple_memory, entry.tuple_address);
+        let (choice_point, metadata) =
+            ChoicePoint::decode(&self.tuple_memory, entry.tuple_address).unwrap();
         assert_eq!(metadata.registry_address, latest_choice_point);
 
-        (choice_point, entry.tuple_address, metadata)
+        Some((choice_point, entry.tuple_address, metadata))
     }
 
     pub fn backtrack(
         &mut self,
         pc: &mut Option<ProgramCounter>,
-    ) -> Result<(), super::ExecutionFailure> {
-        self.latest_choice_point
+    ) -> Result<(), super::ExecutionFailure<'static>> {
+        self.get_latest_choice_point()
             .ok_or(super::ExecutionFailure::Failed)
-            .map(|_| {
-                *pc = Some(self.get_latest_choice_point().0.next_clause);
-            })
+            .map(|(choice_point, _, _)| *pc = Some(choice_point.next_clause))
     }
 
     fn wind_back_to_choice_point(
         &mut self,
         registers: &mut [Address],
         continuation_point: &mut Option<ProgramCounter>,
-    ) -> (ChoicePoint, TupleAddress, Option<Address>) {
-        let (choice_point, tuple_address, metadata) = self.get_latest_choice_point();
+    ) -> (ChoicePoint, Address, TupleAddress, Option<Address>) {
+        let (choice_point, tuple_address, metadata) =
+            self.get_latest_choice_point().expect("No Choice Point");
 
         for (register, value_address) in registers.iter_mut().zip(
             metadata
                 .first_term
                 .iter(choice_point.number_of_saved_registers),
         ) {
-            *register = Address::from(self.tuple_memory[value_address]);
+            *register = Address(self.tuple_memory.load(value_address).unwrap());
         }
 
         self.current_environment = choice_point.current_environment;
@@ -1218,7 +1322,12 @@ impl<'m> Heap<'m> {
         crate::log_trace!("E => {}", OptionDisplay(self.current_environment));
         crate::log_trace!("CP => {}", OptionDisplay(*continuation_point));
 
-        (choice_point, tuple_address, next_choice_point)
+        (
+            choice_point,
+            metadata.registry_address,
+            tuple_address,
+            next_choice_point,
+        )
     }
 
     pub fn retry_choice_point(
@@ -1227,21 +1336,14 @@ impl<'m> Heap<'m> {
         continuation_point: &mut Option<ProgramCounter>,
         next_clause: ProgramCounter,
     ) {
-        let (
-            ChoicePoint {
-                next_choice_point, ..
-            },
-            tuple_address,
-            _metadata,
-        ) = self.wind_back_to_choice_point(registers, continuation_point);
+        let (mut choice_point, registry_address, tuple_address, _metadata) =
+            self.wind_back_to_choice_point(registers, continuation_point);
 
-        ThirdChoicePointWord {
-            next_choice_point,
-            next_clause,
-        }
-        .encode(&mut self.tuple_memory, tuple_address);
+        choice_point.next_clause = next_clause;
 
-        // HB <- H
+        choice_point
+            .encode_head(registry_address, &mut self.tuple_memory, tuple_address)
+            .unwrap();
     }
 
     pub fn remove_choice_point(
@@ -1251,28 +1353,45 @@ impl<'m> Heap<'m> {
     ) {
         let next_choice_point = self
             .wind_back_to_choice_point(registers, continuation_point)
-            .2;
+            .3;
 
         self.latest_choice_point = next_choice_point;
     }
 
-    fn add_variable_to_trail(&mut self, address: Address) {
+    fn add_variable_to_trail(
+        &mut self,
+        variable: Address,
+        tuple_address: TupleAddress,
+    ) -> Result<(), MemoryError> {
+        let is_unconditional = self
+            .get_latest_choice_point()
+            .map_or(true, |(_, latest_choice_point, _)| {
+                tuple_address > latest_choice_point
+            });
+
+        if is_unconditional {
+            log_trace!("Not trailing unconditional variable");
+            return Ok(());
+        }
+
         let next_trail_item = self.trail_top;
         let new_trail_item = self.new_value(
-            |_| TrailItem {
-                item: address,
+            |_| TrailVariable {
+                variable,
                 next_trail_item,
             },
             &(),
-        );
+        )?;
         self.trail_top = Some(new_trail_item);
+
+        Ok(())
     }
 
     fn unwind_trail(&mut self, boundary: TupleAddress) {
         log_trace!("Unwinding Trail");
         while let Some(trail_top) = self.trail_top {
             let entry = self.registry[trail_top].as_ref().expect("No Entry");
-            assert!(matches!(&entry.value_type, ValueType::Trail));
+            assert!(matches!(&entry.value_type, ValueType::TrailVariable));
 
             if entry.tuple_address < boundary {
                 break;
@@ -1280,20 +1399,23 @@ impl<'m> Heap<'m> {
 
             log_trace!("Unwinding Trail item @ {}", trail_top);
 
-            let (trail_item, metadata) = TrailItem::decode(&self.tuple_memory, entry.tuple_address);
+            let (trail_item, metadata) =
+                TrailVariable::decode(&self.tuple_memory, entry.tuple_address).unwrap();
 
             assert_eq!(metadata.registry_address, trail_top);
 
-            log_trace!("Resetting Reference @ {}", trail_item.item);
+            log_trace!("Resetting Reference @ {}", trail_item.variable);
 
-            let item_tuple_address = self.verify_is_reference(trail_item.item).1;
+            let item_tuple_address = self.verify_is_reference(trail_item.variable).1;
 
-            ReferenceValue(trail_item.item).encode(
-                trail_item.item,
-                &mut self.tuple_memory,
-                item_tuple_address,
-                &(),
-            );
+            ReferenceValue(trail_item.variable)
+                .encode(
+                    trail_item.variable,
+                    &mut self.tuple_memory,
+                    item_tuple_address,
+                    &(),
+                )
+                .unwrap();
 
             self.trail_top = trail_item.next_trail_item;
         }
@@ -1357,18 +1479,20 @@ impl<'m> Heap<'m> {
         self.do_cut(self.cut_register)
     }
 
-    pub fn get_level(&mut self, yn: Yn) {
-        self.store_permanent_variable(yn, self.cut_register.unwrap_or(unsafe { Address::none() }));
+    pub fn get_level(&mut self, yn: Yn) -> Result<(), PermanentVariableError> {
+        self.store_permanent_variable(yn, self.cut_register.unwrap_or(unsafe { Address::none() }))
     }
 
-    pub fn cut(&mut self, yn: Yn) {
-        let address = unsafe { self.load_permanent_variable_unchecked(yn) };
+    pub fn cut(&mut self, yn: Yn) -> Result<(), PermanentVariableError> {
+        let address = unsafe { self.load_permanent_variable_unchecked(yn)? };
 
         self.do_cut(if address == unsafe { Address::none() } {
             None
         } else {
             Some(address)
         });
+
+        Ok(())
     }
 
     pub fn query_has_multiple_solutions(&self) -> bool {
@@ -1382,6 +1506,6 @@ impl<'m> Heap<'m> {
         metadata
             .first_term
             .iter(environment.number_of_permanent_variables)
-            .map(move |tuple_address| Address::from(self.tuple_memory[tuple_address]))
+            .map(move |tuple_address| Address(self.tuple_memory.load(tuple_address).unwrap()))
     }
 }

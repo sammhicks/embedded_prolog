@@ -87,14 +87,14 @@ impl StructureIterationState {
 
     pub fn read_next(&mut self, heap: &Heap) -> Address {
         self.with_next(heap, |heap, address| {
-            Address::from(heap.tuple_memory[address])
+            Address(heap.tuple_memory.load(address).unwrap())
         })
     }
 
     pub fn write_next(&mut self, heap: &mut Heap, address: Address) {
         self.with_next(heap, |heap, term_address| {
             crate::log_trace!("Writing {} to {}", address, term_address);
-            heap.tuple_memory[term_address] = address.0 as u32;
+            heap.tuple_memory.store(term_address, address.0).unwrap();
         })
     }
 

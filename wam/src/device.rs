@@ -40,6 +40,7 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
             crate::device_with_program::UnhandledCommand::SubmitProgram => {
                 Ok(Action::ProcessCommand(CommandHeader::SubmitProgram))
             }
+            crate::device_with_program::UnhandledCommand::Reset => Ok(Action::ProcessNextCommand),
         }
     }
 

@@ -13,6 +13,7 @@ enum HandledCommand {
 
 #[derive(Debug)]
 pub enum UnhandledCommand {
+    Reset,
     SubmitProgram,
 }
 
@@ -52,6 +53,7 @@ impl<'a, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's, S> {
         log_trace!("Finished with query");
 
         Ok(match unhandled_command {
+            EscalatedCommand::Reset => Action::Escalate(UnhandledCommand::Reset),
             EscalatedCommand::ProcessNextCommand => Action::ProcessNextCommand,
             EscalatedCommand::SubmitProgram => Action::Escalate(UnhandledCommand::SubmitProgram),
             EscalatedCommand::SubmitQuery => Action::ProcessCommand(HandledCommand::SubmitQuery),
@@ -91,9 +93,7 @@ impl<'a, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's, S> {
                     Action::ProcessCommand(next_command) => {
                         command = next_command;
                     }
-                    Action::Escalate(UnhandledCommand::SubmitProgram) => {
-                        return Ok(UnhandledCommand::SubmitProgram)
-                    }
+                    Action::Escalate(unhandled_command) => return Ok(unhandled_command),
                 }
             }
         }

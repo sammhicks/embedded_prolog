@@ -29,6 +29,12 @@ pub struct Yn {
     pub yn: u8,
 }
 
+impl fmt::Display for Yn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.yn)
+    }
+}
+
 /// An Argument Index. Functionally the same as a [Register Index](Xn)
 #[derive(Clone, Copy, Debug)]
 pub struct Ai {
@@ -167,7 +173,7 @@ impl NoneRepresents for ProgramCounter {
 }
 
 impl ProgramCounter {
-    const END_OF_PROGRAM: u16 = u16::MAX;
+    pub const END_OF_PROGRAM: u16 = u16::MAX;
 
     pub fn offset(self, offset: u16) -> Self {
         Self(self.0 + offset)
