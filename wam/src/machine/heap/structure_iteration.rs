@@ -11,20 +11,29 @@ struct InnerState {
     index: Arity,
 }
 
+#[derive(Debug)]
+pub enum Error {
+    NotActive,
+    CurrentlyActive,
+    NoMoreTerms,
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
 #[derive(Default)]
 pub struct StructureIterationState(Option<InnerState>);
 
 impl StructureIterationState {
-    pub fn verify_not_active(&self) {
-        assert!(self.0.is_none())
+    pub fn verify_not_active(&self) -> Result<()> {
+        if self.0.is_none() {
+            Ok(())
+        } else {
+            Err(Error::CurrentlyActive)
+        }
     }
 
-    pub fn read_write_mode(&self) -> &ReadWriteMode {
-        &self
-            .0
-            .as_ref()
-            .expect("Not iterating over state!")
-            .read_write_mode
+    pub fn read_write_mode(&self) -> Result<&ReadWriteMode> {
+        Ok(&self.0.as_ref().ok_or(Error::NotActive)?.read_write_mode)
     }
 
     pub fn structure_reader(address: Address) -> Self {
@@ -39,18 +48,20 @@ impl StructureIterationState {
         self.0 = None;
     }
 
-    pub fn start_reading(&mut self, address: Address) {
-        assert!(matches!(&self.0, None));
+    pub fn start_reading(&mut self, address: Address) -> Result<()> {
+        self.verify_not_active()?;
         *self = Self::structure_reader(address);
+        Ok(())
     }
 
-    pub fn start_writing(&mut self, address: Address) {
-        assert!(matches!(&self.0, None));
+    pub fn start_writing(&mut self, address: Address) -> Result<()> {
+        self.verify_not_active()?;
         *self = Self(Some(InnerState {
             read_write_mode: ReadWriteMode::Write,
             address,
             index: Arity::ZERO,
         }));
+        Ok(())
     }
 
     fn check_done(&mut self, index: Arity, arity: Arity) {
@@ -60,16 +71,21 @@ impl StructureIterationState {
         }
     }
 
-    fn with_next<'m, T, H>(&mut self, heap: H, action: impl FnOnce(H, TupleAddress) -> T) -> T
+    fn with_next<'m, T, H>(
+        &mut self,
+        heap: H,
+        action: impl FnOnce(H, TupleAddress) -> T,
+    ) -> Result<T>
     where
         H: core::ops::Deref<Target = Heap<'m>>,
     {
-        let inner_state = self.0.as_mut().expect("Not reading or writing");
+        let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
-        let (first_term, arity) = heap.structure_term_addresses(inner_state.address);
+        let super::TermSlice { first_term, arity } =
+            heap.structure_term_addresses(inner_state.address);
 
         if inner_state.index == arity {
-            panic!("No more terms");
+            return Err(Error::NoMoreTerms);
         }
 
         let term_address = first_term + inner_state.index;
@@ -82,35 +98,37 @@ impl StructureIterationState {
 
         self.check_done(index, arity);
 
-        result
+        Ok(result)
     }
 
-    pub fn read_next(&mut self, heap: &Heap) -> Address {
+    pub fn read_next(&mut self, heap: &Heap) -> Result<Address> {
         self.with_next(heap, |heap, address| {
             Address(heap.tuple_memory.load(address).unwrap())
         })
     }
 
-    pub fn write_next(&mut self, heap: &mut Heap, address: Address) {
+    pub fn write_next(&mut self, heap: &mut Heap, address: Address) -> Result<()> {
         self.with_next(heap, |heap, term_address| {
             crate::log_trace!("Writing {} to {}", address, term_address);
             heap.tuple_memory.store(term_address, address.0).unwrap();
         })
     }
 
-    pub fn skip(&mut self, heap: &Heap, n: Arity) {
-        let inner_state = self.0.as_mut().expect("Not reading or writing");
+    pub fn skip(&mut self, heap: &Heap, n: Arity) -> Result<()> {
+        let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
-        let arity = heap.structure_term_addresses(inner_state.address).1;
+        let super::TermSlice { arity, .. } = heap.structure_term_addresses(inner_state.address);
 
         inner_state.index.0 += n.0;
 
         if inner_state.index > arity {
-            panic!("No more terms to read");
+            return Err(Error::NoMoreTerms);
         }
 
         let index = inner_state.index;
 
         self.check_done(index, arity);
+
+        Ok(())
     }
 }

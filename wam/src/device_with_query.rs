@@ -42,13 +42,21 @@ impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> 
                 }
             };
 
+            let solution_registers = match machine.solution_registers() {
+                Ok(registers) => registers,
+                Err(err) => {
+                    crate::error!(&mut self.serial_connection, "{:?}", err)?;
+                    return Ok(UnhandledCommand::Reset);
+                }
+            };
+
             let success_code = match success {
                 crate::machine::ExecutionSuccess::SingleAnswer => 'A',
                 crate::machine::ExecutionSuccess::MultipleAnswers => 'C',
             };
 
             self.serial_connection.write_char(success_code)?;
-            for address in machine.solution_registers() {
+            for address in solution_registers {
                 log_trace!("Solution Register: {}", address);
                 self.serial_connection.write_be_serializable_hex(address)?;
             }

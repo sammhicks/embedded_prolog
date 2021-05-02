@@ -43,6 +43,7 @@ pub enum Error<'m> {
     RegisterBlockError(RegisterBlockError),
     MemoryError(heap::MemoryError),
     PermanentVariableError(heap::PermanentVariableError),
+    StructureIterationState(heap::structure_iteration::Error),
 }
 
 #[derive(Debug)]
@@ -391,6 +392,12 @@ impl<'m> From<heap::PermanentVariableError> for ExecutionFailure<'m> {
     }
 }
 
+impl<'m> From<heap::structure_iteration::Error> for ExecutionFailure<'m> {
+    fn from(err: heap::structure_iteration::Error) -> Self {
+        Self::Error(Error::StructureIterationState(err))
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum ExecutionSuccess {
     SingleAnswer,
@@ -554,7 +561,7 @@ impl<'m> Machine<'m> {
                         if f == found_f && n == found_n {
                             log_trace!("Reading structure {}/{}", f, n);
 
-                            self.structure_iteration_state.start_reading(address);
+                            self.structure_iteration_state.start_reading(address)?;
                         } else {
                             self.backtrack()?;
                         }
@@ -576,7 +583,7 @@ impl<'m> Machine<'m> {
                     }
                     Value::List => {
                         log_trace!("Reading list");
-                        self.structure_iteration_state.start_reading(address);
+                        self.structure_iteration_state.start_reading(address)?;
                     }
                     Value::Structure(..) | Value::Constant(_) => self.backtrack()?,
                 }
@@ -596,39 +603,39 @@ impl<'m> Machine<'m> {
                 let address = self.new_variable()?;
                 self.registers.store(xn, address)?;
                 self.structure_iteration_state
-                    .write_next(&mut self.memory, address);
+                    .write_next(&mut self.memory, address)?;
                 Ok(())
             }
             Instruction::SetVariableYn { yn } => {
                 let address = self.new_variable()?;
                 self.memory.store_permanent_variable(yn, address)?;
                 self.structure_iteration_state
-                    .write_next(&mut self.memory, address);
+                    .write_next(&mut self.memory, address)?;
                 Ok(())
             }
             Instruction::SetValueXn { xn } => {
                 let address = self.registers.load(xn)?;
                 self.structure_iteration_state
-                    .write_next(&mut self.memory, address);
+                    .write_next(&mut self.memory, address)?;
                 Ok(())
             }
             Instruction::SetValueYn { yn } => {
                 let address = self.memory.load_permanent_variable(yn)?;
                 self.structure_iteration_state
-                    .write_next(&mut self.memory, address);
+                    .write_next(&mut self.memory, address)?;
                 Ok(())
             }
             Instruction::SetConstant { c } => {
                 let address = self.new_constant(c)?;
                 self.structure_iteration_state
-                    .write_next(&mut self.memory, address);
+                    .write_next(&mut self.memory, address)?;
                 Ok(())
             }
             Instruction::SetVoid { n } => {
                 for _ in 0..n.into_inner() {
                     let address = self.new_variable()?;
                     self.structure_iteration_state
-                        .write_next(&mut self.memory, address);
+                        .write_next(&mut self.memory, address)?;
                 }
                 Ok(())
             }
@@ -645,9 +652,10 @@ impl<'m> Machine<'m> {
                 self.unify_value(yn, |this, yn| this.memory.load_permanent_variable(yn))
             }
             Instruction::UnifyConstant { c } => {
-                match self.structure_iteration_state.read_write_mode() {
+                match self.structure_iteration_state.read_write_mode()? {
                     ReadWriteMode::Read => {
-                        let term_address = self.structure_iteration_state.read_next(&self.memory);
+                        let term_address =
+                            self.structure_iteration_state.read_next(&self.memory)?;
 
                         let value = self.memory.get_value(term_address)?.1;
 
@@ -671,23 +679,23 @@ impl<'m> Machine<'m> {
                     ReadWriteMode::Write => {
                         let address = self.new_constant(c)?;
                         self.structure_iteration_state
-                            .write_next(&mut self.memory, address);
+                            .write_next(&mut self.memory, address)?;
 
                         Ok(())
                     }
                 }
             }
             Instruction::UnifyVoid { n } => {
-                match self.structure_iteration_state.read_write_mode() {
+                match self.structure_iteration_state.read_write_mode()? {
                     ReadWriteMode::Read => {
-                        self.structure_iteration_state.skip(&self.memory, n);
+                        self.structure_iteration_state.skip(&self.memory, n)?;
                         Ok(())
                     }
                     ReadWriteMode::Write => {
                         for _ in 0..n.0 {
                             let address = self.new_variable()?;
                             self.structure_iteration_state
-                                .write_next(&mut self.memory, address);
+                                .write_next(&mut self.memory, address)?;
                         }
                         Ok(())
                     }
@@ -749,19 +757,19 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::TryMeElse { p } => {
-                self.structure_iteration_state.verify_not_active();
+                self.structure_iteration_state.verify_not_active()?;
                 self.memory
                     .new_choice_point(p, self.cp, &self.registers[self.argument_count])?;
                 Ok(())
             }
             Instruction::RetryMeElse { p } => {
-                self.structure_iteration_state.verify_not_active();
+                self.structure_iteration_state.verify_not_active()?;
                 self.memory
                     .retry_choice_point(self.registers.all_mut(), &mut self.cp, p);
                 Ok(())
             }
             Instruction::TrustMe => {
-                self.structure_iteration_state.verify_not_active();
+                self.structure_iteration_state.verify_not_active()?;
                 self.memory
                     .remove_choice_point(self.registers.all_mut(), &mut self.cp);
                 Ok(())
@@ -788,8 +796,10 @@ impl<'m> Machine<'m> {
         Ok((address, value))
     }
 
-    pub fn solution_registers(&self) -> impl Iterator<Item = Address> + '_ {
-        self.memory.solution_registers()
+    pub fn solution_registers(
+        &self,
+    ) -> Result<impl Iterator<Item = Address> + '_, heap::MemoryError> {
+        Ok(self.memory.solution_registers()?)
     }
 
     pub fn lookup_memory(
@@ -805,14 +815,14 @@ impl<'m> Machine<'m> {
 
     fn new_structure(&mut self, f: Functor, n: Arity) -> Result<Address, ExecutionFailure<'m>> {
         let address = self.memory.new_structure(f, n)?;
-        self.structure_iteration_state.start_writing(address);
+        self.structure_iteration_state.start_writing(address)?;
 
         Ok(address)
     }
 
     fn new_list(&mut self) -> Result<Address, ExecutionFailure<'m>> {
         let address = self.memory.new_list()?;
-        self.structure_iteration_state.start_writing(address);
+        self.structure_iteration_state.start_writing(address)?;
 
         Ok(address)
     }
@@ -829,9 +839,9 @@ impl<'m> Machine<'m> {
     where
         ExecutionFailure<'m>: From<E>,
     {
-        match self.structure_iteration_state.read_write_mode() {
+        match self.structure_iteration_state.read_write_mode()? {
             ReadWriteMode::Read => {
-                let term_address = self.structure_iteration_state.read_next(&self.memory);
+                let term_address = self.structure_iteration_state.read_next(&self.memory)?;
 
                 store(self, index, term_address)?;
                 Ok(())
@@ -840,7 +850,7 @@ impl<'m> Machine<'m> {
                 let address = self.new_variable()?;
                 store(self, index, address)?;
                 self.structure_iteration_state
-                    .write_next(&mut self.memory, address);
+                    .write_next(&mut self.memory, address)?;
                 Ok(())
             }
         }
@@ -854,9 +864,9 @@ impl<'m> Machine<'m> {
     where
         ExecutionFailure<'m>: From<E>,
     {
-        match self.structure_iteration_state.read_write_mode() {
+        match self.structure_iteration_state.read_write_mode()? {
             ReadWriteMode::Read => {
-                let term_address = self.structure_iteration_state.read_next(&self.memory);
+                let term_address = self.structure_iteration_state.read_next(&self.memory)?;
 
                 let register_address = load(self, index)?;
 
@@ -866,7 +876,7 @@ impl<'m> Machine<'m> {
             ReadWriteMode::Write => {
                 let address = load(self, index)?;
                 self.structure_iteration_state
-                    .write_next(&mut self.memory, address);
+                    .write_next(&mut self.memory, address)?;
                 Ok(())
             }
         }
@@ -901,8 +911,8 @@ impl<'m> Machine<'m> {
                     let mut terms_1 = StructureIterationState::structure_reader(a1);
                     let mut terms_2 = StructureIterationState::structure_reader(a2);
                     for _ in 0..n1.0 {
-                        let a1 = terms_1.read_next(&self.memory);
-                        let a2 = terms_2.read_next(&self.memory);
+                        let a1 = terms_1.read_next(&self.memory).unwrap();
+                        let a2 = terms_2.read_next(&self.memory).unwrap();
                         match self.unify(a1, a2) {
                             Ok(Ok(())) => (),
                             Ok(Err(err)) => return Ok(Err(err)),
@@ -919,8 +929,8 @@ impl<'m> Machine<'m> {
                 let mut terms_1 = StructureIterationState::structure_reader(a1);
                 let mut terms_2 = StructureIterationState::structure_reader(a2);
                 for _ in 0..2 {
-                    let a1 = terms_1.read_next(&self.memory);
-                    let a2 = terms_2.read_next(&self.memory);
+                    let a1 = terms_1.read_next(&self.memory).unwrap();
+                    let a2 = terms_2.read_next(&self.memory).unwrap();
                     match self.unify(a1, a2) {
                         Ok(Ok(())) => (),
                         Ok(Err(err)) => return Ok(Err(err)),
