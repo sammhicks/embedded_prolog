@@ -40,9 +40,9 @@ impl fmt::Debug for BadMemoryRange<'_> {
 #[derive(Debug)]
 pub enum Error<'m> {
     BadInstruction(ProgramCounter, BadMemoryRange<'m>),
-    RegisterBlockError(RegisterBlockError),
-    MemoryError(heap::MemoryError),
-    PermanentVariableError(heap::PermanentVariableError),
+    RegisterBlock(RegisterBlockError),
+    Memory(heap::MemoryError),
+    PermanentVariable(heap::PermanentVariableError),
     StructureIterationState(heap::structure_iteration::Error),
 }
 
@@ -308,7 +308,7 @@ impl RegisterBlock {
                 .get(index.0 as usize)
                 .ok_or_else(|| RegisterBlockError::IndexOutOfRange {
                     index,
-                    register_count: (&self.0[..]).len(),
+                    register_count: (self.0[..]).len(),
                 })?;
 
         if entry == unsafe { Address::none() } {
@@ -325,7 +325,7 @@ impl RegisterBlock {
     ) -> Result<(), RegisterBlockError> {
         let index = index.into();
         log_trace!("Storing {} in Register {}", address, index);
-        let register_count = (&self.0[..]).len();
+        let register_count = (self.0[..]).len();
         let register =
             self.0
                 .get_mut(index.0 as usize)
@@ -376,19 +376,25 @@ impl<'m> From<Error<'m>> for ExecutionFailure<'m> {
 
 impl<'m> From<RegisterBlockError> for ExecutionFailure<'m> {
     fn from(err: RegisterBlockError) -> Self {
-        Self::Error(Error::RegisterBlockError(err))
+        Self::Error(Error::RegisterBlock(err))
+    }
+}
+
+impl<'m> From<heap::TupleMemoryError> for ExecutionFailure<'m> {
+    fn from(err: heap::TupleMemoryError) -> Self {
+        Self::Error(Error::Memory(heap::MemoryError::from(err)))
     }
 }
 
 impl<'m> From<heap::MemoryError> for ExecutionFailure<'m> {
     fn from(err: heap::MemoryError) -> Self {
-        Self::Error(Error::MemoryError(err))
+        Self::Error(Error::Memory(err))
     }
 }
 
 impl<'m> From<heap::PermanentVariableError> for ExecutionFailure<'m> {
     fn from(err: heap::PermanentVariableError) -> Self {
-        Self::Error(Error::PermanentVariableError(err))
+        Self::Error(Error::PermanentVariable(err))
     }
 }
 

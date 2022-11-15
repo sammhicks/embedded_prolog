@@ -134,6 +134,12 @@ impl<'m> std::ops::Index<Address> for Registry<'m> {
     }
 }
 
+impl<'m> std::ops::IndexMut<Address> for Registry<'m> {
+    fn index_mut(&mut self, index: Address) -> &mut Self::Output {
+        &mut self.0[index.0 as usize]
+    }
+}
+
 type TupleWord = u16;
 type TupleHalfWord = u8;
 
@@ -936,21 +942,21 @@ pub enum PermanentVariableError {
 
 #[derive(Debug)]
 pub enum MemoryError {
-    TupleMemoryError(TupleMemoryError),
+    TupleMemory(TupleMemoryError),
     OutOfRegistryEntries,
     OutOfTupleSpace,
 }
 
 impl From<TupleMemoryError> for MemoryError {
     fn from(inner: TupleMemoryError) -> Self {
-        Self::TupleMemoryError(inner)
+        Self::TupleMemory(inner)
     }
 }
 
 pub struct Heap<'m> {
     registry: Registry<'m>,
     tuple_memory: TupleMemory<'m>,
-    tuple_end: TupleAddress,
+    tuple_memory_end: TupleAddress,
     current_environment: Option<Address>,
     latest_choice_point: Option<Address>,
     trail_top: Option<Address>,
@@ -971,7 +977,7 @@ impl<'m> Heap<'m> {
         Self {
             registry: Registry(registry),
             tuple_memory: TupleMemory(tuple_memory),
-            tuple_end: TupleAddress(0),
+            tuple_memory_end: TupleAddress(0),
             current_environment: None,
             latest_choice_point: None,
             trail_top: None,
@@ -989,17 +995,17 @@ impl<'m> Heap<'m> {
             .new_registry_entry()
             .ok_or(MemoryError::OutOfRegistryEntries)?;
 
-        let tuple_address = self.tuple_end;
+        let tuple_address = self.tuple_memory_end;
 
         let value = factory(address);
 
         crate::log_trace!("New value at {}: {:?}", tuple_address, value);
 
-        self.tuple_end = value
+        self.tuple_memory_end = value
             .encode(address, &mut self.tuple_memory, tuple_address, terms)
             .map_err(|_| MemoryError::OutOfTupleSpace)?;
 
-        crate::log_trace!("h = {}", self.tuple_end);
+        crate::log_trace!("h = {}", self.tuple_memory_end);
 
         *registry_entry = Some(RegistryEntry {
             value_type: T::VALUE_TYPE,
@@ -1031,17 +1037,24 @@ impl<'m> Heap<'m> {
     ) -> Result<(Address, Value, impl Iterator<Item = Address> + '_), MemoryError> {
         loop {
             crate::log_trace!("Looking up memory at {}", address);
-            let entry = self.registry[address]
+            let registry_entry = self.registry[address]
                 .as_ref()
                 .expect("Uninitialized Entry");
 
-            let (address, value, terms) = match &entry.value_type {
+            assert_eq!(
+                address,
+                Address(self.tuple_memory.load(registry_entry.tuple_address)?)
+            );
+
+            let (address, value, terms) = match &registry_entry.value_type {
                 ValueType::Reference => {
                     let (value, metadata) =
-                        ReferenceValue::decode(&self.tuple_memory, entry.tuple_address)?;
+                        ReferenceValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
 
-                    if value.0 != address {
-                        address = value.0;
+                    let ReferenceValue(reference_address) = value;
+
+                    if reference_address != address {
+                        address = reference_address;
                         continue;
                     }
 
@@ -1053,7 +1066,7 @@ impl<'m> Heap<'m> {
                 }
                 ValueType::Structure => {
                     let (value, metadata) =
-                        StructureValue::decode(&self.tuple_memory, entry.tuple_address)?;
+                        StructureValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
 
                     (
                         metadata.registry_address,
@@ -1063,7 +1076,7 @@ impl<'m> Heap<'m> {
                 }
                 ValueType::List => {
                     let (value, metadata) =
-                        ListValue::decode(&self.tuple_memory, entry.tuple_address)?;
+                        ListValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
                     (
                         metadata.registry_address,
                         Value::list(value),
@@ -1072,7 +1085,7 @@ impl<'m> Heap<'m> {
                 }
                 ValueType::Constant => {
                     let (value, metadata) =
-                        ConstantValue::decode(&self.tuple_memory, entry.tuple_address)?;
+                        ConstantValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
                     (
                         metadata.registry_address,
                         Value::constant(value),
@@ -1080,7 +1093,7 @@ impl<'m> Heap<'m> {
                     )
                 }
                 ValueType::Environment | ValueType::ChoicePoint | ValueType::TrailVariable => {
-                    panic!("Expected value, found {:?}", entry.value_type);
+                    panic!("Expected value, found {:?}", registry_entry.value_type);
                 }
             };
 

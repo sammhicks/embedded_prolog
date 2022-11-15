@@ -206,7 +206,7 @@ fn load_code<
         for b in bytes.as_mut() {
             *b = serial_connection.read_be_u8_hex()?;
         }
-        hasher.update(&bytes);
+        hasher.update(bytes);
         let word = u32::from_be_bytes(bytes);
         log_trace!("Word: {:08X}", word);
         *memory_word = word;

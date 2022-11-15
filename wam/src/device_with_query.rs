@@ -20,7 +20,7 @@ pub struct Device<'a, 's1, 's2, S> {
 }
 
 impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> {
-    pub fn run(mut self) -> Result<UnhandledCommand, ProcessInputError> {
+    pub fn run(self) -> Result<UnhandledCommand, ProcessInputError> {
         let mut machine = crate::machine::Machine::new(super::machine::MachineMemory {
             program: self.program,
             query: self.query,
@@ -37,7 +37,7 @@ impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> 
                     return Ok(UnhandledCommand::ProcessNextCommand);
                 }
                 Err(ExecutionFailure::Error(err)) => {
-                    crate::error!(&mut self.serial_connection, "{:?}", err)?;
+                    crate::error!(self.serial_connection, "{:?}", err)?;
                     return Ok(UnhandledCommand::Reset);
                 }
             };
@@ -45,7 +45,7 @@ impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> 
             let solution_registers = match machine.solution_registers() {
                 Ok(registers) => registers,
                 Err(err) => {
-                    crate::error!(&mut self.serial_connection, "{:?}", err)?;
+                    crate::error!(self.serial_connection, "{:?}", err)?;
                     return Ok(UnhandledCommand::Reset);
                 }
             };
@@ -80,7 +80,7 @@ impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> 
                         {
                             Ok(result) => result,
                             Err(err) => {
-                                crate::error!(&mut self.serial_connection, "{:?}", err)?;
+                                crate::error!(self.serial_connection, "{:?}", err)?;
                                 return Ok(UnhandledCommand::Reset);
                             }
                         };
