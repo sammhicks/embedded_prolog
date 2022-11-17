@@ -398,6 +398,15 @@ impl<'m> From<heap::PermanentVariableError> for ExecutionFailure<'m> {
     }
 }
 
+impl<'m> From<heap::CutError> for ExecutionFailure<'m> {
+    fn from(cut_error: heap::CutError) -> Self {
+        match cut_error {
+            heap::CutError::PermanentVariable(inner) => inner.into(),
+            heap::CutError::Memory(inner) => inner.into(),
+        }
+    }
+}
+
 impl<'m> From<heap::structure_iteration::Error> for ExecutionFailure<'m> {
     fn from(err: heap::structure_iteration::Error) -> Self {
         Self::Error(Error::StructureIterationState(err))
@@ -781,7 +790,7 @@ impl<'m> Machine<'m> {
                 Ok(())
             }
             Instruction::NeckCut => {
-                self.memory.neck_cut();
+                self.memory.neck_cut()?;
                 Ok(())
             }
             Instruction::GetLevel { yn } => {

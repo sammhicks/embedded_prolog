@@ -953,6 +953,30 @@ impl From<TupleMemoryError> for MemoryError {
     }
 }
 
+#[derive(Debug)]
+pub enum CutError {
+    PermanentVariable(PermanentVariableError),
+    Memory(MemoryError),
+}
+
+impl From<PermanentVariableError> for CutError {
+    fn from(inner: PermanentVariableError) -> Self {
+        Self::PermanentVariable(inner)
+    }
+}
+
+impl From<MemoryError> for CutError {
+    fn from(inner: MemoryError) -> Self {
+        Self::Memory(inner)
+    }
+}
+
+impl From<TupleMemoryError> for CutError {
+    fn from(inner: TupleMemoryError) -> Self {
+        Self::Memory(MemoryError::TupleMemory(inner))
+    }
+}
+
 pub struct Heap<'m> {
     registry: Registry<'m>,
     tuple_memory: TupleMemory<'m>,
@@ -1133,9 +1157,7 @@ impl<'m> Heap<'m> {
     }
 
     fn get_environment(&self) -> (Environment, TupleAddress, TupleMetadata<Environment>) {
-        let current_environment = self
-            .current_environment
-            .unwrap_or_else(|| panic!("No Environment"));
+        let current_environment = self.current_environment.expect("No Environment");
 
         let entry = self.registry[current_environment]
             .as_ref()
@@ -1504,7 +1526,40 @@ impl<'m> Heap<'m> {
         self.cut_register = self.latest_choice_point;
     }
 
-    fn do_cut(&mut self, cut_register: Option<Address>) {
+    fn skip_unconditional_trail_items(
+        &self,
+        mut trail: Option<Address>,
+        choice_point: TupleAddress,
+    ) -> Result<Option<Address>, TupleMemoryError> {
+        loop {
+            trail = {
+                let Some(trail) = trail else {
+                    return Ok(None);
+                };
+
+                let trail_entry = self.registry[trail].as_ref().expect("UninitialisedEntry");
+
+                assert!(matches!(trail_entry.value_type, ValueType::TrailVariable));
+
+                let (trail_variable, _) =
+                    TrailVariable::decode(&self.tuple_memory, trail_entry.tuple_address)?;
+
+                let trail_variable_variable_entry = self.registry[trail_variable.variable]
+                    .as_ref()
+                    .expect("UninitialisedEntry");
+
+                if trail_variable_variable_entry.tuple_address < choice_point {
+                    return Ok(Some(trail));
+                }
+
+                log_trace!("{} is now unconditional", trail_variable.variable);
+
+                trail_variable.next_trail_item
+            };
+        }
+    }
+
+    fn do_cut(&mut self, cut_register: Option<Address>) -> Result<(), CutError> {
         log_trace!("Cutting at {}", OptionDisplay(cut_register));
 
         let new_choice_point = match (self.latest_choice_point, cut_register) {
@@ -1512,16 +1567,18 @@ impl<'m> Heap<'m> {
             (Some(_), None) => None,
             (None, Some(_)) => {
                 log_trace!("Not cutting");
-                return;
+                return Ok(());
             }
             (Some(latest_choice_point), Some(cut_register)) => {
+                log_trace!("Tidying trace");
+
                 let latest_choice_point_entry = self.registry[latest_choice_point]
                     .as_ref()
-                    .unwrap_or_else(|| panic!("No choice point entry"));
+                    .expect("No choice point entry");
 
                 let cut_register_entry = self.registry[cut_register]
                     .as_ref()
-                    .unwrap_or_else(|| panic!("No cut register entry"));
+                    .expect("No cut register entry");
 
                 assert!(matches!(
                     latest_choice_point_entry.value_type,
@@ -1533,12 +1590,55 @@ impl<'m> Heap<'m> {
                     ValueType::ChoicePoint
                 ));
 
-                if latest_choice_point_entry.tuple_address > cut_register_entry.tuple_address {
-                    Some(cut_register)
-                } else {
+                if latest_choice_point_entry.tuple_address <= cut_register_entry.tuple_address {
                     log_trace!("Not cutting");
-                    return;
+                    return Ok(());
                 }
+
+                let (cut_choice_point, _) =
+                    ChoicePoint::decode(&self.tuple_memory, cut_register_entry.tuple_address)?;
+
+                self.trail_top = self.skip_unconditional_trail_items(
+                    self.trail_top,
+                    cut_register_entry.tuple_address,
+                )?;
+
+                let mut trail_iterator = self.trail_top;
+
+                while trail_iterator != cut_choice_point.trail_top {
+                    trail_iterator = {
+                        let Some(trail_iterator) = trail_iterator else {break};
+                        let trail_iterator_entry = self.registry[trail_iterator]
+                            .as_ref()
+                            .expect("Uninitialised Entry");
+
+                        assert!(matches!(
+                            trail_iterator_entry.value_type,
+                            ValueType::TrailVariable
+                        ));
+
+                        let (mut trail_variable, _) = TrailVariable::decode(
+                            &self.tuple_memory,
+                            trail_iterator_entry.tuple_address,
+                        )?;
+
+                        trail_variable.next_trail_item = self.skip_unconditional_trail_items(
+                            trail_variable.next_trail_item,
+                            latest_choice_point_entry.tuple_address,
+                        )?;
+
+                        trail_variable.encode(
+                            trail_iterator,
+                            &mut self.tuple_memory,
+                            trail_iterator_entry.tuple_address,
+                            &(),
+                        )?;
+
+                        trail_variable.next_trail_item
+                    };
+                }
+
+                Some(cut_register)
             }
         };
 
@@ -1549,9 +1649,11 @@ impl<'m> Heap<'m> {
         );
 
         self.latest_choice_point = new_choice_point;
+
+        Ok(())
     }
 
-    pub fn neck_cut(&mut self) {
+    pub fn neck_cut(&mut self) -> Result<(), CutError> {
         self.do_cut(self.cut_register)
     }
 
@@ -1559,14 +1661,14 @@ impl<'m> Heap<'m> {
         self.store_permanent_variable(yn, self.cut_register.unwrap_or(unsafe { Address::none() }))
     }
 
-    pub fn cut(&mut self, yn: Yn) -> Result<(), PermanentVariableError> {
+    pub fn cut(&mut self, yn: Yn) -> Result<(), CutError> {
         let address = unsafe { self.load_permanent_variable_unchecked(yn)? };
 
         self.do_cut(if address == unsafe { Address::none() } {
             None
         } else {
             Some(address)
-        });
+        })?;
 
         Ok(())
     }
