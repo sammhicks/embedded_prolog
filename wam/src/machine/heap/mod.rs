@@ -201,7 +201,10 @@ impl TupleEntry for Option<ProgramCounter> {
     }
 
     fn encode(self) -> TupleWord {
-        self.map_or(Address::NO_ADDRESS, SerializableWrapper::into_inner)
+        self.map_or(
+            ProgramCounter::END_OF_PROGRAM,
+            SerializableWrapper::into_inner,
+        )
     }
 }
 
