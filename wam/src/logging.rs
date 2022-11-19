@@ -2,68 +2,68 @@
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => (
-        $crate::log::error!($($arg)*)
+        ::log::error!($($arg)*)
     )
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_error {
-    ($($arg:tt)*) => {};
+    ($($arg:expr),*) => {$(let _ = &$arg;)*};
 }
 
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => (
-        $crate::log::warn!($($arg)*)
+        ::log::warn!($($arg)*)
     )
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_warn {
-    ($($arg:tt)*) => {};
+    ($($arg:expr),*) => {$(let _ = &$arg;)*};
 }
 
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => (
-        $crate::log::info!($($arg)*)
+        ::log::info!($($arg)*)
     )
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_info {
-    ($($arg:tt)*) => {};
+    ($($arg:expr),*) => {$(let _ = &$arg;)*};
 }
 
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_debug {
     ($($arg:tt)*) => (
-        $crate::log::debug!($($arg)*)
+        ::log::debug!($($arg)*)
     )
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_debug {
-    ($($arg:tt)*) => {};
+    ($($arg:expr),*) => {$(let _ = &$arg;)*};
 }
 
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_trace {
     ($($arg:tt)*) => (
-        $crate::log::trace!($($arg)*)
+        ::log::trace!($($arg)*)
     )
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_trace {
-    ($($arg:tt)*) => {};
+    ($($arg:expr),*) => {$(let _ = &$arg;)*};
 }

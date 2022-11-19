@@ -1,5 +1,5 @@
 use super::{
-    log_info, log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead,
+    log_debug, log_info, log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead,
     SerialWrite,
 };
 
@@ -63,7 +63,7 @@ impl<'a, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's, S> {
     fn process_command(&mut self, command: HandledCommand) -> Result<Action, ProcessInputError> {
         match command {
             HandledCommand::ReportStatus => {
-                log::debug!("Status: Waiting for Query");
+                log_debug!("Status: Waiting for Query");
                 self.serial_connection.write_single_char('Q')?;
                 Ok(Action::ProcessNextCommand)
             }
@@ -76,7 +76,7 @@ impl<'a, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's, S> {
         loop {
             let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;
 
-            log::debug!("Processing command {:?}", command);
+            log_info!("Processing command {:?}", command);
 
             let mut command = match command {
                 CommandHeader::ReportStatus => HandledCommand::ReportStatus,

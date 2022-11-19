@@ -1,6 +1,6 @@
 use super::{
-    load_code, CommandHeader, IoError, LoadedCode, Never, ProcessInputError, SerialConnection,
-    SerialRead, SerialWrite, SUCCESS,
+    load_code, log_debug, log_info, log_trace, CommandHeader, IoError, LoadedCode, Never,
+    ProcessInputError, SerialConnection, SerialRead, SerialWrite, SUCCESS,
 };
 
 enum Action {
@@ -15,7 +15,7 @@ pub struct Device<'a, S> {
 
 impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
     fn handle_submit_program(&mut self) -> Result<Action, ProcessInputError> {
-        crate::log_info!("Loading program");
+        log_info!("Loading program");
 
         let LoadedCode {
             code_section: program,
@@ -34,7 +34,7 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
         }
         .run()?;
 
-        crate::log_trace!("Finished with program");
+        log_trace!("Finished with program");
 
         match unhandled_command {
             crate::device_with_program::UnhandledCommand::SubmitProgram => {
@@ -57,11 +57,11 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
             }
         };
 
-        crate::log_debug!("Processing command {:?}", command_header);
+        log_info!("Processing command {:?}", command_header);
 
         match command_header {
             CommandHeader::ReportStatus => {
-                log::debug!("Status: Waiting for program");
+                log_debug!("Status: Waiting for program");
                 self.serial_connection.write_single_char('P')?;
                 Ok(Action::ProcessNextCommand)
             }
@@ -80,7 +80,7 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
     }
 
     pub fn run(mut self) -> Result<Never, IoError> {
-        crate::log_info!("Running");
+        log_info!("Running");
         let mut command_header = self.serial_connection.read_ascii_char()?;
         loop {
             let next_command_header = match self.process_command_byte(command_header) {

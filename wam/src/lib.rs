@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "logging"), no_std)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 use core::convert::TryFrom;
 
@@ -6,9 +6,6 @@ pub use embedded_hal::serial::{Read as SerialRead, Write as SerialWrite};
 pub use nb;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use sha2::Digest;
-
-#[cfg(feature = "logging")]
-pub use log;
 
 mod errors;
 mod hex;
@@ -29,6 +26,9 @@ impl core::fmt::Display for IoError {
         f.write_str("WAM IO Error")
     }
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for IoError {}
 
 #[derive(Debug)]
 pub enum ProcessInputError {

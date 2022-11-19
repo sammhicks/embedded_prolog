@@ -1,4 +1,5 @@
 use super::{Address, Arity, Heap, TupleAddress, TupleMemoryError};
+use crate::log_trace;
 
 pub enum ReadWriteMode {
     Read,
@@ -73,7 +74,7 @@ impl StructureIterationState {
 
     fn check_done(&mut self, index: Arity, arity: Arity) {
         if index == arity {
-            crate::log_trace!("Finished iterating over structure");
+            log_trace!("Finished iterating over structure");
             self.0 = None;
         }
     }
@@ -116,7 +117,7 @@ impl StructureIterationState {
 
     pub fn write_next(&mut self, heap: &mut Heap, address: Address) -> Result<()> {
         self.with_next(heap, |heap, term_address| {
-            crate::log_trace!("Writing {} to {}", address, term_address);
+            log_trace!("Writing {} to {}", address, term_address);
             heap.tuple_memory.store(term_address, address.0)
         })
     }

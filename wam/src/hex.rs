@@ -1,5 +1,4 @@
-use core::fmt::{self, Formatter, UpperHex};
-use std::fmt::LowerHex;
+use core::fmt::{self, Formatter, LowerHex, UpperHex};
 
 pub struct Hex<'a>(pub &'a [u8]);
 

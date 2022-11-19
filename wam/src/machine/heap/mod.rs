@@ -1124,13 +1124,13 @@ impl<'m> Heap<'m> {
 
         let value = factory(address);
 
-        crate::log_trace!("New value at {}: {:?}", tuple_address, value);
+        log_trace!("New value at {}: {:?}", tuple_address, value);
 
         self.tuple_memory_end = value
             .encode(address, &mut self.tuple_memory, tuple_address, terms)
             .map_err(|_| MemoryError::OutOfTupleSpace)?;
 
-        crate::log_trace!("h = {}", self.tuple_memory_end);
+        log_trace!("h = {}", self.tuple_memory_end);
 
         *registry_entry = Some(RegistryEntry {
             value_type: T::VALUE_TYPE,
@@ -1164,7 +1164,7 @@ impl<'m> Heap<'m> {
         mut address: Address,
     ) -> Result<(Address, Value, impl Iterator<Item = Address> + '_), MemoryError> {
         loop {
-            crate::log_trace!("Looking up memory at {}", address);
+            log_trace!("Looking up memory at {}", address);
             let registry_entry = self.registry[address]
                 .as_ref()
                 .expect("Uninitialized Entry");
@@ -1225,7 +1225,7 @@ impl<'m> Heap<'m> {
                 }
             };
 
-            crate::log_trace!("Value: {:?}", value);
+            log_trace!("Value: {:?}", value);
 
             let terms = terms
                 .map(|terms| self.tuple_memory.load_terms(terms))
@@ -1442,8 +1442,8 @@ impl<'m> Heap<'m> {
         self.current_environment = continuation_environment;
         *continuation_point = previous_continuation_point;
 
-        crate::log_trace!("E => {}", OptionDisplay(self.current_environment));
-        crate::log_trace!("CP => {}", OptionDisplay(*continuation_point));
+        log_trace!("E => {}", OptionDisplay(self.current_environment));
+        log_trace!("CP => {}", OptionDisplay(*continuation_point));
     }
 
     pub fn new_choice_point(
@@ -1529,8 +1529,8 @@ impl<'m> Heap<'m> {
         self.trail_top = choice_point.trail_top;
         let next_choice_point = choice_point.next_choice_point;
 
-        crate::log_trace!("E => {}", OptionDisplay(self.current_environment));
-        crate::log_trace!("CP => {}", OptionDisplay(*continuation_point));
+        log_trace!("E => {}", OptionDisplay(self.current_environment));
+        log_trace!("CP => {}", OptionDisplay(*continuation_point));
 
         (
             choice_point,

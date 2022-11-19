@@ -1,5 +1,6 @@
 use super::{
-    log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead, SerialWrite,
+    log_debug, log_info, log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead,
+    SerialWrite,
 };
 
 use crate::machine::ExecutionFailure;
@@ -65,11 +66,11 @@ impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> 
             execution_result = loop {
                 let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;
 
-                log::debug!("Processing command {:?}", command);
+                log_info!("Processing command {:?}", command);
 
                 match command {
                     CommandHeader::ReportStatus => {
-                        log::debug!("Status: {:?}", success);
+                        log_debug!("Status: {:?}", success);
                         self.serial_connection.write_single_char(success_code)?;
                     }
                     CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),

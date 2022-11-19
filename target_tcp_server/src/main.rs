@@ -35,28 +35,33 @@ impl wam::SerialWrite<u8> for Channels {
     }
 }
 
-fn do_main() -> std::io::Result<wam::Never> {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 8080))?;
+#[derive(Debug)]
+struct DisplayError(Box<dyn std::error::Error>);
 
-    loop {
-        let (stream, remote) = listener.accept()?;
-
-        wam::log::info!("Connection from {}", remote);
-
-        let mut memory = [0; 32768];
-
-        let _ = wam::Device {
-            memory: &mut memory,
-            serial_connection: wam::SerialConnection(Channels(stream)),
-        }
-        .run();
+impl<E: std::error::Error + 'static> From<E> for DisplayError {
+    fn from(error: E) -> Self {
+        Self(error.into())
     }
 }
 
-fn main() {
+fn main() -> Result<(), DisplayError> {
     pretty_env_logger::init();
 
-    if let Err(err) = do_main() {
-        eprintln!("{}", err);
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 8080))?;
+
+    loop {
+        let (stream, _) = listener.accept()?;
+
+        let mut memory = [0; 32768];
+
+        let device = wam::Device {
+            memory: &mut memory,
+            serial_connection: wam::SerialConnection(Channels(stream)),
+        };
+
+        match device.run() {
+            Ok(never) => match never {},
+            Err(wam::IoError) => {}
+        }
     }
 }
