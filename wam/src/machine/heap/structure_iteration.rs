@@ -1,4 +1,4 @@
-use super::{Address, Arity, Heap, TupleAddress};
+use super::{Address, Arity, Heap, TupleAddress, TupleMemoryError};
 
 pub enum ReadWriteMode {
     Read,
@@ -16,6 +16,13 @@ pub enum Error {
     NotActive,
     CurrentlyActive,
     NoMoreTerms,
+    TupleMemory(super::TupleMemoryError),
+}
+
+impl From<super::TupleMemoryError> for Error {
+    fn from(error: super::TupleMemoryError) -> Self {
+        Self::TupleMemory(error)
+    }
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -74,7 +81,7 @@ impl StructureIterationState {
     fn with_next<'m, T, H>(
         &mut self,
         heap: H,
-        action: impl FnOnce(H, TupleAddress) -> T,
+        action: impl FnOnce(H, TupleAddress) -> core::result::Result<T, TupleMemoryError>,
     ) -> Result<T>
     where
         H: core::ops::Deref<Target = Heap<'m>>,
@@ -92,7 +99,7 @@ impl StructureIterationState {
 
         inner_state.index.0 += 1;
 
-        let result = action(heap, term_address);
+        let result = action(heap, term_address)?;
 
         let index = inner_state.index;
 
@@ -103,14 +110,14 @@ impl StructureIterationState {
 
     pub fn read_next(&mut self, heap: &Heap) -> Result<Address> {
         self.with_next(heap, |heap, address| {
-            Address(heap.tuple_memory.load(address).unwrap())
+            heap.tuple_memory.load(address).map(Address)
         })
     }
 
     pub fn write_next(&mut self, heap: &mut Heap, address: Address) -> Result<()> {
         self.with_next(heap, |heap, term_address| {
             crate::log_trace!("Writing {} to {}", address, term_address);
-            heap.tuple_memory.store(term_address, address.0).unwrap();
+            heap.tuple_memory.store(term_address, address.0)
         })
     }
 
