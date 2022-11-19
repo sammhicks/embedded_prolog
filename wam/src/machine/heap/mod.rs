@@ -1426,12 +1426,12 @@ impl<'m> Heap<'m> {
             tuple_address,
         )?;
 
+        self.resume_garbage_collection();
+
         Ok(())
     }
 
     pub fn deallocate(&mut self, continuation_point: &mut Option<ProgramCounter>) {
-        self.resume_garbage_collection();
-
         let Environment {
             continuation_environment,
             continuation_point: previous_continuation_point,
@@ -1444,6 +1444,8 @@ impl<'m> Heap<'m> {
 
         log_trace!("E => {}", OptionDisplay(self.current_environment));
         log_trace!("CP => {}", OptionDisplay(*continuation_point));
+
+        self.resume_garbage_collection();
     }
 
     pub fn new_choice_point(
@@ -1507,8 +1509,6 @@ impl<'m> Heap<'m> {
         registers: &mut [Address],
         continuation_point: &mut Option<ProgramCounter>,
     ) -> (ChoicePoint, Address, TupleAddress, Option<Address>) {
-        self.resume_garbage_collection();
-
         let (choice_point, tuple_address, metadata) =
             self.get_latest_choice_point().expect("No Choice Point");
 
@@ -1531,6 +1531,8 @@ impl<'m> Heap<'m> {
 
         log_trace!("E => {}", OptionDisplay(self.current_environment));
         log_trace!("CP => {}", OptionDisplay(*continuation_point));
+
+        self.resume_garbage_collection();
 
         (
             choice_point,
