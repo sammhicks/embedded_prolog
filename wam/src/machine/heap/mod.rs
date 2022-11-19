@@ -74,7 +74,7 @@ impl fmt::Display for TupleAddress {
     }
 }
 
-impl std::ops::Add<u16> for TupleAddress {
+impl core::ops::Add<u16> for TupleAddress {
     type Output = Self;
 
     fn add(self, rhs: u16) -> Self::Output {
@@ -82,7 +82,15 @@ impl std::ops::Add<u16> for TupleAddress {
     }
 }
 
-impl std::ops::Add<Arity> for TupleAddress {
+impl core::ops::Add<TupleAddress> for TupleAddress {
+    type Output = Self;
+
+    fn add(self, rhs: TupleAddress) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl core::ops::Add<Arity> for TupleAddress {
     type Output = Self;
 
     fn add(self, rhs: Arity) -> Self::Output {
@@ -90,11 +98,19 @@ impl std::ops::Add<Arity> for TupleAddress {
     }
 }
 
-impl std::ops::Add<Yn> for TupleAddress {
+impl core::ops::Add<Yn> for TupleAddress {
     type Output = Self;
 
     fn add(self, rhs: Yn) -> Self::Output {
         Self(self.0 + rhs.yn as u16)
+    }
+}
+
+impl core::ops::Sub<TupleAddress> for TupleAddress {
+    type Output = Self;
+
+    fn sub(self, rhs: TupleAddress) -> Self::Output {
+        Self(self.0 - rhs.0)
     }
 }
 
@@ -105,9 +121,16 @@ impl TupleAddress {
 }
 
 #[derive(Debug)]
+enum MarkedState {
+    NotMarked,
+    IsMarked { next: Option<Address> },
+}
+
+#[derive(Debug)]
 struct RegistryEntry {
     value_type: ValueType,
     tuple_address: TupleAddress,
+    marked_state: MarkedState,
 }
 
 struct Registry<'m>(&'m mut [Option<RegistryEntry>]);
@@ -124,9 +147,37 @@ impl<'m> Registry<'m> {
 
         Some((address, slot))
     }
+
+    fn add_item_to_be_scanned(&mut self, address: Address, next_list_head: &mut Option<Address>) {
+        if unsafe { address == Address::none() } {
+            return;
+        }
+
+        let registry_entry = self[address].as_mut().expect("Uninitialized Entry");
+
+        if let MarkedState::IsMarked { .. } = registry_entry.marked_state {
+            return;
+        }
+
+        log_trace!("Marking {address}, next is {next_list_head:?}");
+
+        registry_entry.marked_state = MarkedState::IsMarked {
+            next: core::mem::replace(next_list_head, Some(address)),
+        };
+    }
+
+    fn add_maybe_item_to_be_scanned(
+        &mut self,
+        address: Option<Address>,
+        next_list_head: &mut Option<Address>,
+    ) {
+        if let Some(address) = address {
+            self.add_item_to_be_scanned(address, next_list_head)
+        }
+    }
 }
 
-impl<'m> std::ops::Index<Address> for Registry<'m> {
+impl<'m> core::ops::Index<Address> for Registry<'m> {
     type Output = Option<RegistryEntry>;
 
     fn index(&self, index: Address) -> &Self::Output {
@@ -134,7 +185,7 @@ impl<'m> std::ops::Index<Address> for Registry<'m> {
     }
 }
 
-impl<'m> std::ops::IndexMut<Address> for Registry<'m> {
+impl<'m> core::ops::IndexMut<Address> for Registry<'m> {
     fn index_mut(&mut self, index: Address) -> &mut Self::Output {
         &mut self.0[index.0 as usize]
     }
@@ -389,6 +440,19 @@ impl<'m> TupleMemory<'m> {
         entry: impl TupleEntries,
     ) -> Result<TupleAddress, TupleMemoryError> {
         entry.encode(self, address)
+    }
+
+    fn copy_within(&mut self, source: core::ops::Range<TupleAddress>, destination: TupleAddress) {
+        let core::ops::Range {
+            start: TupleAddress(start),
+            end: TupleAddress(end),
+        } = source;
+        let TupleAddress(destination) = destination;
+
+        self.0.copy_within(
+            usize::from(start)..usize::from(end),
+            usize::from(destination),
+        );
     }
 }
 
@@ -980,6 +1044,38 @@ impl From<TupleMemoryError> for CutError {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ScanningState {
+    current_items_to_scan: Address,
+    next_items_to_scan: Option<Address>,
+}
+
+struct ScanningResult {
+    current_items_to_scan: Option<Address>,
+    next_items_to_scan: Option<Address>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SweepingState {
+    source: TupleAddress,
+    destination: TupleAddress,
+    all_tuples_were_marked: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GarbageCollectionState {
+    Suspended,
+    Starting,
+    Scanning(ScanningState),
+    Sweeping(SweepingState),
+}
+
+#[derive(Clone, Copy)]
+pub enum GarbageCollectionIsRunning {
+    Suspected,
+    Running,
+}
+
 pub struct Heap<'m> {
     registry: Registry<'m>,
     tuple_memory: TupleMemory<'m>,
@@ -988,6 +1084,7 @@ pub struct Heap<'m> {
     latest_choice_point: Option<Address>,
     trail_top: Option<Address>,
     cut_register: Option<Address>,
+    garbage_collection_state: GarbageCollectionState,
 }
 
 impl<'m> Heap<'m> {
@@ -1009,6 +1106,7 @@ impl<'m> Heap<'m> {
             latest_choice_point: None,
             trail_top: None,
             cut_register: None,
+            garbage_collection_state: GarbageCollectionState::Suspended,
         }
     }
 
@@ -1037,7 +1135,10 @@ impl<'m> Heap<'m> {
         *registry_entry = Some(RegistryEntry {
             value_type: T::VALUE_TYPE,
             tuple_address,
+            marked_state: MarkedState::NotMarked,
         });
+
+        self.mark_moved_value(address);
 
         Ok(address)
     }
@@ -1217,6 +1318,8 @@ impl<'m> Heap<'m> {
     ) -> Result<(), PermanentVariableError> {
         let term_address = self.get_permanent_variable_address(yn)?;
 
+        self.mark_moved_value(address);
+
         self.tuple_memory
             .store(term_address, address.0)
             .map_err(|inner| PermanentVariableError::TupleMemoryError { inner, yn })
@@ -1247,7 +1350,7 @@ impl<'m> Heap<'m> {
         variable_address: Address,
         value_address: Address,
     ) -> Result<(), MemoryError> {
-        crate::log_trace!(
+        log_trace!(
             "Binding memory {} to value at {}",
             variable_address,
             value_address
@@ -1261,6 +1364,8 @@ impl<'m> Heap<'m> {
             tuple_address,
             &(),
         )?;
+
+        self.mark_moved_value(value_address);
 
         self.add_variable_to_trail(variable_address, tuple_address)
     }
@@ -1325,6 +1430,8 @@ impl<'m> Heap<'m> {
     }
 
     pub fn deallocate(&mut self, continuation_point: &mut Option<ProgramCounter>) {
+        self.resume_garbage_collection();
+
         let Environment {
             continuation_environment,
             continuation_point: previous_continuation_point,
@@ -1400,6 +1507,8 @@ impl<'m> Heap<'m> {
         registers: &mut [Address],
         continuation_point: &mut Option<ProgramCounter>,
     ) -> (ChoicePoint, Address, TupleAddress, Option<Address>) {
+        self.resume_garbage_collection();
+
         let (choice_point, tuple_address, metadata) =
             self.get_latest_choice_point().expect("No Choice Point");
 
@@ -1674,6 +1783,327 @@ impl<'m> Heap<'m> {
         })?;
 
         Ok(())
+    }
+
+    fn start_garbage_collection(&mut self, registers: &[Address]) -> GarbageCollectionState {
+        let mut list_head = None;
+
+        for &address in registers {
+            self.registry
+                .add_item_to_be_scanned(address, &mut list_head);
+        }
+
+        {
+            let Heap {
+                registry: _,
+                tuple_memory: _,
+                tuple_memory_end: _,
+                current_environment,
+                latest_choice_point,
+                trail_top,
+                cut_register,
+                garbage_collection_state: _,
+            } = *self;
+
+            for address in [
+                current_environment,
+                latest_choice_point,
+                trail_top,
+                cut_register,
+            ] {
+                self.registry
+                    .add_maybe_item_to_be_scanned(address, &mut list_head);
+            }
+        }
+
+        log_trace!("{:?}", list_head);
+
+        if let Some(current_items_to_scan) = list_head {
+            GarbageCollectionState::Scanning(ScanningState {
+                current_items_to_scan,
+                next_items_to_scan: None,
+            })
+        } else {
+            GarbageCollectionState::Suspended
+        }
+    }
+
+    fn scan_item(&mut self, state: ScanningState) -> Result<ScanningResult, TupleMemoryError> {
+        let ScanningState {
+            current_items_to_scan: item_to_scan,
+            mut next_items_to_scan,
+        } = state;
+
+        let next_list_head = &mut next_items_to_scan;
+
+        let registry_entry = self.registry[item_to_scan]
+            .as_mut()
+            .expect("Uninitialized Entry");
+
+        let MarkedState::IsMarked { next: current_items_to_scan } = registry_entry.marked_state else {
+            panic!("Entry {} is in scan queue but is not marked", item_to_scan);
+        };
+
+        assert_eq!(
+            item_to_scan,
+            Address(self.tuple_memory.load(registry_entry.tuple_address)?)
+        );
+
+        let term_address_range = match registry_entry.value_type {
+            ValueType::Reference => {
+                let (ReferenceValue(reference_address), metadata) =
+                    ReferenceValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
+
+                self.registry
+                    .add_item_to_be_scanned(reference_address, next_list_head);
+
+                metadata.terms.into_maybe_address_range()
+            }
+            ValueType::Structure => {
+                let (StructureValue(..), metadata) =
+                    StructureValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
+
+                metadata.terms.into_maybe_address_range()
+            }
+            ValueType::List => {
+                let (ListValue, metadata) =
+                    ListValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
+
+                metadata.terms.into_maybe_address_range()
+            }
+            ValueType::Constant => {
+                let (ConstantValue(..), metadata) =
+                    ConstantValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
+
+                metadata.terms.into_maybe_address_range()
+            }
+            ValueType::Environment => {
+                let (
+                    Environment {
+                        continuation_environment,
+                        continuation_point: _,
+                        number_of_active_permanent_variables: _,
+                        number_of_permanent_variables: _,
+                    },
+                    metadata,
+                ) = Environment::decode(&self.tuple_memory, registry_entry.tuple_address)?;
+
+                self.registry
+                    .add_maybe_item_to_be_scanned(continuation_environment, next_list_head);
+
+                metadata.terms.into_maybe_address_range()
+            }
+            ValueType::ChoicePoint => {
+                let (
+                    ChoicePoint {
+                        number_of_saved_registers: _,
+                        current_environment,
+                        continuation_point: _,
+                        next_choice_point,
+                        next_clause: _,
+                        trail_top,
+                        cut_register,
+                    },
+                    metadata,
+                ) = ChoicePoint::decode(&self.tuple_memory, registry_entry.tuple_address)?;
+
+                self.registry
+                    .add_maybe_item_to_be_scanned(current_environment, next_list_head);
+                self.registry
+                    .add_maybe_item_to_be_scanned(next_choice_point, next_list_head);
+                self.registry
+                    .add_maybe_item_to_be_scanned(trail_top, next_list_head);
+                self.registry
+                    .add_maybe_item_to_be_scanned(cut_register, next_list_head);
+
+                metadata.terms.into_maybe_address_range()
+            }
+            ValueType::TrailVariable => {
+                let (
+                    TrailVariable {
+                        variable,
+                        next_trail_item,
+                    },
+                    metadata,
+                ) = TrailVariable::decode(&self.tuple_memory, registry_entry.tuple_address)?;
+
+                self.registry
+                    .add_item_to_be_scanned(variable, next_list_head);
+                self.registry
+                    .add_maybe_item_to_be_scanned(next_trail_item, next_list_head);
+
+                metadata.terms.into_maybe_address_range()
+            }
+        };
+
+        if let Some(term_address_range) = term_address_range {
+            for term_address in self.tuple_memory.load_terms(term_address_range)? {
+                self.registry
+                    .add_item_to_be_scanned(term_address, next_list_head);
+            }
+        }
+
+        Ok(ScanningResult {
+            current_items_to_scan,
+            next_items_to_scan,
+        })
+    }
+
+    fn sweep_item(&mut self, state: SweepingState) -> Result<SweepingState, TupleMemoryError> {
+        let SweepingState {
+            source,
+            destination,
+            all_tuples_were_marked,
+        } = state;
+
+        let registry_address = Address(self.tuple_memory.load(source)?);
+        let registry_slot = &mut self.registry[registry_address];
+        let registry_entry = registry_slot.as_mut().expect("Uninitialized Entry");
+
+        let next_tuple = match registry_entry.value_type {
+            ValueType::Reference => {
+                ReferenceValue::decode(&self.tuple_memory, source)?
+                    .1
+                    .next_tuple
+            }
+            ValueType::Structure => {
+                StructureValue::decode(&self.tuple_memory, source)?
+                    .1
+                    .next_tuple
+            }
+            ValueType::List => ListValue::decode(&self.tuple_memory, source)?.1.next_tuple,
+            ValueType::Constant => {
+                ConstantValue::decode(&self.tuple_memory, source)?
+                    .1
+                    .next_tuple
+            }
+            ValueType::Environment => {
+                Environment::decode(&self.tuple_memory, source)?
+                    .1
+                    .next_tuple
+            }
+            ValueType::ChoicePoint => {
+                ChoicePoint::decode(&self.tuple_memory, source)?
+                    .1
+                    .next_tuple
+            }
+            ValueType::TrailVariable => {
+                TrailVariable::decode(&self.tuple_memory, source)?
+                    .1
+                    .next_tuple
+            }
+        };
+
+        Ok(
+            match core::mem::replace(&mut registry_entry.marked_state, MarkedState::NotMarked) {
+                MarkedState::NotMarked => {
+                    log_trace!("Freeing {registry_address}");
+
+                    *registry_slot = None;
+
+                    SweepingState {
+                        source: next_tuple,
+                        destination,
+                        all_tuples_were_marked: false,
+                    }
+                }
+                MarkedState::IsMarked { .. } => {
+                    log_trace!("Keeping {registry_address}");
+
+                    self.tuple_memory
+                        .copy_within(source..next_tuple, destination);
+
+                    registry_entry.tuple_address = destination;
+
+                    SweepingState {
+                        source: next_tuple,
+                        destination: destination + (next_tuple - source),
+                        all_tuples_were_marked,
+                    }
+                }
+            },
+        )
+    }
+
+    fn mark_moved_value(&mut self, address: Address) {
+        let registry_entry = self.registry[address]
+            .as_mut()
+            .expect("Uninitialised Entry");
+
+        if let MarkedState::IsMarked { .. } = registry_entry.marked_state {
+            return;
+        }
+
+        registry_entry.marked_state = match &mut self.garbage_collection_state {
+            GarbageCollectionState::Suspended | GarbageCollectionState::Starting => {
+                MarkedState::NotMarked
+            }
+            GarbageCollectionState::Scanning(ScanningState {
+                next_items_to_scan, ..
+            }) => MarkedState::IsMarked {
+                next: core::mem::replace(next_items_to_scan, Some(address)),
+            },
+            GarbageCollectionState::Sweeping(_) => MarkedState::IsMarked { next: None },
+        };
+    }
+
+    pub fn run_garbage_collection(
+        &mut self,
+        registers: &[Address],
+    ) -> Result<GarbageCollectionIsRunning, TupleMemoryError> {
+        log_trace!("{:?}", self.garbage_collection_state);
+
+        let new_garbage_collection_state = match self.garbage_collection_state {
+            GarbageCollectionState::Suspended => return Ok(GarbageCollectionIsRunning::Suspected),
+            GarbageCollectionState::Starting => self.start_garbage_collection(registers),
+            GarbageCollectionState::Scanning(state) => match self.scan_item(state)? {
+                ScanningResult {
+                    current_items_to_scan: Some(current_items_to_scan),
+                    next_items_to_scan,
+                } => GarbageCollectionState::Scanning(ScanningState {
+                    current_items_to_scan,
+                    next_items_to_scan,
+                }),
+                ScanningResult {
+                    current_items_to_scan: None,
+                    next_items_to_scan: Some(current_items_to_scan),
+                } => GarbageCollectionState::Scanning(ScanningState {
+                    current_items_to_scan,
+                    next_items_to_scan: None,
+                }),
+                ScanningResult {
+                    current_items_to_scan: None,
+                    next_items_to_scan: None,
+                } => GarbageCollectionState::Sweeping(SweepingState {
+                    source: TupleAddress(0),
+                    destination: TupleAddress(0),
+                    all_tuples_were_marked: true,
+                }),
+            },
+            GarbageCollectionState::Sweeping(state) => {
+                if state.source == self.tuple_memory_end {
+                    self.tuple_memory_end = state.destination;
+                    if state.all_tuples_were_marked {
+                        GarbageCollectionState::Suspended
+                    } else {
+                        GarbageCollectionState::Starting
+                    }
+                } else {
+                    GarbageCollectionState::Sweeping(self.sweep_item(state)?)
+                }
+            }
+        };
+
+        self.garbage_collection_state = new_garbage_collection_state;
+
+        Ok(GarbageCollectionIsRunning::Running)
+    }
+
+    pub fn resume_garbage_collection(&mut self) {
+        if let GarbageCollectionState::Suspended = self.garbage_collection_state {
+            log_trace!("Resuming Garbage Collection");
+            self.garbage_collection_state = GarbageCollectionState::Starting;
+        }
     }
 
     pub fn query_has_multiple_solutions(&self) -> bool {

@@ -343,6 +343,10 @@ impl RegisterBlock {
         }
     }
 
+    fn all(&self) -> &[Address] {
+        &self.0
+    }
+
     fn all_mut(&mut self) -> &mut [Address] {
         &mut self.0
     }
@@ -489,6 +493,8 @@ impl<'m> Machine<'m> {
             self.pc = Some(new_pc);
 
             self.execute_instruction(instruction)?;
+
+            self.run_garbage_collection()?;
 
             log_trace!("");
         }
@@ -804,6 +810,14 @@ impl<'m> Machine<'m> {
             Instruction::True => Ok(()),
             Instruction::Fail => self.backtrack(),
         }
+    }
+
+    fn run_garbage_collection(&mut self) -> Result<(), heap::TupleMemoryError> {
+        while let heap::GarbageCollectionIsRunning::Running =
+            self.memory.run_garbage_collection(self.registers.all())?
+        {}
+
+        Ok(())
     }
 
     fn get_register_value(&self, index: Ai) -> Result<(Address, Value), ExecutionFailure<'m>> {
