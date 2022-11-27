@@ -143,6 +143,13 @@ handle_query_result('E', Stream, _Query, _Functors, error(Message)) :-
 
 
 read_answer(Stream, Query, Functors) :-
+    atom(Query),
+    !,
+    compound_name_arity(Compound_Query, Query, 0),
+    read_answer(Stream, Compound_Query, Functors).
+
+
+read_answer(Stream, Query, Functors) :-
     compound_name_arity(Query, Name, Arity),
     length(Register_References, Arity),
     maplist(read_u16(Stream), Register_References),
