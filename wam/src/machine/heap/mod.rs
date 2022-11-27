@@ -8,8 +8,21 @@ use super::basic_types::{
 
 pub mod structure_iteration;
 
+#[allow(dead_code)]
 #[derive(Debug)]
-enum ValueType {
+pub enum BadValueType {
+    Expected {
+        expected: ValueType,
+        actual: ValueType,
+    },
+    ExpectedOneOf {
+        expected: &'static [ValueType],
+        actual: ValueType,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueType {
     Reference,
     Structure,
     List,
@@ -129,8 +142,58 @@ enum MarkedState {
 }
 
 #[derive(Debug)]
+struct RegistryEntry {
+    value_type: ValueType,
+    tuple_address: TupleAddress,
+    marked_state: MarkedState,
+}
+
+impl RegistryEntry {
+    fn verify_is(&self, expected: ValueType) -> Result<&Self, BadValueType> {
+        if self.value_type == expected {
+            Ok(self)
+        } else {
+            Err(BadValueType::Expected {
+                expected,
+                actual: self.value_type.clone(),
+            })
+        }
+    }
+}
+
+#[derive(Debug)]
 struct NoRegistryEntryAt {
     address: Address,
+}
+
+struct BadRegistryValueType {
+    address: Address,
+    bad_value_type: BadValueType,
+}
+
+struct RegistryEntryRef<'m> {
+    address: Address,
+    entry: &'m RegistryEntry,
+}
+
+impl<'m> RegistryEntryRef<'m> {
+    fn verify_is(self, expected: ValueType) -> Result<Self, BadRegistryValueType> {
+        let address = self.address;
+        self.entry
+            .verify_is(expected)
+            .map(|_| self)
+            .map_err(|bad_value_type| BadRegistryValueType {
+                address,
+                bad_value_type,
+            })
+    }
+}
+
+impl<'m> core::ops::Deref for RegistryEntryRef<'m> {
+    type Target = RegistryEntry;
+    fn deref(&self) -> &Self::Target {
+        self.entry
+    }
 }
 
 struct RegistrySlotMut<'m> {
@@ -150,13 +213,6 @@ impl<'m> RegistrySlotMut<'m> {
     }
 }
 
-#[derive(Debug)]
-struct RegistryEntry {
-    value_type: ValueType,
-    tuple_address: TupleAddress,
-    marked_state: MarkedState,
-}
-
 struct Registry<'m>(&'m mut [Option<RegistryEntry>]);
 
 impl<'m> Registry<'m> {
@@ -165,16 +221,21 @@ impl<'m> Registry<'m> {
             .zip(self.0.iter_mut())
             .find(|(_, entry)| entry.is_none())?;
 
-        let address = Address(NonZeroU16::new(index).unwrap());
+        // Safety: index starts at 1
+        let address = Address(unsafe { NonZeroU16::new_unchecked(index) });
 
         Some((address, slot))
     }
 
-    fn add_item_to_be_scanned(&mut self, address: Address, next_list_head: &mut Option<Address>) {
-        let registry_entry = self.get_mut(address).unwrap();
+    fn add_item_to_be_scanned(
+        &mut self,
+        address: Address,
+        next_list_head: &mut Option<Address>,
+    ) -> Result<(), NoRegistryEntryAt> {
+        let registry_entry = self.get_mut(address)?;
 
         if let MarkedState::IsMarked { .. } = registry_entry.marked_state {
-            return;
+            return Ok(());
         }
 
         log_trace!("Marking {address}, next is {next_list_head:?}");
@@ -182,16 +243,20 @@ impl<'m> Registry<'m> {
         registry_entry.marked_state = MarkedState::IsMarked {
             next: core::mem::replace(next_list_head, Some(address)),
         };
+
+        Ok(())
     }
 
     fn add_maybe_item_to_be_scanned(
         &mut self,
         address: Option<Address>,
         next_list_head: &mut Option<Address>,
-    ) {
+    ) -> Result<(), NoRegistryEntryAt> {
         if let Some(address) = address {
-            self.add_item_to_be_scanned(address, next_list_head)
+            self.add_item_to_be_scanned(address, next_list_head)?;
         }
+
+        Ok(())
     }
 
     fn index_of_address(address: Address) -> usize {
@@ -205,11 +270,12 @@ impl<'m> Registry<'m> {
             .ok_or(NoRegistryEntryAt { address })
     }
 
-    fn get(&self, address: Address) -> Result<&RegistryEntry, NoRegistryEntryAt> {
+    fn get(&self, address: Address) -> Result<RegistryEntryRef, NoRegistryEntryAt> {
         self.0
             .get(Self::index_of_address(address))
             .and_then(Option::as_ref)
             .ok_or(NoRegistryEntryAt { address })
+            .map(|entry| RegistryEntryRef { address, entry })
     }
 
     fn get_mut(&mut self, address: Address) -> Result<&mut RegistryEntry, NoRegistryEntryAt> {
@@ -264,6 +330,12 @@ pub enum TupleMemoryError {
     },
 }
 
+impl TupleMemoryError {
+    fn bad_entry(TupleAddress(address): TupleAddress) -> impl FnOnce(TupleEntryError) -> Self {
+        move |inner| Self::BadEntry { address, inner }
+    }
+}
+
 trait TupleEntries: Sized {
     fn decode(
         tuple_memory: &TupleMemory,
@@ -285,10 +357,7 @@ impl<A: TupleEntry, B: TupleEntries> TupleEntries for Then<A, B> {
         address: TupleAddress,
     ) -> Result<(Self, TupleAddress), TupleMemoryError> {
         let a =
-            A::decode(tuple_memory.load(address)?).map_err(|inner| TupleMemoryError::BadEntry {
-                address: address.0,
-                inner,
-            })?;
+            A::decode(tuple_memory.load(address)?).map_err(TupleMemoryError::bad_entry(address))?;
 
         let (b, address) = B::decode(tuple_memory, address + 1)?;
         Ok((Then(a, b), address))
@@ -764,26 +833,22 @@ pub enum Value {
 }
 
 #[derive(Debug)]
-pub enum PermanentVariableError {
-    IndexOutOfRange {
-        yn: Yn,
-        permanent_variable_count: Arity,
-    },
-    NoValue {
-        yn: Yn,
-    },
-    TupleMemoryError {
-        yn: Yn,
-        inner: TupleMemoryError,
-    },
-}
-
-#[derive(Debug)]
 pub enum MemoryError {
-    NoRegistryEntryAt { address: u16 },
+    NoRegistryEntryAt {
+        address: u16,
+    },
+    BadRegistryValueType {
+        address: Address,
+        bad_value_type: BadValueType,
+    },
     TupleMemory(TupleMemoryError),
     OutOfRegistryEntries,
     OutOfTupleSpace,
+    NoEnvironment,
+    NoChoicePoint,
+    UnmarkedEntryInScanQueue {
+        item_to_scan: Address,
+    },
 }
 
 impl From<NoRegistryEntryAt> for MemoryError {
@@ -794,9 +859,50 @@ impl From<NoRegistryEntryAt> for MemoryError {
     }
 }
 
+impl From<BadRegistryValueType> for MemoryError {
+    fn from(
+        BadRegistryValueType {
+            address,
+            bad_value_type,
+        }: BadRegistryValueType,
+    ) -> Self {
+        Self::BadRegistryValueType {
+            address,
+            bad_value_type,
+        }
+    }
+}
+
 impl From<TupleMemoryError> for MemoryError {
     fn from(inner: TupleMemoryError) -> Self {
         Self::TupleMemory(inner)
+    }
+}
+
+#[derive(Debug)]
+pub enum PermanentVariableError {
+    IndexOutOfRange {
+        yn: Yn,
+        permanent_variable_count: Arity,
+    },
+    NoValue {
+        yn: Yn,
+    },
+    MemoryError {
+        yn: Yn,
+        inner: MemoryError,
+    },
+}
+
+impl PermanentVariableError {
+    fn memory_error<E>(yn: Yn) -> impl FnOnce(E) -> Self
+    where
+        MemoryError: From<E>,
+    {
+        move |inner| Self::MemoryError {
+            yn,
+            inner: MemoryError::from(inner),
+        }
     }
 }
 
@@ -818,9 +924,21 @@ impl From<MemoryError> for CutError {
     }
 }
 
+impl From<NoRegistryEntryAt> for CutError {
+    fn from(inner: NoRegistryEntryAt) -> Self {
+        Self::Memory(inner.into())
+    }
+}
+
+impl From<BadRegistryValueType> for CutError {
+    fn from(inner: BadRegistryValueType) -> Self {
+        Self::Memory(inner.into())
+    }
+}
+
 impl From<TupleMemoryError> for CutError {
     fn from(inner: TupleMemoryError) -> Self {
-        Self::Memory(MemoryError::TupleMemory(inner))
+        Self::Memory(inner.into())
     }
 }
 
@@ -918,7 +1036,7 @@ impl<'m> Heap<'m> {
             marked_state: MarkedState::NotMarked,
         });
 
-        self.mark_moved_value(address);
+        self.mark_moved_value(address)?;
 
         Ok(address)
     }
@@ -945,7 +1063,7 @@ impl<'m> Heap<'m> {
     ) -> Result<(Address, Value, impl Iterator<Item = Option<Address>> + '_), MemoryError> {
         loop {
             log_trace!("Looking up memory at {}", address);
-            let registry_entry = self.registry.get(address).unwrap();
+            let registry_entry = self.registry.get(address)?;
 
             assert_eq!(
                 Some(address),
@@ -997,7 +1115,18 @@ impl<'m> Heap<'m> {
                     )
                 }
                 ValueType::Environment | ValueType::ChoicePoint | ValueType::TrailVariable => {
-                    panic!("Expected value, found {:?}", registry_entry.value_type);
+                    return Err(MemoryError::BadRegistryValueType {
+                        address,
+                        bad_value_type: BadValueType::ExpectedOneOf {
+                            expected: &[
+                                ValueType::Reference,
+                                ValueType::Structure,
+                                ValueType::List,
+                                ValueType::Constant,
+                            ],
+                            actual: registry_entry.value_type.clone(),
+                        },
+                    })
                 }
             };
 
@@ -1013,46 +1142,57 @@ impl<'m> Heap<'m> {
         }
     }
 
-    fn structure_term_addresses(&self, address: Address) -> AddressSlice {
-        let registry_entry = self.registry.get(address).unwrap();
+    fn structure_term_addresses(&self, address: Address) -> Result<AddressSlice, MemoryError> {
+        let registry_entry = self.registry.get(address)?;
 
-        match registry_entry.value_type {
+        Ok(match registry_entry.value_type {
             ValueType::Structure => {
                 let (StructureValue(..), metadata) =
-                    StructureValue::decode(&self.tuple_memory, registry_entry.tuple_address)
-                        .unwrap();
+                    StructureValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
                 assert_eq!(address, metadata.registry_address);
                 metadata.terms
             }
             ValueType::List => {
                 let (ListValue, metadata) =
-                    ListValue::decode(&self.tuple_memory, registry_entry.tuple_address).unwrap();
+                    ListValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
                 assert_eq!(address, metadata.registry_address);
                 metadata.terms
             }
-            _ => panic!("Invalid value type: {:?}", registry_entry.value_type),
-        }
+            _ => {
+                return Err(MemoryError::BadRegistryValueType {
+                    address,
+                    bad_value_type: BadValueType::ExpectedOneOf {
+                        expected: &[ValueType::Structure, ValueType::List],
+                        actual: registry_entry.value_type.clone(),
+                    },
+                })
+            }
+        })
     }
 
-    fn get_environment(&self) -> (Environment, TupleAddress, TupleMetadata<Environment>) {
-        let current_environment = self.current_environment.expect("No Environment");
+    fn get_environment(
+        &self,
+    ) -> Result<(Environment, TupleAddress, TupleMetadata<Environment>), MemoryError> {
+        let current_environment = self.current_environment.ok_or(MemoryError::NoEnvironment)?;
 
-        let entry = self.registry.get(current_environment).unwrap();
+        let entry = self
+            .registry
+            .get(current_environment)?
+            .verify_is(ValueType::Environment)?;
 
-        assert!(matches!(&entry.value_type, ValueType::Environment));
-
-        let (environment, metadata) =
-            Environment::decode(&self.tuple_memory, entry.tuple_address).unwrap();
+        let (environment, metadata) = Environment::decode(&self.tuple_memory, entry.tuple_address)?;
         assert_eq!(metadata.registry_address, current_environment);
 
-        (environment, entry.tuple_address, metadata)
+        Ok((environment, entry.tuple_address, metadata))
     }
 
     fn get_permanent_variable_address(
         &self,
         yn: Yn,
     ) -> Result<TupleAddress, PermanentVariableError> {
-        let (environment, _, metadata) = self.get_environment();
+        let (environment, _, metadata) = self
+            .get_environment()
+            .map_err(PermanentVariableError::memory_error(yn))?;
 
         if yn.yn >= environment.number_of_active_permanent_variables.0 {
             return Err(PermanentVariableError::IndexOutOfRange {
@@ -1070,12 +1210,13 @@ impl<'m> Heap<'m> {
     ) -> Result<Option<Address>, PermanentVariableError> {
         let term_address = self.get_permanent_variable_address(yn)?;
 
-        Ok(Option::<Address>::decode(
+        Option::<Address>::decode(
             self.tuple_memory
                 .load(term_address)
-                .map_err(|inner| PermanentVariableError::TupleMemoryError { yn, inner })?,
+                .map_err(PermanentVariableError::memory_error(yn))?,
         )
-        .unwrap())
+        .map_err(TupleMemoryError::bad_entry(term_address))
+        .map_err(PermanentVariableError::memory_error(yn))
     }
 
     pub fn load_permanent_variable(&self, yn: Yn) -> Result<Address, PermanentVariableError> {
@@ -1091,12 +1232,13 @@ impl<'m> Heap<'m> {
         let term_address = self.get_permanent_variable_address(yn)?;
 
         if let Some(address) = address {
-            self.mark_moved_value(address);
+            self.mark_moved_value(address)
+                .map_err(PermanentVariableError::memory_error(yn))?;
         }
 
         self.tuple_memory
             .store(term_address, address.encode())
-            .map_err(|inner| PermanentVariableError::TupleMemoryError { inner, yn })
+            .map_err(PermanentVariableError::memory_error(yn))
     }
 
     pub fn store_permanent_variable(
@@ -1107,24 +1249,29 @@ impl<'m> Heap<'m> {
         self.store_maybe_permanent_variable(yn, Some(address))
     }
 
-    fn verify_is_reference(&self, address: Address) -> (ReferenceValue, TupleAddress) {
-        let entry = self.registry.get(address).unwrap();
+    fn verify_is_reference(
+        &self,
+        address: Address,
+    ) -> Result<(ReferenceValue, TupleAddress), MemoryError> {
+        let entry = self
+            .registry
+            .get(address)?
+            .verify_is(ValueType::Reference)?;
 
-        assert!(matches!(&entry.value_type, ValueType::Reference));
         let (reference, metadata) =
-            ReferenceValue::decode(&self.tuple_memory, entry.tuple_address).unwrap();
+            ReferenceValue::decode(&self.tuple_memory, entry.tuple_address)?;
 
         assert_eq!(metadata.registry_address, address);
 
-        (reference, entry.tuple_address)
+        Ok((reference, entry.tuple_address))
     }
 
-    fn verify_is_free_variable(&self, address: Address) -> TupleAddress {
-        let (reference, tuple_address) = self.verify_is_reference(address);
+    fn verify_is_free_variable(&self, address: Address) -> Result<TupleAddress, MemoryError> {
+        let (reference, tuple_address) = self.verify_is_reference(address)?;
 
         assert_eq!(reference.0, address);
 
-        tuple_address
+        Ok(tuple_address)
     }
 
     pub fn bind_variable_to_value(
@@ -1138,7 +1285,7 @@ impl<'m> Heap<'m> {
             value_address
         );
 
-        let tuple_address = self.verify_is_free_variable(variable_address);
+        let tuple_address = self.verify_is_free_variable(variable_address)?;
 
         ReferenceValue(value_address).encode(
             variable_address,
@@ -1147,14 +1294,14 @@ impl<'m> Heap<'m> {
             NoTerms,
         )?;
 
-        self.mark_moved_value(value_address);
+        self.mark_moved_value(value_address)?;
 
         self.add_variable_to_trail(variable_address, tuple_address)
     }
 
     pub fn bind_variables(&mut self, a1: Address, a2: Address) -> Result<(), MemoryError> {
-        let t1 = self.verify_is_free_variable(a1);
-        let t2 = self.verify_is_free_variable(a2);
+        let t1 = self.verify_is_free_variable(a1)?;
+        let t2 = self.verify_is_free_variable(a2)?;
 
         if t1 < t2 {
             self.bind_variable_to_value(a2, a1)
@@ -1186,10 +1333,10 @@ impl<'m> Heap<'m> {
     }
 
     pub fn trim(&mut self, n: Arity) -> Result<(), MemoryError> {
-        let (mut environment, tuple_address, metadata) = self.get_environment();
+        let (mut environment, tuple_address, metadata) = self.get_environment()?;
         assert!(environment.number_of_active_permanent_variables >= n);
 
-        if let Some((_, latest_choice_point, _)) = self.get_latest_choice_point() {
+        if let Some((_, latest_choice_point, _)) = self.get_latest_choice_point()? {
             log_trace!("latest_choice_point: {}", latest_choice_point);
             log_trace!("current_environment: {}", tuple_address);
 
@@ -1213,13 +1360,20 @@ impl<'m> Heap<'m> {
         Ok(())
     }
 
-    pub fn deallocate(&mut self, continuation_point: &mut Option<ProgramCounter>) {
-        let Environment {
-            continuation_environment,
-            continuation_point: previous_continuation_point,
-            number_of_active_permanent_variables: _,
-            number_of_permanent_variables: _,
-        } = self.get_environment().0;
+    pub fn deallocate(
+        &mut self,
+        continuation_point: &mut Option<ProgramCounter>,
+    ) -> Result<(), MemoryError> {
+        let (
+            Environment {
+                continuation_environment,
+                continuation_point: previous_continuation_point,
+                number_of_active_permanent_variables: _,
+                number_of_permanent_variables: _,
+            },
+            _,
+            _,
+        ) = self.get_environment()?;
 
         self.current_environment = continuation_environment;
         *continuation_point = previous_continuation_point;
@@ -1228,6 +1382,8 @@ impl<'m> Heap<'m> {
         log_trace!("CP => {}", OptionDisplay(*continuation_point));
 
         self.resume_garbage_collection();
+
+        Ok(())
     }
 
     pub fn new_choice_point(
@@ -1262,25 +1418,28 @@ impl<'m> Heap<'m> {
 
     fn get_latest_choice_point(
         &self,
-    ) -> Option<(ChoicePoint, TupleAddress, TupleMetadata<ChoicePoint>)> {
-        let latest_choice_point = self.latest_choice_point?;
+    ) -> Result<Option<(ChoicePoint, TupleAddress, TupleMetadata<ChoicePoint>)>, MemoryError> {
+        let Some(latest_choice_point) = self.latest_choice_point else {
+            return Ok(None)
+        };
 
-        let entry = self.registry.get(latest_choice_point).unwrap();
-
-        assert!(matches!(&entry.value_type, ValueType::ChoicePoint));
+        let entry = self
+            .registry
+            .get(latest_choice_point)?
+            .verify_is(ValueType::ChoicePoint)?;
 
         let (choice_point, metadata) =
-            ChoicePoint::decode(&self.tuple_memory, entry.tuple_address).unwrap();
+            ChoicePoint::decode(&self.tuple_memory, entry.tuple_address)?;
         assert_eq!(metadata.registry_address, latest_choice_point);
 
-        Some((choice_point, entry.tuple_address, metadata))
+        Ok(Some((choice_point, entry.tuple_address, metadata)))
     }
 
     pub fn backtrack(
         &mut self,
         pc: &mut Option<ProgramCounter>,
     ) -> Result<(), super::ExecutionFailure<'static>> {
-        self.get_latest_choice_point()
+        self.get_latest_choice_point()?
             .ok_or(super::ExecutionFailure::Failed)
             .map(|(choice_point, _, _)| *pc = Some(choice_point.next_clause))
     }
@@ -1289,9 +1448,10 @@ impl<'m> Heap<'m> {
         &mut self,
         registers: &mut [Option<Address>],
         continuation_point: &mut Option<ProgramCounter>,
-    ) -> (ChoicePoint, Address, TupleAddress, Option<Address>) {
-        let (choice_point, tuple_address, metadata) =
-            self.get_latest_choice_point().expect("No Choice Point");
+    ) -> Result<(ChoicePoint, Address, TupleAddress, Option<Address>), MemoryError> {
+        let (choice_point, tuple_address, metadata) = self
+            .get_latest_choice_point()?
+            .ok_or(MemoryError::NoChoicePoint)?;
 
         for (register, value_address) in registers.iter_mut().zip(
             metadata
@@ -1299,13 +1459,13 @@ impl<'m> Heap<'m> {
                 .first_term
                 .iter(choice_point.number_of_saved_registers),
         ) {
-            *register = Address::from_word(self.tuple_memory.load(value_address).unwrap());
+            *register = Address::from_word(self.tuple_memory.load(value_address)?);
         }
 
         self.current_environment = choice_point.current_environment;
         *continuation_point = choice_point.continuation_point;
 
-        self.unwind_trail(tuple_address);
+        self.unwind_trail(tuple_address)?;
 
         self.trail_top = choice_point.trail_top;
         let next_choice_point = choice_point.next_choice_point;
@@ -1315,12 +1475,12 @@ impl<'m> Heap<'m> {
 
         self.resume_garbage_collection();
 
-        (
+        Ok((
             choice_point,
             metadata.registry_address,
             tuple_address,
             next_choice_point,
-        )
+        ))
     }
 
     pub fn retry_choice_point(
@@ -1328,26 +1488,28 @@ impl<'m> Heap<'m> {
         registers: &mut [Option<Address>],
         continuation_point: &mut Option<ProgramCounter>,
         next_clause: ProgramCounter,
-    ) {
+    ) -> Result<(), MemoryError> {
         let (mut choice_point, registry_address, tuple_address, _metadata) =
-            self.wind_back_to_choice_point(registers, continuation_point);
+            self.wind_back_to_choice_point(registers, continuation_point)?;
 
         choice_point.next_clause = next_clause;
 
-        choice_point
-            .encode_head(registry_address, &mut self.tuple_memory, tuple_address)
-            .unwrap();
+        choice_point.encode_head(registry_address, &mut self.tuple_memory, tuple_address)?;
+
+        Ok(())
     }
 
     pub fn remove_choice_point(
         &mut self,
         registers: &mut [Option<Address>],
         continuation_point: &mut Option<ProgramCounter>,
-    ) {
+    ) -> Result<(), MemoryError> {
         let (_choice_point, _registry_address, _tuple_address, next_choice_point) =
-            self.wind_back_to_choice_point(registers, continuation_point);
+            self.wind_back_to_choice_point(registers, continuation_point)?;
 
         self.latest_choice_point = next_choice_point;
+
+        Ok(())
     }
 
     fn add_variable_to_trail(
@@ -1356,7 +1518,7 @@ impl<'m> Heap<'m> {
         tuple_address: TupleAddress,
     ) -> Result<(), MemoryError> {
         let is_unconditional = self
-            .get_latest_choice_point()
+            .get_latest_choice_point()?
             .map_or(true, |(_, latest_choice_point, _)| {
                 tuple_address > latest_choice_point
             });
@@ -1379,11 +1541,13 @@ impl<'m> Heap<'m> {
         Ok(())
     }
 
-    fn unwind_trail(&mut self, boundary: TupleAddress) {
+    fn unwind_trail(&mut self, boundary: TupleAddress) -> Result<(), MemoryError> {
         log_trace!("Unwinding Trail");
         while let Some(trail_top) = self.trail_top {
-            let entry = self.registry.get(trail_top).unwrap();
-            assert!(matches!(&entry.value_type, ValueType::TrailVariable));
+            let entry = self
+                .registry
+                .get(trail_top)?
+                .verify_is(ValueType::TrailVariable)?;
 
             if entry.tuple_address < boundary {
                 break;
@@ -1392,27 +1556,27 @@ impl<'m> Heap<'m> {
             log_trace!("Unwinding Trail item @ {}", trail_top);
 
             let (trail_item, metadata) =
-                TrailVariable::decode(&self.tuple_memory, entry.tuple_address).unwrap();
+                TrailVariable::decode(&self.tuple_memory, entry.tuple_address)?;
 
             assert_eq!(metadata.registry_address, trail_top);
 
             log_trace!("Resetting Reference @ {}", trail_item.variable);
 
-            let item_tuple_address = self.verify_is_reference(trail_item.variable).1;
+            let (_, item_tuple_address) = self.verify_is_reference(trail_item.variable)?;
 
-            ReferenceValue(trail_item.variable)
-                .encode(
-                    trail_item.variable,
-                    &mut self.tuple_memory,
-                    item_tuple_address,
-                    NoTerms,
-                )
-                .unwrap();
+            ReferenceValue(trail_item.variable).encode(
+                trail_item.variable,
+                &mut self.tuple_memory,
+                item_tuple_address,
+                NoTerms,
+            )?;
 
             self.trail_top = trail_item.next_trail_item;
         }
 
         log_trace!("Finished Unwinding Trail");
+
+        Ok(())
     }
 
     pub fn update_cut_register(&mut self) {
@@ -1433,19 +1597,15 @@ impl<'m> Heap<'m> {
             (Some(latest_choice_point), Some(cut_register)) => {
                 log_trace!("Tidying trace");
 
-                let latest_choice_point_entry = self.registry.get(latest_choice_point).unwrap();
+                let latest_choice_point_entry = self
+                    .registry
+                    .get(latest_choice_point)?
+                    .verify_is(ValueType::ChoicePoint)?;
 
-                let cut_register_entry = self.registry.get(cut_register).unwrap();
-
-                assert!(matches!(
-                    latest_choice_point_entry.value_type,
-                    ValueType::ChoicePoint
-                ));
-
-                assert!(matches!(
-                    cut_register_entry.value_type,
-                    ValueType::ChoicePoint
-                ));
+                let cut_register_entry = self
+                    .registry
+                    .get(cut_register)?
+                    .verify_is(ValueType::ChoicePoint)?;
 
                 if latest_choice_point_entry.tuple_address <= cut_register_entry.tuple_address {
                     log_trace!("Not cutting");
@@ -1482,12 +1642,12 @@ impl<'m> Heap<'m> {
     fn start_garbage_collection(
         &mut self,
         registers: &[Option<Address>],
-    ) -> GarbageCollectionState {
+    ) -> Result<GarbageCollectionState, NoRegistryEntryAt> {
         let mut list_head = None;
 
         for &address in registers.iter().filter_map(Option::as_ref) {
             self.registry
-                .add_item_to_be_scanned(address, &mut list_head);
+                .add_item_to_be_scanned(address, &mut list_head)?;
         }
 
         {
@@ -1509,23 +1669,23 @@ impl<'m> Heap<'m> {
                 cut_register,
             ] {
                 self.registry
-                    .add_maybe_item_to_be_scanned(address, &mut list_head);
+                    .add_maybe_item_to_be_scanned(address, &mut list_head)?;
             }
         }
 
         log_trace!("{:?}", list_head);
 
-        if let Some(current_items_to_scan) = list_head {
+        Ok(if let Some(current_items_to_scan) = list_head {
             GarbageCollectionState::Scanning(ScanningState {
                 current_items_to_scan,
                 next_items_to_scan: None,
             })
         } else {
             GarbageCollectionState::Suspended
-        }
+        })
     }
 
-    fn scan_item(&mut self, state: ScanningState) -> Result<ScanningResult, TupleMemoryError> {
+    fn scan_item(&mut self, state: ScanningState) -> Result<ScanningResult, MemoryError> {
         let ScanningState {
             current_items_to_scan: item_to_scan,
             mut next_items_to_scan,
@@ -1533,10 +1693,10 @@ impl<'m> Heap<'m> {
 
         let next_list_head = &mut next_items_to_scan;
 
-        let registry_entry = self.registry.get_mut(item_to_scan).unwrap();
+        let registry_entry = self.registry.get_mut(item_to_scan)?;
 
         let MarkedState::IsMarked { next: current_items_to_scan } = registry_entry.marked_state else {
-            panic!("Entry {} is in scan queue but is not marked", item_to_scan);
+            return Err(MemoryError::UnmarkedEntryInScanQueue { item_to_scan });
         };
 
         assert_eq!(
@@ -1550,7 +1710,7 @@ impl<'m> Heap<'m> {
                     ReferenceValue::decode(&self.tuple_memory, registry_entry.tuple_address)?;
 
                 self.registry
-                    .add_item_to_be_scanned(reference_address, next_list_head);
+                    .add_item_to_be_scanned(reference_address, next_list_head)?;
 
                 metadata.terms.into_maybe_address_range()
             }
@@ -1584,7 +1744,7 @@ impl<'m> Heap<'m> {
                 ) = Environment::decode(&self.tuple_memory, registry_entry.tuple_address)?;
 
                 self.registry
-                    .add_maybe_item_to_be_scanned(continuation_environment, next_list_head);
+                    .add_maybe_item_to_be_scanned(continuation_environment, next_list_head)?;
 
                 metadata.terms.into_maybe_address_range()
             }
@@ -1603,13 +1763,13 @@ impl<'m> Heap<'m> {
                 ) = ChoicePoint::decode(&self.tuple_memory, registry_entry.tuple_address)?;
 
                 self.registry
-                    .add_maybe_item_to_be_scanned(current_environment, next_list_head);
+                    .add_maybe_item_to_be_scanned(current_environment, next_list_head)?;
                 self.registry
-                    .add_maybe_item_to_be_scanned(next_choice_point, next_list_head);
+                    .add_maybe_item_to_be_scanned(next_choice_point, next_list_head)?;
                 self.registry
-                    .add_maybe_item_to_be_scanned(trail_top, next_list_head);
+                    .add_maybe_item_to_be_scanned(trail_top, next_list_head)?;
                 self.registry
-                    .add_maybe_item_to_be_scanned(cut_register, next_list_head);
+                    .add_maybe_item_to_be_scanned(cut_register, next_list_head)?;
 
                 metadata.terms.into_maybe_address_range()
             }
@@ -1623,9 +1783,9 @@ impl<'m> Heap<'m> {
                 ) = TrailVariable::decode(&self.tuple_memory, registry_entry.tuple_address)?;
 
                 self.registry
-                    .add_item_to_be_scanned(variable, next_list_head);
+                    .add_item_to_be_scanned(variable, next_list_head)?;
                 self.registry
-                    .add_maybe_item_to_be_scanned(next_trail_item, next_list_head);
+                    .add_maybe_item_to_be_scanned(next_trail_item, next_list_head)?;
 
                 metadata.terms.into_maybe_address_range()
             }
@@ -1634,7 +1794,7 @@ impl<'m> Heap<'m> {
         if let Some(term_address_range) = term_address_range {
             for term_address in self.tuple_memory.load_terms(term_address_range)?.flatten() {
                 self.registry
-                    .add_item_to_be_scanned(term_address, next_list_head);
+                    .add_item_to_be_scanned(term_address, next_list_head)?;
             }
         }
 
@@ -1644,17 +1804,17 @@ impl<'m> Heap<'m> {
         })
     }
 
-    fn sweep_item(&mut self, state: SweepingState) -> Result<SweepingState, TupleMemoryError> {
+    fn sweep_item(&mut self, state: SweepingState) -> Result<SweepingState, MemoryError> {
         let SweepingState {
             source,
             destination,
             all_tuples_were_marked,
         } = state;
 
-        let registry_address =
-            Address::from_word(self.tuple_memory.load(source)?).expect("No Entry");
-        let mut registry_slot = self.registry.slot_mut(registry_address).unwrap();
-        let registry_entry = registry_slot.entry().unwrap();
+        let registry_address = Address::decode(self.tuple_memory.load(source)?)
+            .map_err(TupleMemoryError::bad_entry(source))?;
+        let mut registry_slot = self.registry.slot_mut(registry_address)?;
+        let registry_entry = registry_slot.entry()?;
 
         let next_tuple = match registry_entry.value_type {
             ValueType::Reference => {
@@ -1721,11 +1881,11 @@ impl<'m> Heap<'m> {
         )
     }
 
-    fn mark_moved_value(&mut self, address: Address) {
-        let registry_entry = self.registry.get_mut(address).unwrap();
+    fn mark_moved_value(&mut self, address: Address) -> Result<(), NoRegistryEntryAt> {
+        let registry_entry = self.registry.get_mut(address)?;
 
         if let MarkedState::IsMarked { .. } = registry_entry.marked_state {
-            return;
+            return Ok(());
         }
 
         registry_entry.marked_state = match &mut self.garbage_collection_state {
@@ -1739,17 +1899,19 @@ impl<'m> Heap<'m> {
             },
             GarbageCollectionState::Sweeping(_) => MarkedState::IsMarked { next: None },
         };
+
+        Ok(())
     }
 
     pub fn run_garbage_collection(
         &mut self,
         registers: &[Option<Address>],
-    ) -> Result<GarbageCollectionIsRunning, TupleMemoryError> {
+    ) -> Result<GarbageCollectionIsRunning, MemoryError> {
         log_trace!("{:?}", self.garbage_collection_state);
 
         let new_garbage_collection_state = match self.garbage_collection_state {
             GarbageCollectionState::Suspended => return Ok(GarbageCollectionIsRunning::Suspected),
-            GarbageCollectionState::Starting => self.start_garbage_collection(registers),
+            GarbageCollectionState::Starting => self.start_garbage_collection(registers)?,
             GarbageCollectionState::Scanning(state) => match self.scan_item(state)? {
                 ScanningResult {
                     current_items_to_scan: Some(current_items_to_scan),
@@ -1806,11 +1968,12 @@ impl<'m> Heap<'m> {
 
     pub fn solution_registers(
         &self,
-    ) -> Result<impl Iterator<Item = Option<Address>> + '_, TupleMemoryError> {
-        let (environment, _, metadata) = self.get_environment();
+    ) -> Result<impl Iterator<Item = Option<Address>> + '_, MemoryError> {
+        let (environment, _, metadata) = self.get_environment()?;
         assert!(environment.continuation_environment.is_none());
 
-        self.tuple_memory
-            .load_terms(metadata.terms.into_address_range())
+        Ok(self
+            .tuple_memory
+            .load_terms(metadata.terms.into_address_range())?)
     }
 }

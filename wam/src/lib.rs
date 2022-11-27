@@ -111,7 +111,7 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
     }
 
     fn write_be_u4_hex(&mut self, b: u8) -> Result<(), IoError> {
-        self.write_char(core::char::from_digit(b as u32, 16).unwrap())
+        self.write_char(char::from_digit(b.into(), 16).unwrap())
     }
 
     fn write_be_u8_hex(&mut self, b: u8) -> Result<(), IoError> {

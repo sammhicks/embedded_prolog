@@ -18,12 +18,18 @@ pub enum Error {
     CurrentlyActive,
     NoMoreTerms,
     NoTermAt { index: Arity },
-    TupleMemory(super::TupleMemoryError),
+    Memory(super::MemoryError),
+}
+
+impl From<super::MemoryError> for Error {
+    fn from(memory_error: super::MemoryError) -> Self {
+        Self::Memory(memory_error)
+    }
 }
 
 impl From<super::TupleMemoryError> for Error {
     fn from(error: super::TupleMemoryError) -> Self {
-        Self::TupleMemory(error)
+        Self::Memory(error.into())
     }
 }
 
@@ -94,7 +100,7 @@ impl StructureIterationState {
         let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
         let super::AddressSlice { first_term, arity } =
-            heap.structure_term_addresses(inner_state.address);
+            heap.structure_term_addresses(inner_state.address)?;
 
         if inner_state.index == arity {
             return Err(Error::NoMoreTerms);
@@ -122,16 +128,15 @@ impl StructureIterationState {
     pub fn write_next(&mut self, heap: &mut Heap, address: Address) -> Result<()> {
         self.with_next(heap, |heap, index, term_address| {
             log_trace!("Writing {} to {}", address, index);
-            heap.tuple_memory
-                .store(term_address, address.encode())
-                .map_err(Error::TupleMemory)
+            Ok(heap.tuple_memory.store(term_address, address.encode())?)
         })
     }
 
     pub fn skip(&mut self, heap: &Heap, n: Arity) -> Result<()> {
         let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
-        let super::AddressSlice { arity, .. } = heap.structure_term_addresses(inner_state.address);
+        let super::AddressSlice { arity, .. } =
+            heap.structure_term_addresses(inner_state.address)?;
 
         inner_state.index.0 += n.0;
 

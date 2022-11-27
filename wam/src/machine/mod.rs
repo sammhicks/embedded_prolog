@@ -475,8 +475,8 @@ impl<'m> Machine<'m> {
             };
 
             let (new_pc, instruction) = match &self.currently_executing {
-                CurrentlyExecuting::Query => Instruction::decode(self.query, pc).unwrap(),
-                CurrentlyExecuting::Program => Instruction::decode(self.program, pc).unwrap(),
+                CurrentlyExecuting::Query => Instruction::decode(self.query, pc)?,
+                CurrentlyExecuting::Program => Instruction::decode(self.program, pc)?,
             };
 
             log_debug!(
@@ -718,19 +718,9 @@ impl<'m> Machine<'m> {
                     }
                 }
             }
-            Instruction::Allocate { n } => {
-                self.memory.allocate(n, self.cp, &[])?;
-                Ok(())
-            }
-            Instruction::Trim { n } => {
-                self.memory.trim(n)?;
-                Ok(())
-            }
-            Instruction::Deallocate => {
-                self.memory.deallocate(&mut self.cp);
-
-                Ok(())
-            }
+            Instruction::Allocate { n } => Ok(self.memory.allocate(n, self.cp, &[])?),
+            Instruction::Trim { n } => Ok(self.memory.trim(n)?),
+            Instruction::Deallocate => Ok(self.memory.deallocate(&mut self.cp)?),
             Instruction::Call { p, n } => {
                 match self.currently_executing {
                     CurrentlyExecuting::Query => {
@@ -782,13 +772,13 @@ impl<'m> Machine<'m> {
             Instruction::RetryMeElse { p } => {
                 self.structure_iteration_state.verify_not_active()?;
                 self.memory
-                    .retry_choice_point(self.registers.all_mut(), &mut self.cp, p);
+                    .retry_choice_point(self.registers.all_mut(), &mut self.cp, p)?;
                 Ok(())
             }
             Instruction::TrustMe => {
                 self.structure_iteration_state.verify_not_active()?;
                 self.memory
-                    .remove_choice_point(self.registers.all_mut(), &mut self.cp);
+                    .remove_choice_point(self.registers.all_mut(), &mut self.cp)?;
                 Ok(())
             }
             Instruction::NeckCut => {
@@ -808,7 +798,7 @@ impl<'m> Machine<'m> {
         }
     }
 
-    fn run_garbage_collection(&mut self) -> Result<(), heap::TupleMemoryError> {
+    fn run_garbage_collection(&mut self) -> Result<(), heap::MemoryError> {
         while let heap::GarbageCollectionIsRunning::Running =
             self.memory.run_garbage_collection(self.registers.all())?
         {}
@@ -824,7 +814,7 @@ impl<'m> Machine<'m> {
     pub fn solution_registers(
         &self,
     ) -> Result<impl Iterator<Item = Option<Address>> + '_, heap::MemoryError> {
-        Ok(self.memory.solution_registers()?)
+        self.memory.solution_registers()
     }
 
     pub fn lookup_memory(
@@ -915,7 +905,7 @@ impl<'m> Machine<'m> {
         &mut self,
         a1: Address,
         a2: Address,
-    ) -> Result<Result<(), UnificationFailure>, heap::MemoryError> {
+    ) -> Result<Result<(), UnificationFailure>, ExecutionFailure<'m>> {
         log_trace!("Unifying {} and {}", a1, a2);
         let (a1, v1, _) = self.memory.get_value(a1)?;
         let (a2, v2, _) = self.memory.get_value(a2)?;
@@ -940,8 +930,8 @@ impl<'m> Machine<'m> {
                     let mut terms_1 = StructureIterationState::structure_reader(a1);
                     let mut terms_2 = StructureIterationState::structure_reader(a2);
                     for _ in 0..n1.0 {
-                        let a1 = terms_1.read_next(&self.memory).unwrap();
-                        let a2 = terms_2.read_next(&self.memory).unwrap();
+                        let a1 = terms_1.read_next(&self.memory)?;
+                        let a2 = terms_2.read_next(&self.memory)?;
                         match self.unify(a1, a2) {
                             Ok(Ok(())) => (),
                             Ok(Err(err)) => return Ok(Err(err)),
@@ -958,8 +948,8 @@ impl<'m> Machine<'m> {
                 let mut terms_1 = StructureIterationState::structure_reader(a1);
                 let mut terms_2 = StructureIterationState::structure_reader(a2);
                 for _ in 0..2 {
-                    let a1 = terms_1.read_next(&self.memory).unwrap();
-                    let a2 = terms_2.read_next(&self.memory).unwrap();
+                    let a1 = terms_1.read_next(&self.memory)?;
+                    let a2 = terms_2.read_next(&self.memory)?;
                     match self.unify(a1, a2) {
                         Ok(Ok(())) => (),
                         Ok(Err(err)) => return Ok(Err(err)),
