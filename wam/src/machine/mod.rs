@@ -14,7 +14,7 @@ use heap::{
     structure_iteration::{ReadWriteMode, State as StructureIterationState},
     Heap,
 };
-pub use heap::{Address, Value};
+pub use heap::{Address, ReferenceOrValue, Value};
 
 struct ProgramCounterOutOfRange {
     pc: ProgramCounter,
@@ -621,7 +621,7 @@ impl<'m> Machine<'m> {
             Instruction::GetStructure { ai, f, n } => {
                 let (address, value) = self.get_register_value(ai)?;
                 match value {
-                    Value::Reference(variable_address) => {
+                    ReferenceOrValue::Reference(variable_address) => {
                         log_trace!("Writing structure {}/{}", f, n);
 
                         let value_address = self.new_structure(f, n)?;
@@ -629,7 +629,7 @@ impl<'m> Machine<'m> {
                         self.memory
                             .bind_variable_to_value(variable_address, value_address)?;
                     }
-                    Value::Structure(found_f, found_n) => {
+                    ReferenceOrValue::Value(Value::Structure(found_f, found_n)) => {
                         if f == found_f && n == found_n {
                             log_trace!("Reading structure {}/{}", f, n);
 
@@ -638,14 +638,16 @@ impl<'m> Machine<'m> {
                             self.backtrack()?;
                         }
                     }
-                    Value::List | Value::Constant(_) => self.backtrack()?,
+                    ReferenceOrValue::Value(Value::List | Value::Constant(_)) => {
+                        self.backtrack()?
+                    }
                 }
                 Ok(())
             }
             Instruction::GetList { ai } => {
                 let (address, value) = self.get_register_value(ai)?;
                 match value {
-                    Value::Reference(variable_address) => {
+                    ReferenceOrValue::Reference(variable_address) => {
                         log_trace!("Writing list");
 
                         let value_address = self.new_list()?;
@@ -653,22 +655,24 @@ impl<'m> Machine<'m> {
                         self.memory
                             .bind_variable_to_value(variable_address, value_address)?;
                     }
-                    Value::List => {
+                    ReferenceOrValue::Value(Value::List) => {
                         log_trace!("Reading list");
                         self.structure_iteration_state.start_reading(address)?;
                     }
-                    Value::Structure(..) | Value::Constant(_) => self.backtrack()?,
+                    ReferenceOrValue::Value(Value::Structure(..) | Value::Constant(_)) => {
+                        self.backtrack()?
+                    }
                 }
                 Ok(())
             }
             Instruction::GetConstant { ai, c } => match self.get_register_value(ai)?.1 {
-                Value::Reference(variable_address) => {
+                ReferenceOrValue::Reference(variable_address) => {
                     let value_address = self.new_constant(c)?;
                     self.memory
                         .bind_variable_to_value(variable_address, value_address)?;
                     Ok(())
                 }
-                Value::Constant(rc) if rc == c => Ok(()),
+                ReferenceOrValue::Value(Value::Constant(rc)) if rc == c => Ok(()),
                 _ => self.backtrack(),
             },
             Instruction::SetVariableXn { xn } => {
@@ -732,20 +736,22 @@ impl<'m> Machine<'m> {
                         let value = self.memory.get_value(term_address)?.1;
 
                         match value {
-                            Value::Reference(variable_address) => {
+                            ReferenceOrValue::Reference(variable_address) => {
                                 let value_address = self.new_constant(c)?;
                                 self.memory
                                     .bind_variable_to_value(variable_address, value_address)?;
                                 Ok(())
                             }
-                            Value::Constant(c1) => {
+                            ReferenceOrValue::Value(Value::Constant(c1)) => {
                                 if c == c1 {
                                     Ok(())
                                 } else {
                                     self.backtrack()
                                 }
                             }
-                            Value::Structure(..) | Value::List => self.backtrack(),
+                            ReferenceOrValue::Value(Value::Structure(..) | Value::List) => {
+                                self.backtrack()
+                            }
                         }
                     }
                     ReadWriteMode::Write => {
@@ -864,7 +870,10 @@ impl<'m> Machine<'m> {
         Ok(())
     }
 
-    fn get_register_value(&self, index: Ai) -> Result<(Address, Value), ExecutionFailure<'m>> {
+    fn get_register_value(
+        &self,
+        index: Ai,
+    ) -> Result<(Address, ReferenceOrValue), ExecutionFailure<'m>> {
         let (address, value, _) = self.memory.get_value(self.registers.load(index)?)?;
         Ok((address, value))
     }
@@ -878,12 +887,15 @@ impl<'m> Machine<'m> {
     pub fn lookup_memory(
         &self,
         address: Option<Address>,
-    ) -> Result<(Address, Value, impl Iterator<Item = Option<Address>> + '_), heap::MemoryError>
-    {
-        self.memory
-            .get_value(address.ok_or(heap::MemoryError::NoRegistryEntryAt {
-                address: address.into_inner(),
-            })?)
+    ) -> Result<
+        (
+            Address,
+            ReferenceOrValue,
+            impl Iterator<Item = Option<Address>> + '_,
+        ),
+        heap::MemoryError,
+    > {
+        self.memory.get_maybe_value(address)
     }
 
     fn new_variable(&mut self) -> Result<Address, ExecutionFailure<'m>> {
@@ -968,22 +980,27 @@ impl<'m> Machine<'m> {
         let (a1, v1, _) = self.memory.get_value(a1)?;
         let (a2, v2, _) = self.memory.get_value(a2)?;
         log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
-        Ok(match (a1, v1, a2, v2) {
-            (a1, Value::Reference(_), a2, Value::Reference(_)) => {
+        Ok(match ((a1, v1), (a2, v2)) {
+            ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {
                 self.memory.bind_variables(a1, a2)?;
                 Ok(())
             }
-            (a1, Value::Reference(_), a2, value) => {
-                assert!(!matches!(value, Value::Reference(_)));
-                self.memory.bind_variable_to_value(a1, a2)?;
+            (
+                (variable_address, ReferenceOrValue::Reference(_)),
+                (value_address, ReferenceOrValue::Value(_)),
+            )
+            | (
+                (value_address, ReferenceOrValue::Value(_)),
+                (variable_address, ReferenceOrValue::Reference(_)),
+            ) => {
+                self.memory
+                    .bind_variable_to_value(variable_address, value_address)?;
                 Ok(())
             }
-            (a1, value, a2, Value::Reference(_)) => {
-                assert!(!matches!(value, Value::Reference(_)));
-                self.memory.bind_variable_to_value(a2, a1)?;
-                Ok(())
-            }
-            (a1, Value::Structure(f1, n1), a2, Value::Structure(f2, n2)) => {
+            (
+                (a1, ReferenceOrValue::Value(Value::Structure(f1, n1))),
+                (a2, ReferenceOrValue::Value(Value::Structure(f2, n2))),
+            ) => {
                 if f1 == f2 && n1 == n2 {
                     let mut terms_1 = StructureIterationState::structure_reader(a1);
                     let mut terms_2 = StructureIterationState::structure_reader(a2);
@@ -1002,7 +1019,10 @@ impl<'m> Machine<'m> {
                     Err(UnificationFailure)
                 }
             }
-            (a1, Value::List, a2, Value::List) => {
+            (
+                (a1, ReferenceOrValue::Value(Value::List)),
+                (a2, ReferenceOrValue::Value(Value::List)),
+            ) => {
                 let mut terms_1 = StructureIterationState::structure_reader(a1);
                 let mut terms_2 = StructureIterationState::structure_reader(a2);
                 for _ in 0..2 {
@@ -1017,14 +1037,19 @@ impl<'m> Machine<'m> {
 
                 Ok(())
             }
-            (_, Value::Constant(c1), _, Value::Constant(c2)) => {
+            (
+                (_, ReferenceOrValue::Value(Value::Constant(c1))),
+                (_, ReferenceOrValue::Value(Value::Constant(c2))),
+            ) => {
                 if c1 == c2 {
                     Ok(())
                 } else {
                     Err(UnificationFailure)
                 }
             }
-            _ => Err(UnificationFailure),
+            ((_, ReferenceOrValue::Value(_)), (_, ReferenceOrValue::Value(_))) => {
+                Err(UnificationFailure)
+            }
         })
     }
 

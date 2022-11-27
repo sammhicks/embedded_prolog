@@ -133,23 +133,23 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
     fn write_value(
         &mut self,
         address: machine::Address,
-        value: machine::Value,
+        value: machine::ReferenceOrValue,
         subterms: impl Iterator<Item = Option<machine::Address>>,
     ) -> Result<(), IoError> {
         match value {
-            machine::Value::Reference(reference) => {
+            machine::ReferenceOrValue::Reference(reference) => {
                 self.write_char('R')?;
                 self.write_be_serializable_hex(Some(reference))?;
             }
-            machine::Value::Structure(f, n) => {
+            machine::ReferenceOrValue::Value(machine::Value::Structure(f, n)) => {
                 self.write_char('S')?;
                 self.write_be_serializable_hex(f)?;
                 self.write_be_serializable_hex(n)?;
             }
-            machine::Value::List => {
+            machine::ReferenceOrValue::Value(machine::Value::List) => {
                 self.write_char('L')?;
             }
-            machine::Value::Constant(c) => {
+            machine::ReferenceOrValue::Value(machine::Value::Constant(c)) => {
                 self.write_char('C')?;
                 self.write_be_serializable_hex(c)?;
             }
