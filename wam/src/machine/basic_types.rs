@@ -110,6 +110,12 @@ impl fmt::Display for Arity {
     }
 }
 
+impl core::ops::SubAssign for Arity {
+    fn sub_assign(&mut self, Arity(n): Self) {
+        self.0 -= n;
+    }
+}
+
 impl SerializableWrapper for Arity {
     type Inner = u8;
 

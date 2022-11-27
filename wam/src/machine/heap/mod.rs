@@ -129,8 +129,8 @@ impl core::ops::Sub<TupleAddress> for TupleAddress {
 }
 
 impl TupleAddress {
-    fn iter(self, arity: Arity) -> impl Iterator<Item = Self> + Clone {
-        (self.0..).take(arity.0 as usize).map(Self)
+    fn iter(self, terms_count: Arity) -> impl Iterator<Item = Self> + Clone {
+        (self.0..).take(terms_count.0 as usize).map(Self)
     }
 }
 
@@ -510,17 +510,20 @@ impl<'m> TupleMemory<'m> {
     }
 }
 
-struct AddressSlice {
+struct TermsSlice {
     first_term: TupleAddress,
-    arity: Arity,
+    terms_count: Arity,
 }
 
-impl AddressSlice {
+impl TermsSlice {
     fn into_address_range(self) -> core::ops::Range<TupleAddress> {
-        let AddressSlice { first_term, arity } = self;
+        let TermsSlice {
+            first_term,
+            terms_count,
+        } = self;
         core::ops::Range {
             start: first_term,
-            end: first_term + arity,
+            end: first_term + terms_count,
         }
     }
 }
@@ -535,7 +538,7 @@ impl IntoMaybeAddressRange for NoTerms {
     }
 }
 
-impl IntoMaybeAddressRange for AddressSlice {
+impl IntoMaybeAddressRange for TermsSlice {
     fn into_maybe_address_range(self) -> Option<core::ops::Range<TupleAddress>> {
         Some(self.into_address_range())
     }
@@ -550,7 +553,7 @@ trait BaseTupleInitialTerms<T> {
         &self,
         tuple_memory: &mut TupleMemory,
         first_term: TupleAddress,
-        arity: Arity,
+        terms_count: Arity,
     ) -> Result<(), TupleMemoryError>;
 }
 
@@ -565,14 +568,14 @@ impl BaseTupleInitialTerms<NoTerms> for NoTerms {
     }
 }
 
-impl BaseTupleInitialTerms<AddressSlice> for FillWithNone {
+impl BaseTupleInitialTerms<TermsSlice> for FillWithNone {
     fn encode(
         &self,
         tuple_memory: &mut TupleMemory,
         first_term: TupleAddress,
-        arity: Arity,
+        terms_count: Arity,
     ) -> Result<(), TupleMemoryError> {
-        for term_address in first_term.iter(arity) {
+        for term_address in first_term.iter(terms_count) {
             tuple_memory.store(term_address, None::<Address>.encode())?;
         }
 
@@ -580,15 +583,15 @@ impl BaseTupleInitialTerms<AddressSlice> for FillWithNone {
     }
 }
 
-impl<'a> BaseTupleInitialTerms<AddressSlice> for &'a [Option<Address>] {
+impl<'a> BaseTupleInitialTerms<TermsSlice> for &'a [Option<Address>] {
     fn encode(
         &self,
         tuple_memory: &mut TupleMemory,
         first_term: TupleAddress,
-        arity: Arity,
+        terms_count: Arity,
     ) -> Result<(), TupleMemoryError> {
         for (tuple_address, value) in first_term
-            .iter(arity)
+            .iter(terms_count)
             .zip(self.iter().copied().chain(core::iter::repeat(None)))
         {
             tuple_memory.store(tuple_address, value.encode())?;
@@ -599,7 +602,7 @@ impl<'a> BaseTupleInitialTerms<AddressSlice> for &'a [Option<Address>] {
 }
 
 trait BaseTupleTerms {
-    fn from_range(first_term: TupleAddress, arity: Arity) -> Self;
+    fn from_range(first_term: TupleAddress, terms_count: Arity) -> Self;
 }
 
 impl BaseTupleTerms for NoTerms {
@@ -609,9 +612,12 @@ impl BaseTupleTerms for NoTerms {
     }
 }
 
-impl BaseTupleTerms for AddressSlice {
-    fn from_range(first_term: TupleAddress, arity: Arity) -> Self {
-        Self { first_term, arity }
+impl BaseTupleTerms for TermsSlice {
+    fn from_range(first_term: TupleAddress, terms_count: Arity) -> Self {
+        Self {
+            first_term,
+            terms_count,
+        }
     }
 }
 
@@ -620,7 +626,13 @@ trait BaseTuple: Sized {
     type InitialTerms<'a>: BaseTupleInitialTerms<Self::Terms>;
     type Terms: BaseTupleTerms;
 
-    fn arity(&self) -> Arity;
+    /// The number of terms
+    fn terms_count(&self) -> Arity;
+
+    /// The amount of space the terms take. In most cases, this is the same as `terms_count()`
+    fn terms_size(&self) -> Arity {
+        self.terms_count()
+    }
 }
 
 struct AddressWithTuple<T: BaseTuple> {
@@ -659,10 +671,31 @@ impl<T: Tuple> TupleEntries for AddressWithTuple<T> {
     }
 }
 
+struct TupleEndInfo {
+    next_free_space: TupleAddress,
+    next_tuple: TupleAddress,
+}
+
 struct TupleMetadata<T: Tuple> {
     registry_address: Address,
     terms: T::Terms,
+    next_free_space: TupleAddress,
     next_tuple: TupleAddress,
+}
+
+impl<T: Tuple> TupleMetadata<T> {
+    fn end_info(&self) -> TupleEndInfo {
+        let &Self {
+            next_free_space,
+            next_tuple,
+            ..
+        } = self;
+
+        TupleEndInfo {
+            next_free_space,
+            next_tuple,
+        }
+    }
 }
 
 trait Tuple: BaseTuple {
@@ -678,14 +711,16 @@ trait Tuple: BaseTuple {
             first_term,
         ) = AddressWithTuple::<Self>::decode(tuple_memory, tuple_address)?;
 
-        let arity = tuple.arity();
+        let terms_count = tuple.terms_count();
+        let terms_size = tuple.terms_size();
 
         Ok((
             tuple,
             TupleMetadata {
                 registry_address,
-                terms: <Self::Terms as BaseTupleTerms>::from_range(first_term, arity),
-                next_tuple: first_term + arity,
+                terms: <Self::Terms as BaseTupleTerms>::from_range(first_term, terms_count),
+                next_free_space: first_term + terms_count,
+                next_tuple: first_term + terms_size,
             },
         ))
     }
@@ -710,10 +745,11 @@ trait Tuple: BaseTuple {
         tuple_address: TupleAddress,
         terms: Self::InitialTerms<'_>,
     ) -> Result<TupleAddress, TupleMemoryError> {
-        let arity = self.arity();
+        let terms_count = self.terms_count();
+        let terms_size = self.terms_size();
         let first_term = self.encode_head(registry_address, tuple_memory, tuple_address)?;
-        terms.encode(tuple_memory, first_term, arity)?;
-        Ok(first_term + arity)
+        terms.encode(tuple_memory, first_term, terms_count)?;
+        Ok(first_term + terms_size)
     }
 }
 
@@ -727,7 +763,7 @@ impl BaseTuple for ReferenceValue {
     type InitialTerms<'a> = NoTerms;
     type Terms = NoTerms;
 
-    fn arity(&self) -> Arity {
+    fn terms_count(&self) -> Arity {
         Arity(0)
     }
 }
@@ -738,9 +774,9 @@ struct StructureValue(Functor, Arity);
 impl BaseTuple for StructureValue {
     const VALUE_TYPE: ValueType = ValueType::Structure;
     type InitialTerms<'a> = FillWithNone;
-    type Terms = AddressSlice;
+    type Terms = TermsSlice;
 
-    fn arity(&self) -> Arity {
+    fn terms_count(&self) -> Arity {
         let &Self(_, arity) = self;
         arity
     }
@@ -752,9 +788,9 @@ struct ListValue;
 impl BaseTuple for ListValue {
     const VALUE_TYPE: ValueType = ValueType::List;
     type InitialTerms<'a> = FillWithNone;
-    type Terms = AddressSlice;
+    type Terms = TermsSlice;
 
-    fn arity(&self) -> Arity {
+    fn terms_count(&self) -> Arity {
         Arity(2)
     }
 }
@@ -767,7 +803,7 @@ impl BaseTuple for ConstantValue {
     type InitialTerms<'a> = NoTerms;
     type Terms = NoTerms;
 
-    fn arity(&self) -> Arity {
+    fn terms_count(&self) -> Arity {
         Arity(0)
     }
 }
@@ -783,9 +819,13 @@ struct Environment {
 impl BaseTuple for Environment {
     const VALUE_TYPE: ValueType = ValueType::Environment;
     type InitialTerms<'a> = &'a [Option<Address>];
-    type Terms = AddressSlice;
+    type Terms = TermsSlice;
 
-    fn arity(&self) -> Arity {
+    fn terms_count(&self) -> Arity {
+        self.number_of_active_permanent_variables
+    }
+
+    fn terms_size(&self) -> Arity {
         self.number_of_permanent_variables
     }
 }
@@ -804,9 +844,9 @@ struct ChoicePoint {
 impl BaseTuple for ChoicePoint {
     const VALUE_TYPE: ValueType = ValueType::ChoicePoint;
     type InitialTerms<'a> = &'a [Option<Address>];
-    type Terms = AddressSlice;
+    type Terms = TermsSlice;
 
-    fn arity(&self) -> Arity {
+    fn terms_count(&self) -> Arity {
         self.number_of_saved_registers
     }
 }
@@ -822,7 +862,7 @@ impl BaseTuple for TrailVariable {
     type InitialTerms<'a> = NoTerms;
     type Terms = NoTerms;
 
-    fn arity(&self) -> Arity {
+    fn terms_count(&self) -> Arity {
         Arity(0)
     }
 }
@@ -1145,7 +1185,7 @@ impl<'m> Heap<'m> {
         }
     }
 
-    fn structure_term_addresses(&self, address: Address) -> Result<AddressSlice, MemoryError> {
+    fn structure_term_addresses(&self, address: Address) -> Result<TermsSlice, MemoryError> {
         let registry_entry = self.registry.get(address)?;
 
         Ok(match registry_entry.value_type {
@@ -1349,8 +1389,7 @@ impl<'m> Heap<'m> {
             }
         }
 
-        environment.number_of_active_permanent_variables =
-            Arity(environment.number_of_active_permanent_variables.0 - n.0);
+        environment.number_of_active_permanent_variables -= n;
 
         environment.encode_head(
             metadata.registry_address,
@@ -1818,38 +1857,50 @@ impl<'m> Heap<'m> {
         let mut registry_slot = self.registry.slot_mut(registry_address)?;
         let registry_entry = registry_slot.entry()?;
 
-        let next_tuple = match registry_entry.value_type {
-            ValueType::Reference => {
-                ReferenceValue::decode(&self.tuple_memory, source)?
-                    .1
-                    .next_tuple
-            }
-            ValueType::Structure => {
-                StructureValue::decode(&self.tuple_memory, source)?
-                    .1
-                    .next_tuple
-            }
-            ValueType::List => ListValue::decode(&self.tuple_memory, source)?.1.next_tuple,
-            ValueType::Constant => {
-                ConstantValue::decode(&self.tuple_memory, source)?
-                    .1
-                    .next_tuple
-            }
+        let TupleEndInfo {
+            next_free_space,
+            next_tuple,
+        } = match registry_entry.value_type {
+            ValueType::Reference => ReferenceValue::decode(&self.tuple_memory, source)?
+                .1
+                .end_info(),
+            ValueType::Structure => StructureValue::decode(&self.tuple_memory, source)?
+                .1
+                .end_info(),
+            ValueType::List => ListValue::decode(&self.tuple_memory, source)?.1.end_info(),
+            ValueType::Constant => ConstantValue::decode(&self.tuple_memory, source)?
+                .1
+                .end_info(),
             ValueType::Environment => {
-                Environment::decode(&self.tuple_memory, source)?
-                    .1
-                    .next_tuple
+                let (mut environment, metadata) = Environment::decode(&self.tuple_memory, source)?;
+
+                if environment.number_of_permanent_variables
+                    != environment.number_of_active_permanent_variables
+                {
+                    log_trace!(
+                        "Trimming environment space: {} => {}",
+                        environment.number_of_permanent_variables,
+                        environment.number_of_active_permanent_variables
+                    );
+
+                    environment.number_of_permanent_variables =
+                        environment.number_of_active_permanent_variables;
+
+                    environment.encode_head(
+                        metadata.registry_address,
+                        &mut self.tuple_memory,
+                        source,
+                    )?;
+                }
+
+                metadata.end_info()
             }
-            ValueType::ChoicePoint => {
-                ChoicePoint::decode(&self.tuple_memory, source)?
-                    .1
-                    .next_tuple
-            }
-            ValueType::TrailVariable => {
-                TrailVariable::decode(&self.tuple_memory, source)?
-                    .1
-                    .next_tuple
-            }
+            ValueType::ChoicePoint => ChoicePoint::decode(&self.tuple_memory, source)?
+                .1
+                .end_info(),
+            ValueType::TrailVariable => TrailVariable::decode(&self.tuple_memory, source)?
+                .1
+                .end_info(),
         };
 
         Ok(
@@ -1875,7 +1926,7 @@ impl<'m> Heap<'m> {
 
                     SweepingState {
                         source: next_tuple,
-                        destination: destination + (next_tuple - source),
+                        destination: destination + (next_free_space - source),
                         all_tuples_were_marked,
                     }
                 }

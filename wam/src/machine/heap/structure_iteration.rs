@@ -82,8 +82,8 @@ impl State {
         Ok(())
     }
 
-    fn check_done(&mut self, index: Arity, arity: Arity) {
-        if index == arity {
+    fn check_done(&mut self, index: Arity, terms_count: Arity) {
+        if index == terms_count {
             log_trace!("Finished iterating over structure");
             self.0 = None;
         }
@@ -99,10 +99,12 @@ impl State {
     {
         let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
-        let super::AddressSlice { first_term, arity } =
-            heap.structure_term_addresses(inner_state.address)?;
+        let super::TermsSlice {
+            first_term,
+            terms_count,
+        } = heap.structure_term_addresses(inner_state.address)?;
 
-        if inner_state.index == arity {
+        if inner_state.index == terms_count {
             return Err(Error::NoMoreTerms);
         }
 
@@ -114,7 +116,7 @@ impl State {
 
         let index = inner_state.index;
 
-        self.check_done(index, arity);
+        self.check_done(index, terms_count);
 
         Ok(result)
     }
@@ -135,18 +137,18 @@ impl State {
     pub fn skip(&mut self, heap: &Heap, n: Arity) -> Result<()> {
         let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
-        let super::AddressSlice { arity, .. } =
+        let super::TermsSlice { terms_count, .. } =
             heap.structure_term_addresses(inner_state.address)?;
 
         inner_state.index.0 += n.0;
 
-        if inner_state.index > arity {
+        if inner_state.index > terms_count {
             return Err(Error::NoMoreTerms);
         }
 
         let index = inner_state.index;
 
-        self.check_done(index, arity);
+        self.check_done(index, terms_count);
 
         Ok(())
     }
