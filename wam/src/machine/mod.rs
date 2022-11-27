@@ -8,9 +8,8 @@ use crate::{
 mod basic_types;
 mod heap;
 
-use basic_types::{
-    Ai, Arity, Constant, Functor, OptionDisplay, ProgramCounter, RegisterIndex, Xn, Yn,
-};
+pub use basic_types::OptionDisplay;
+use basic_types::{Ai, Arity, Constant, Functor, ProgramCounter, RegisterIndex, Xn, Yn};
 use heap::{
     structure_iteration::{ReadWriteMode, StructureIterationState},
     Heap,
@@ -93,18 +92,18 @@ enum Instruction {
 
 impl Instruction {
     fn decode_structure_long_functor(memory: &[u32], pc: ProgramCounter) -> Result<Functor, Error> {
-        if let [0, 0, f1, f0] = memory[pc.offset(1).0 as usize].to_be_bytes() {
+        if let [0, 0, f1, f0] = memory[pc.offset(1).into_usize()].to_be_bytes() {
             Ok(Functor(u16::from_be_bytes([f1, f0])))
         } else {
             Err(Error::BadInstruction(
                 pc,
-                BadMemoryRange(&memory[pc.0 as usize..pc.offset(2).0 as usize]),
+                BadMemoryRange(&memory[pc.into_usize()..pc.offset(2).into_usize()]),
             ))
         }
     }
 
     fn decode(memory: &[u32], pc: ProgramCounter) -> Result<(ProgramCounter, Self), Error> {
-        Ok(match memory[pc.0 as usize].to_be_bytes() {
+        Ok(match memory[pc.into_usize()].to_be_bytes() {
             [0x00, ai, 0, xn] => (
                 pc.offset(1),
                 Instruction::PutVariableXn {
@@ -277,7 +276,7 @@ impl Instruction {
             _ => {
                 return Err(Error::BadInstruction(
                     pc,
-                    BadMemoryRange(core::slice::from_ref(&memory[pc.0 as usize])),
+                    BadMemoryRange(core::slice::from_ref(&memory[pc.into_usize()])),
                 ))
             }
         })
@@ -296,26 +295,23 @@ pub enum RegisterBlockError {
 }
 
 #[derive(Debug)]
-struct RegisterBlock([Address; 32]);
+struct RegisterBlock([Option<Address>; 32]);
 
 impl RegisterBlock {
+    fn new() -> Self {
+        Self(Default::default())
+    }
+
     fn load(&self, index: impl Into<RegisterIndex>) -> Result<Address, RegisterBlockError> {
         let index = index.into();
         log_trace!("Loading Register {}", index);
-        let entry =
-            *self
-                .0
-                .get(index.0 as usize)
-                .ok_or_else(|| RegisterBlockError::IndexOutOfRange {
-                    index,
-                    register_count: (self.0[..]).len(),
-                })?;
-
-        if entry == unsafe { Address::none() } {
-            return Err(RegisterBlockError::NoValue { index });
-        }
-
-        Ok(entry)
+        self.0
+            .get(index.0 as usize)
+            .ok_or_else(|| RegisterBlockError::IndexOutOfRange {
+                index,
+                register_count: (self.0[..]).len(),
+            })?
+            .ok_or(RegisterBlockError::NoValue { index })
     }
 
     fn store(
@@ -333,27 +329,27 @@ impl RegisterBlock {
                     index,
                     register_count,
                 })?;
-        *register = address;
+        *register = Some(address);
         Ok(())
     }
 
     fn clear_above(&mut self, n: Arity) {
-        for register in &mut self.0[(n.0 as usize)..] {
-            *register = unsafe { Address::none() };
+        for register in &mut self.0[n.0.into()..] {
+            *register = None;
         }
     }
 
-    fn all(&self) -> &[Address] {
+    fn all(&self) -> &[Option<Address>] {
         &self.0
     }
 
-    fn all_mut(&mut self) -> &mut [Address] {
+    fn all_mut(&mut self) -> &mut [Option<Address>] {
         &mut self.0
     }
 }
 
 impl core::ops::Index<Arity> for RegisterBlock {
-    type Output = [Address];
+    type Output = [Option<Address>];
 
     fn index(&self, n: Arity) -> &Self::Output {
         &self.0[0..n.0 as usize]
@@ -454,11 +450,11 @@ impl<'m> Machine<'m> {
     ) -> Self {
         Self {
             currently_executing: CurrentlyExecuting::Query,
-            structure_iteration_state: StructureIterationState::default(),
-            pc: Some(ProgramCounter(0)),
+            structure_iteration_state: StructureIterationState::new(),
+            pc: Some(ProgramCounter::START),
             cp: None,
             argument_count: Arity::ZERO,
-            registers: RegisterBlock([unsafe { Address::none() }; 32]),
+            registers: RegisterBlock::new(),
             program,
             query,
             memory: Heap::init(memory),
@@ -743,7 +739,7 @@ impl<'m> Machine<'m> {
                         let registers = &self.registers[n];
 
                         for &value in registers {
-                            log_trace!("Saved Register Value: {}", value);
+                            log_trace!("Saved Register Value: {}", OptionDisplay(value));
                         }
 
                         self.memory.allocate(n, None, registers)?;
@@ -827,15 +823,19 @@ impl<'m> Machine<'m> {
 
     pub fn solution_registers(
         &self,
-    ) -> Result<impl Iterator<Item = Address> + '_, heap::MemoryError> {
+    ) -> Result<impl Iterator<Item = Option<Address>> + '_, heap::MemoryError> {
         Ok(self.memory.solution_registers()?)
     }
 
     pub fn lookup_memory(
         &self,
-        address: Address,
-    ) -> Result<(Address, Value, impl Iterator<Item = Address> + '_), heap::MemoryError> {
-        self.memory.get_value(address)
+        address: Option<Address>,
+    ) -> Result<(Address, Value, impl Iterator<Item = Option<Address>> + '_), heap::MemoryError>
+    {
+        self.memory
+            .get_value(address.ok_or(heap::MemoryError::NoRegistryEntryAt {
+                address: address.into_inner(),
+            })?)
     }
 
     fn new_variable(&mut self) -> Result<Address, ExecutionFailure<'m>> {

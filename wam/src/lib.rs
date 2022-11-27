@@ -134,12 +134,12 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
         &mut self,
         address: machine::Address,
         value: machine::Value,
-        subterms: impl Iterator<Item = machine::Address>,
+        subterms: impl Iterator<Item = Option<machine::Address>>,
     ) -> Result<(), IoError> {
         match value {
             machine::Value::Reference(address) => {
                 self.write_char('R')?;
-                self.write_be_serializable_hex(address)?;
+                self.write_be_serializable_hex(Some(address))?;
             }
             machine::Value::Structure(f, n) => {
                 self.write_char('S')?;
@@ -159,7 +159,7 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
             self.write_be_serializable_hex(subterm)?;
         }
 
-        self.write_be_serializable_hex(address)?;
+        self.write_be_serializable_hex(Some(address))?;
 
         Ok(())
     }

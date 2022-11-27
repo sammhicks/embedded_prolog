@@ -1,6 +1,6 @@
-use core::fmt;
+use core::{fmt, num::NonZeroU16};
 
-use crate::serializable::{Serializable, SerializableWrapper};
+use crate::serializable::SerializableWrapper;
 
 pub trait NoneRepresents: fmt::Display {
     const NONE_REPRESENTS: &'static str;
@@ -154,7 +154,7 @@ impl SerializableWrapper for Constant {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub struct ProgramCounter(pub u16);
+pub struct ProgramCounter(NonZeroU16);
 
 impl fmt::Debug for ProgramCounter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -164,7 +164,7 @@ impl fmt::Debug for ProgramCounter {
 
 impl fmt::Display for ProgramCounter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04X}", self.0)
+        write!(f, "{:04X}", self.into_word())
     }
 }
 
@@ -173,10 +173,22 @@ impl NoneRepresents for ProgramCounter {
 }
 
 impl ProgramCounter {
-    pub const END_OF_PROGRAM: u16 = u16::MAX;
+    pub const START: Self = Self(unsafe { NonZeroU16::new_unchecked(1) });
 
     pub fn offset(self, offset: u16) -> Self {
-        Self(self.0 + offset)
+        Self(self.0.checked_add(offset).expect("Address Wraparound"))
+    }
+
+    pub fn from_word(word: u16) -> Self {
+        Self(unsafe { NonZeroU16::new_unchecked(word + 1) })
+    }
+
+    pub fn into_word(self) -> u16 {
+        self.0.get() - 1
+    }
+
+    pub fn into_usize(self) -> usize {
+        self.into_word().into()
     }
 }
 
@@ -184,28 +196,22 @@ impl SerializableWrapper for ProgramCounter {
     type Inner = u16;
 
     fn from_inner(inner: Self::Inner) -> Self {
-        Self(inner)
+        Self::from_word(inner)
     }
 
     fn into_inner(self) -> Self::Inner {
-        self.0
+        self.into_word()
     }
 }
 
-impl Serializable for Option<ProgramCounter> {
-    type Bytes = <ProgramCounter as Serializable>::Bytes;
-
-    fn from_be_bytes(bytes: Self::Bytes) -> Self {
-        let pc = ProgramCounter::from_be_bytes(bytes);
-        if pc.0 == ProgramCounter::END_OF_PROGRAM {
-            None
-        } else {
-            Some(pc)
-        }
+impl From<ProgramCounter> for usize {
+    fn from(pc: ProgramCounter) -> Self {
+        pc.into_usize()
     }
+}
 
-    fn into_be_bytes(self) -> Self::Bytes {
-        self.unwrap_or(ProgramCounter(ProgramCounter::END_OF_PROGRAM))
-            .into_be_bytes()
+impl From<u16> for ProgramCounter {
+    fn from(word: u16) -> Self {
+        Self::from_word(word)
     }
 }

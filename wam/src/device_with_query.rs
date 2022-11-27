@@ -3,7 +3,7 @@ use super::{
     SerialWrite,
 };
 
-use crate::machine::ExecutionFailure;
+use crate::machine::{ExecutionFailure, OptionDisplay};
 
 #[derive(Debug)]
 pub enum UnhandledCommand {
@@ -58,7 +58,7 @@ impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> 
 
             self.serial_connection.write_char(success_code)?;
             for address in solution_registers {
-                log_trace!("Solution Register: {}", address);
+                log_trace!("Solution Register: {}", OptionDisplay(address));
                 self.serial_connection.write_be_serializable_hex(address)?;
             }
             self.serial_connection.flush()?;

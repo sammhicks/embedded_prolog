@@ -1,5 +1,5 @@
-use super::{Address, Arity, Heap, TupleAddress, TupleMemoryError};
-use crate::log_trace;
+use super::{Address, Arity, Heap, TupleAddress};
+use crate::{log_trace, machine::heap::TupleEntry};
 
 pub enum ReadWriteMode {
     Read,
@@ -17,6 +17,7 @@ pub enum Error {
     NotActive,
     CurrentlyActive,
     NoMoreTerms,
+    NoTermAt { index: Arity },
     TupleMemory(super::TupleMemoryError),
 }
 
@@ -28,10 +29,13 @@ impl From<super::TupleMemoryError> for Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-#[derive(Default)]
 pub struct StructureIterationState(Option<InnerState>);
 
 impl StructureIterationState {
+    pub fn new() -> Self {
+        Self(None)
+    }
+
     pub fn verify_not_active(&self) -> Result<()> {
         if self.0.is_none() {
             Ok(())
@@ -82,14 +86,14 @@ impl StructureIterationState {
     fn with_next<'m, T, H>(
         &mut self,
         heap: H,
-        action: impl FnOnce(H, TupleAddress) -> core::result::Result<T, TupleMemoryError>,
+        action: impl FnOnce(H, Arity, TupleAddress) -> core::result::Result<T, Error>,
     ) -> Result<T>
     where
         H: core::ops::Deref<Target = Heap<'m>>,
     {
         let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
-        let super::TermSlice { first_term, arity } =
+        let super::AddressSlice { first_term, arity } =
             heap.structure_term_addresses(inner_state.address);
 
         if inner_state.index == arity {
@@ -100,7 +104,7 @@ impl StructureIterationState {
 
         inner_state.index.0 += 1;
 
-        let result = action(heap, term_address)?;
+        let result = action(heap, inner_state.index, term_address)?;
 
         let index = inner_state.index;
 
@@ -110,22 +114,24 @@ impl StructureIterationState {
     }
 
     pub fn read_next(&mut self, heap: &Heap) -> Result<Address> {
-        self.with_next(heap, |heap, address| {
-            heap.tuple_memory.load(address).map(Address)
+        self.with_next(heap, |heap, index, address| {
+            Address::from_word(heap.tuple_memory.load(address)?).ok_or(Error::NoTermAt { index })
         })
     }
 
     pub fn write_next(&mut self, heap: &mut Heap, address: Address) -> Result<()> {
-        self.with_next(heap, |heap, term_address| {
-            log_trace!("Writing {} to {}", address, term_address);
-            heap.tuple_memory.store(term_address, address.0)
+        self.with_next(heap, |heap, index, term_address| {
+            log_trace!("Writing {} to {}", address, index);
+            heap.tuple_memory
+                .store(term_address, address.encode())
+                .map_err(Error::TupleMemory)
         })
     }
 
     pub fn skip(&mut self, heap: &Heap, n: Arity) -> Result<()> {
         let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
-        let super::TermSlice { arity, .. } = heap.structure_term_addresses(inner_state.address);
+        let super::AddressSlice { arity, .. } = heap.structure_term_addresses(inner_state.address);
 
         inner_state.index.0 += n.0;
 
