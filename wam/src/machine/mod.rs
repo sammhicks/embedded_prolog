@@ -11,10 +11,45 @@ mod heap;
 pub use basic_types::OptionDisplay;
 use basic_types::{Ai, Arity, Constant, Functor, ProgramCounter, RegisterIndex, Xn, Yn};
 use heap::{
-    structure_iteration::{ReadWriteMode, StructureIterationState},
+    structure_iteration::{ReadWriteMode, State as StructureIterationState},
     Heap,
 };
 pub use heap::{Address, Value};
+
+struct ProgramCounterOutOfRange {
+    pc: ProgramCounter,
+    offset: u16,
+    memory_size: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct Instructions<'m> {
+    memory: &'m [u32],
+}
+
+impl<'m> Instructions<'m> {
+    pub fn new(memory: &'m [u32]) -> Self {
+        Self { memory }
+    }
+
+    fn get(
+        &self,
+        pc: ProgramCounter,
+        offset: u16,
+    ) -> Result<(u32, &'m [u32]), ProgramCounterOutOfRange> {
+        let first_word = pc.into_usize();
+        let last_word = pc.offset(offset).into_usize();
+        self.memory
+            .get(last_word)
+            .copied()
+            .zip(self.memory.get(first_word..=last_word))
+            .ok_or(ProgramCounterOutOfRange {
+                pc,
+                offset,
+                memory_size: self.memory.len(),
+            })
+    }
+}
 
 struct BadMemoryWord(u32);
 
@@ -38,11 +73,32 @@ impl fmt::Debug for BadMemoryRange<'_> {
 
 #[derive(Debug)]
 pub enum Error<'m> {
+    ProgramCounterOutOfRange {
+        pc: ProgramCounter,
+        offset: u16,
+        memory_size: usize,
+    },
     BadInstruction(ProgramCounter, BadMemoryRange<'m>),
     RegisterBlock(RegisterBlockError),
     Memory(heap::MemoryError),
     PermanentVariable(heap::PermanentVariableError),
     StructureIterationState(heap::structure_iteration::Error),
+}
+
+impl<'m> From<ProgramCounterOutOfRange> for Error<'m> {
+    fn from(
+        ProgramCounterOutOfRange {
+            pc,
+            offset,
+            memory_size,
+        }: ProgramCounterOutOfRange,
+    ) -> Self {
+        Self::ProgramCounterOutOfRange {
+            pc,
+            offset,
+            memory_size,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -91,19 +147,24 @@ enum Instruction {
 }
 
 impl Instruction {
-    fn decode_structure_long_functor(memory: &[u32], pc: ProgramCounter) -> Result<Functor, Error> {
-        if let [0, 0, f1, f0] = memory[pc.offset(1).into_usize()].to_be_bytes() {
-            Ok(Functor(u16::from_be_bytes([f1, f0])))
-        } else {
-            Err(Error::BadInstruction(
-                pc,
-                BadMemoryRange(&memory[pc.into_usize()..pc.offset(2).into_usize()]),
-            ))
-        }
+    fn decode_structure_long_functor(
+        instructions: Instructions,
+        pc: ProgramCounter,
+    ) -> Result<Functor, Error> {
+        let (word, range) = instructions.get(pc, 1)?;
+        let [0,0,f1, f0] = word.to_be_bytes() else {
+            return Err(Error::BadInstruction(pc, BadMemoryRange(range)));
+        };
+
+        Ok(Functor(u16::from_be_bytes([f1, f0])))
     }
 
-    fn decode(memory: &[u32], pc: ProgramCounter) -> Result<(ProgramCounter, Self), Error> {
-        Ok(match memory[pc.into_usize()].to_be_bytes() {
+    fn decode(
+        instructions: Instructions,
+        pc: ProgramCounter,
+    ) -> Result<(ProgramCounter, Self), Error> {
+        let (word, range) = instructions.get(pc, 0)?;
+        Ok(match word.to_be_bytes() {
             [0x00, ai, 0, xn] => (
                 pc.offset(1),
                 Instruction::PutVariableXn {
@@ -136,7 +197,7 @@ impl Instruction {
                 pc.offset(1),
                 Instruction::PutStructure {
                     ai: Ai { ai },
-                    f: Functor(f as u16),
+                    f: Functor(u16::from(f)),
                     n: Arity(n),
                 },
             ),
@@ -144,7 +205,7 @@ impl Instruction {
                 pc.offset(2),
                 Instruction::PutStructure {
                     ai: Ai { ai },
-                    f: Self::decode_structure_long_functor(memory, pc)?,
+                    f: Self::decode_structure_long_functor(instructions, pc)?,
                     n: Arity(n),
                 },
             ),
@@ -195,7 +256,7 @@ impl Instruction {
                 pc.offset(1),
                 Instruction::GetStructure {
                     ai: Ai { ai },
-                    f: Functor(f as u16),
+                    f: Functor(u16::from(f)),
                     n: Arity(n),
                 },
             ),
@@ -203,7 +264,7 @@ impl Instruction {
                 pc.offset(2),
                 Instruction::GetStructure {
                     ai: Ai { ai },
-                    f: Self::decode_structure_long_functor(memory, pc)?,
+                    f: Self::decode_structure_long_functor(instructions, pc)?,
                     n: Arity(n),
                 },
             ),
@@ -273,12 +334,7 @@ impl Instruction {
             [0x55, 0, 0, yn] => (pc.offset(1), Instruction::Cut { yn: Yn { yn } }),
             [0x70, 0, 0, 0] => (pc.offset(1), Instruction::True),
             [0x71, 0, 0, 0] => (pc.offset(1), Instruction::Fail),
-            _ => {
-                return Err(Error::BadInstruction(
-                    pc,
-                    BadMemoryRange(core::slice::from_ref(&memory[pc.into_usize()])),
-                ))
-            }
+            _ => return Err(Error::BadInstruction(pc, BadMemoryRange(range))),
         })
     }
 }
@@ -334,7 +390,7 @@ impl RegisterBlock {
     }
 
     fn clear_above(&mut self, n: Arity) {
-        for register in &mut self.0[n.0.into()..] {
+        for register in self.0.iter_mut().skip(n.0.into()) {
             *register = None;
         }
     }
@@ -346,13 +402,12 @@ impl RegisterBlock {
     fn all_mut(&mut self) -> &mut [Option<Address>] {
         &mut self.0
     }
-}
 
-impl core::ops::Index<Arity> for RegisterBlock {
-    type Output = [Option<Address>];
-
-    fn index(&self, n: Arity) -> &Self::Output {
-        &self.0[0..n.0 as usize]
+    fn get(
+        &self,
+        std::ops::RangeTo { end: Arity(n) }: std::ops::RangeTo<Arity>,
+    ) -> &[Option<Address>] {
+        self.0.get(..usize::from(n)).unwrap_or(&[])
     }
 }
 
@@ -423,8 +478,8 @@ pub enum ExecutionSuccess {
 struct UnificationFailure;
 
 pub struct MachineMemory<'m> {
-    pub program: &'m [u32],
-    pub query: &'m [u32],
+    pub program: Instructions<'m>,
+    pub query: Instructions<'m>,
     pub memory: &'m mut [u32],
 }
 
@@ -435,8 +490,8 @@ pub struct Machine<'m> {
     cp: Option<ProgramCounter>,
     argument_count: Arity,
     registers: RegisterBlock,
-    program: &'m [u32],
-    query: &'m [u32],
+    program: Instructions<'m>,
+    query: Instructions<'m>,
     memory: Heap<'m>,
 }
 
@@ -726,7 +781,7 @@ impl<'m> Machine<'m> {
                     CurrentlyExecuting::Query => {
                         self.currently_executing = CurrentlyExecuting::Program;
 
-                        let registers = &self.registers[n];
+                        let registers = self.registers.get(..n);
 
                         for &value in registers {
                             log_trace!("Saved Register Value: {}", OptionDisplay(value));
@@ -765,8 +820,11 @@ impl<'m> Machine<'m> {
             }
             Instruction::TryMeElse { p } => {
                 self.structure_iteration_state.verify_not_active()?;
-                self.memory
-                    .new_choice_point(p, self.cp, &self.registers[self.argument_count])?;
+                self.memory.new_choice_point(
+                    p,
+                    self.cp,
+                    self.registers.get(..self.argument_count),
+                )?;
                 Ok(())
             }
             Instruction::RetryMeElse { p } => {

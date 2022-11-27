@@ -165,9 +165,9 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
     }
 }
 
-struct LoadedCode<'a, 'b> {
-    code_section: &'a [u32],
-    rest_of_memory: &'b mut [u32],
+struct LoadedCode<'code, 'rest> {
+    code_section: machine::Instructions<'code>,
+    rest_of_memory: &'rest mut [u32],
 }
 
 fn load_code<
@@ -214,7 +214,7 @@ fn load_code<
 
     let mut received_hash = [0; 32];
 
-    for b in received_hash.iter_mut() {
+    for b in &mut received_hash {
         *b = serial_connection.read_be_u8_hex()?;
     }
 
@@ -233,7 +233,7 @@ fn load_code<
     }
 
     Ok(Some(LoadedCode {
-        code_section,
+        code_section: machine::Instructions::new(code_section),
         rest_of_memory,
     }))
 }

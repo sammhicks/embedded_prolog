@@ -1,6 +1,6 @@
 use super::{
-    log_debug, log_info, log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead,
-    SerialWrite,
+    log_debug, log_info, log_trace, machine::Instructions, CommandHeader, ProcessInputError,
+    SerialConnection, SerialRead, SerialWrite,
 };
 
 use crate::machine::{ExecutionFailure, OptionDisplay};
@@ -13,10 +13,10 @@ pub enum UnhandledCommand {
     SubmitQuery,
 }
 
-pub struct Device<'a, 's1, 's2, S> {
-    pub program: &'a [u32],
-    pub query: &'a [u32],
-    pub memory: &'a mut [u32],
+pub struct Device<'m, 's1, 's2, S> {
+    pub program: Instructions<'m>,
+    pub query: Instructions<'m>,
+    pub memory: &'m mut [u32],
     pub serial_connection: &'s1 mut &'s2 mut SerialConnection<S>,
 }
 

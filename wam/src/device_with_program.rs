@@ -1,6 +1,6 @@
 use super::{
-    log_debug, log_info, log_trace, CommandHeader, ProcessInputError, SerialConnection, SerialRead,
-    SerialWrite,
+    log_debug, log_info, log_trace, machine::Instructions, CommandHeader, ProcessInputError,
+    SerialConnection, SerialRead, SerialWrite,
 };
 
 type EscalatedCommand = super::device_with_query::UnhandledCommand;
@@ -24,13 +24,13 @@ enum Action {
     Escalate(UnhandledCommand),
 }
 
-pub struct Device<'a, 's, S> {
-    pub program: &'a [u32],
-    pub memory: &'a mut [u32],
+pub struct Device<'m, 's, S> {
+    pub program: Instructions<'m>,
+    pub memory: &'m mut [u32],
     pub serial_connection: &'s mut SerialConnection<S>,
 }
 
-impl<'a, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's, S> {
+impl<'m, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'m, 's, S> {
     fn handle_submit_query(&mut self) -> Result<Action, ProcessInputError> {
         log_info!("Loading query");
 

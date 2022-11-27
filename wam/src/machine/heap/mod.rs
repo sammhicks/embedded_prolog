@@ -8,7 +8,6 @@ use super::basic_types::{
 
 pub mod structure_iteration;
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum BadValueType {
     Expected {
@@ -109,7 +108,7 @@ impl core::ops::Add<Arity> for TupleAddress {
     type Output = Self;
 
     fn add(self, rhs: Arity) -> Self::Output {
-        Self(self.0 + rhs.0 as u16)
+        Self(self.0 + u16::from(rhs.0))
     }
 }
 
@@ -117,7 +116,7 @@ impl core::ops::Add<Yn> for TupleAddress {
     type Output = Self;
 
     fn add(self, rhs: Yn) -> Self::Output {
-        Self(self.0 + rhs.yn as u16)
+        Self(self.0 + u16::from(rhs.yn))
     }
 }
 
@@ -444,7 +443,8 @@ impl<'m> TupleMemory<'m> {
                 address: address.0.into(),
                 size: self.0.len(),
             })?
-            .as_ptr() as *const T;
+            .as_ptr()
+            .cast::<T>();
 
         Ok((
             unsafe { core::ptr::read_unaligned(entry) },
@@ -466,7 +466,8 @@ impl<'m> TupleMemory<'m> {
                 address: address.0.into(),
                 size: memory_size,
             })?
-            .as_mut_ptr() as *mut T;
+            .as_mut_ptr()
+            .cast();
 
         unsafe { core::ptr::write_unaligned(entry, block) }
 
@@ -1588,8 +1589,7 @@ impl<'m> Heap<'m> {
         log_trace!("Cutting at {}", OptionDisplay(cut_register));
 
         let new_choice_point = match (self.latest_choice_point, cut_register) {
-            (None, None) => None,
-            (Some(_), None) => None,
+            (None | Some(_), None) => None,
             (None, Some(_)) => {
                 log_trace!("Not cutting");
                 return Ok(());

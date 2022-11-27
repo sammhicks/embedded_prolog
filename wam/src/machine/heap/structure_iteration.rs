@@ -35,9 +35,9 @@ impl From<super::TupleMemoryError> for Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub struct StructureIterationState(Option<InnerState>);
+pub struct State(Option<InnerState>);
 
-impl StructureIterationState {
+impl State {
     pub fn new() -> Self {
         Self(None)
     }

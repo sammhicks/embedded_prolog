@@ -45,16 +45,13 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
     }
 
     fn process_command_byte(&mut self, command_byte: u8) -> Result<Action, ProcessInputError> {
-        let command_header = match CommandHeader::parse(command_byte) {
-            Ok(header) => header,
-            Err(_) => {
-                crate::error!(
-                    &mut self.serial_connection,
-                    "Invalid command: {:?}",
-                    command_byte as char
-                )?;
-                return Ok(Action::ProcessNextCommand);
-            }
+        let Ok(command_header) = CommandHeader::parse(command_byte) else {
+            crate::error!(
+                &mut self.serial_connection,
+                "Invalid command: {:?}",
+                command_byte as char
+            )?;
+            return Ok(Action::ProcessNextCommand);
         };
 
         log_info!("Processing command {:?}", command_header);
