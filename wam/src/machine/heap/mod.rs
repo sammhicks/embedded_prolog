@@ -383,6 +383,7 @@ impl<T: Tuple> TupleEntries for DirectAccess<T> {
         tuple_memory: &TupleMemory,
         address: TupleAddress,
     ) -> Result<(Self, TupleAddress), TupleMemoryError> {
+        // Safety: Tuples are all safe to load
         unsafe { tuple_memory.load_block(address) }
     }
 
@@ -391,6 +392,7 @@ impl<T: Tuple> TupleEntries for DirectAccess<T> {
         tuple_memory: &mut TupleMemory,
         address: TupleAddress,
     ) -> Result<TupleAddress, TupleMemoryError> {
+        // Safety: Tuples are all safe to store
         unsafe { tuple_memory.store_block(address, self) }
     }
 }
@@ -447,7 +449,7 @@ impl<'m> TupleMemory<'m> {
             .cast::<T>();
 
         Ok((
-            unsafe { core::ptr::read_unaligned(entry) },
+            core::ptr::read_unaligned(entry),
             address + Self::block_size::<T>() as u16,
         ))
     }
@@ -469,7 +471,7 @@ impl<'m> TupleMemory<'m> {
             .as_mut_ptr()
             .cast();
 
-        unsafe { core::ptr::write_unaligned(entry, block) }
+        core::ptr::write_unaligned(entry, block);
 
         Ok(address + Self::block_size::<T>() as u16)
     }

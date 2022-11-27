@@ -5,7 +5,7 @@ struct SerialFormatTarget<W>(W);
 impl<'a, W: SerialWrite<u8>> core::fmt::Write for SerialFormatTarget<&'a mut SerialConnection<W>> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for b in s.bytes() {
-            self.0.write_byte(b).map_err(|_| core::fmt::Error)?;
+            self.0.write_byte(b).map_err(|_err| core::fmt::Error)?;
         }
 
         Ok(())
@@ -41,7 +41,7 @@ impl<'a, W: SerialWrite<u8>> core::fmt::Write for ErrorWriter<'a, W> {
 impl<'a, W: SerialWrite<u8>> core::ops::Drop for ErrorWriter<'a, W> {
     fn drop(&mut self) {
         if let Some(writer) = self.0.take() {
-            let _ = writer.write_char('S').and_then(|()| writer.flush());
+            writer.write_char('S').and_then(|()| writer.flush()).ok();
         }
     }
 }

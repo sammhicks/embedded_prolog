@@ -13,14 +13,14 @@ pub enum UnhandledCommand {
     SubmitQuery,
 }
 
-pub struct Device<'m, 's1, 's2, S> {
+pub struct Device<'m, 's, S> {
     pub program: Instructions<'m>,
     pub query: Instructions<'m>,
     pub memory: &'m mut [u32],
-    pub serial_connection: &'s1 mut &'s2 mut SerialConnection<S>,
+    pub serial_connection: &'s mut SerialConnection<S>,
 }
 
-impl<'a, 's1, 's2, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, 's1, 's2, S> {
+impl<'m, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'m, 's, S> {
     pub fn run(self) -> Result<UnhandledCommand, ProcessInputError> {
         let mut machine = crate::machine::Machine::new(super::machine::MachineMemory {
             program: self.program,

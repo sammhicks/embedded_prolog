@@ -137,9 +137,9 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
         subterms: impl Iterator<Item = Option<machine::Address>>,
     ) -> Result<(), IoError> {
         match value {
-            machine::Value::Reference(address) => {
+            machine::Value::Reference(reference) => {
                 self.write_char('R')?;
-                self.write_be_serializable_hex(Some(address))?;
+                self.write_be_serializable_hex(Some(reference))?;
             }
             machine::Value::Structure(f, n) => {
                 self.write_char('S')?;
@@ -178,7 +178,7 @@ fn load_code<
     S: SerialRead<u8> + SerialWrite<u8>,
     SC: core::borrow::BorrowMut<SerialConnection<S>>,
 >(
-    memory: &'memory_ref mut &'memory mut [u32],
+    memory: &'memory mut [u32],
     serial_connection: &mut SC,
 ) -> Result<Option<LoadedCode<'code, 'rest>>, ProcessInputError> {
     let mut serial_connection = serial_connection.borrow_mut();
@@ -250,7 +250,7 @@ pub enum CommandHeader {
 
 impl CommandHeader {
     fn parse(value: u8) -> Result<Self, ProcessInputError> {
-        Self::try_from(value).map_err(|_| ProcessInputError::Unexpected(value))
+        Self::try_from(value).map_err(|_err| ProcessInputError::Unexpected(value))
     }
 }
 

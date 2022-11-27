@@ -37,7 +37,7 @@ impl<'m, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'m, 's, S> {
         let super::LoadedCode {
             code_section: query,
             rest_of_memory: memory,
-        } = match super::load_code(&mut self.memory, &mut self.serial_connection)? {
+        } = match super::load_code(self.memory, &mut self.serial_connection)? {
             Some(c) => c,
             None => return Ok(Action::ProcessNextCommand),
         };
@@ -46,7 +46,7 @@ impl<'m, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'m, 's, S> {
             program: self.program,
             query,
             memory,
-            serial_connection: &mut self.serial_connection,
+            serial_connection: self.serial_connection,
         }
         .run()?;
 

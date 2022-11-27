@@ -20,7 +20,7 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
         let LoadedCode {
             code_section: program,
             rest_of_memory: memory,
-        } = match load_code(&mut self.memory, &mut self.serial_connection)? {
+        } = match load_code(self.memory, &mut self.serial_connection)? {
             Some(c) => c,
             None => return Ok(Action::ProcessNextCommand),
         };

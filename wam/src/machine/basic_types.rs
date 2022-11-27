@@ -173,14 +173,23 @@ impl NoneRepresents for ProgramCounter {
 }
 
 impl ProgramCounter {
-    pub const START: Self = Self(unsafe { NonZeroU16::new_unchecked(1) });
+    pub const START: Self = Self(
+        // Safety: 1 is NonZero
+        unsafe { NonZeroU16::new_unchecked(1) },
+    );
 
     pub fn offset(self, offset: u16) -> Self {
-        Self(self.0.checked_add(offset).expect("Address Wraparound"))
+        Self(
+            // Safety: Programs of length 2^16 are not supported
+            unsafe { self.0.checked_add(offset).unwrap_unchecked() },
+        )
     }
 
     pub fn from_word(word: u16) -> Self {
-        Self(unsafe { NonZeroU16::new_unchecked(word + 1) })
+        Self(
+            // Safety: adding 1 makes word NonZero
+            unsafe { NonZeroU16::new_unchecked(word + 1) },
+        )
     }
 
     pub fn into_word(self) -> u16 {
