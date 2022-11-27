@@ -1420,38 +1420,6 @@ impl<'m> Heap<'m> {
         self.cut_register = self.latest_choice_point;
     }
 
-    fn skip_unconditional_trail_items(
-        &self,
-        mut trail: Option<Address>,
-        choice_point: TupleAddress,
-    ) -> Result<Option<Address>, TupleMemoryError> {
-        loop {
-            trail = {
-                let Some(trail) = trail else {
-                    return Ok(None);
-                };
-
-                let trail_entry = self.registry.get(trail).unwrap();
-
-                assert!(matches!(trail_entry.value_type, ValueType::TrailVariable));
-
-                let (trail_variable, _) =
-                    TrailVariable::decode(&self.tuple_memory, trail_entry.tuple_address)?;
-
-                let trail_variable_variable_entry =
-                    self.registry.get(trail_variable.variable).unwrap();
-
-                if trail_variable_variable_entry.tuple_address < choice_point {
-                    return Ok(Some(trail));
-                }
-
-                log_trace!("{} is now unconditional", trail_variable.variable);
-
-                trail_variable.next_trail_item
-            };
-        }
-    }
-
     fn do_cut(&mut self, cut_register: Option<Address>) -> Result<(), CutError> {
         log_trace!("Cutting at {}", OptionDisplay(cut_register));
 
@@ -1482,51 +1450,6 @@ impl<'m> Heap<'m> {
                 if latest_choice_point_entry.tuple_address <= cut_register_entry.tuple_address {
                     log_trace!("Not cutting");
                     return Ok(());
-                }
-
-                let (cut_choice_point, _) =
-                    ChoicePoint::decode(&self.tuple_memory, cut_register_entry.tuple_address)?;
-
-                self.trail_top = self.skip_unconditional_trail_items(
-                    self.trail_top,
-                    cut_register_entry.tuple_address,
-                )?;
-
-                let mut trail_iterator = self.trail_top;
-
-                while trail_iterator != cut_choice_point.trail_top {
-                    trail_iterator = {
-                        let Some(trail_iterator) = trail_iterator else {break};
-                        let trail_iterator_entry = self.registry.get(trail_iterator).unwrap();
-
-                        assert!(matches!(
-                            trail_iterator_entry.value_type,
-                            ValueType::TrailVariable
-                        ));
-
-                        let (mut trail_variable, _) = TrailVariable::decode(
-                            &self.tuple_memory,
-                            trail_iterator_entry.tuple_address,
-                        )?;
-
-                        trail_variable.next_trail_item = self.skip_unconditional_trail_items(
-                            trail_variable.next_trail_item,
-                            latest_choice_point_entry.tuple_address,
-                        )?;
-
-                        let TrailVariable {
-                            next_trail_item, ..
-                        } = trail_variable;
-
-                        trail_variable.encode(
-                            trail_iterator,
-                            &mut self.tuple_memory,
-                            trail_iterator_entry.tuple_address,
-                            NoTerms,
-                        )?;
-
-                        next_trail_item
-                    };
                 }
 
                 Some(cut_register)
