@@ -1,7 +1,7 @@
 use core::fmt;
 
 use crate::{
-    log_debug, log_trace,
+    log_debug, log_trace, log_warn,
     serializable::{Serializable, SerializableWrapper},
 };
 
@@ -83,6 +83,7 @@ pub enum Error<'m> {
     Memory(heap::MemoryError),
     PermanentVariable(heap::PermanentVariableError),
     StructureIterationState(heap::structure_iteration::Error),
+    OutOfMemory(heap::OutOfMemory),
 }
 
 impl<'m> From<ProgramCounterOutOfRange> for Error<'m> {
@@ -405,7 +406,7 @@ impl RegisterBlock {
 
     fn get(
         &self,
-        std::ops::RangeTo { end: Arity(n) }: std::ops::RangeTo<Arity>,
+        core::ops::RangeTo { end: Arity(n) }: core::ops::RangeTo<Arity>,
     ) -> &[Option<Address>] {
         self.0.get(..usize::from(n)).unwrap_or(&[])
     }
@@ -421,6 +422,12 @@ enum CurrentlyExecuting {
 pub enum ExecutionFailure<'m> {
     Failed,
     Error(Error<'m>),
+}
+
+impl<'m> From<heap::OutOfMemory> for ExecutionFailure<'m> {
+    fn from(inner: heap::OutOfMemory) -> Self {
+        Self::Error(Error::OutOfMemory(inner))
+    }
 }
 
 impl<'m> From<Error<'m>> for ExecutionFailure<'m> {
@@ -518,15 +525,12 @@ impl<'m> Machine<'m> {
 
     fn continue_execution(&mut self) -> Result<ExecutionSuccess, ExecutionFailure> {
         loop {
-            let pc = match self.pc {
-                Some(pc) => pc,
-                None => {
-                    return Ok(if self.memory.query_has_multiple_solutions() {
-                        ExecutionSuccess::MultipleAnswers
-                    } else {
-                        ExecutionSuccess::SingleAnswer
-                    });
-                }
+            let Some(pc) = self.pc else {
+                return Ok(if self.memory.query_has_multiple_solutions() {
+                    ExecutionSuccess::MultipleAnswers
+                } else {
+                    ExecutionSuccess::SingleAnswer
+                });
             };
 
             let (new_pc, instruction) = match &self.currently_executing {
@@ -543,7 +547,29 @@ impl<'m> Machine<'m> {
 
             self.pc = Some(new_pc);
 
-            self.execute_instruction(instruction)?;
+            let saved_trail_top = self.memory.save_trail_top();
+            let saved_structure_iteration_state = self.structure_iteration_state.clone();
+
+            match self.execute_instruction(&instruction) {
+                Ok(()) => (),
+                Err(ExecutionFailure::Error(Error::OutOfMemory(oom))) => {
+                    log_warn!("Out of Memory while executing {:?}: {:?}", instruction, oom);
+
+                    self.memory.restore_saved_trail(saved_trail_top)?;
+                    self.structure_iteration_state = saved_structure_iteration_state;
+
+                    for _ in 0..2 {
+                        self.memory.resume_garbage_collection();
+
+                        while let heap::GarbageCollectionIsRunning::Running =
+                            self.run_garbage_collection()?
+                        {}
+                    }
+
+                    self.execute_instruction(&instruction)?;
+                }
+                Err(err) => return Err(err),
+            }
 
             self.run_garbage_collection()?;
 
@@ -553,9 +579,9 @@ impl<'m> Machine<'m> {
 
     fn execute_instruction(
         &mut self,
-        instruction: Instruction,
+        instruction: &Instruction,
     ) -> Result<(), ExecutionFailure<'m>> {
-        match instruction {
+        match *instruction {
             Instruction::PutVariableXn { ai, xn } => {
                 let address = self.new_variable()?;
                 self.registers.store(ai, address)?;
@@ -627,7 +653,7 @@ impl<'m> Machine<'m> {
                         let value_address = self.new_structure(f, n)?;
 
                         self.memory
-                            .bind_variable_to_value(variable_address, value_address)?;
+                            .bind_variable_to_value(variable_address, value_address)??;
                     }
                     ReferenceOrValue::Value(Value::Structure(found_f, found_n)) => {
                         if f == found_f && n == found_n {
@@ -653,7 +679,7 @@ impl<'m> Machine<'m> {
                         let value_address = self.new_list()?;
 
                         self.memory
-                            .bind_variable_to_value(variable_address, value_address)?;
+                            .bind_variable_to_value(variable_address, value_address)??;
                     }
                     ReferenceOrValue::Value(Value::List) => {
                         log_trace!("Reading list");
@@ -669,7 +695,7 @@ impl<'m> Machine<'m> {
                 ReferenceOrValue::Reference(variable_address) => {
                     let value_address = self.new_constant(c)?;
                     self.memory
-                        .bind_variable_to_value(variable_address, value_address)?;
+                        .bind_variable_to_value(variable_address, value_address)??;
                     Ok(())
                 }
                 ReferenceOrValue::Value(Value::Constant(rc)) if rc == c => Ok(()),
@@ -739,7 +765,7 @@ impl<'m> Machine<'m> {
                             ReferenceOrValue::Reference(variable_address) => {
                                 let value_address = self.new_constant(c)?;
                                 self.memory
-                                    .bind_variable_to_value(variable_address, value_address)?;
+                                    .bind_variable_to_value(variable_address, value_address)??;
                                 Ok(())
                             }
                             ReferenceOrValue::Value(Value::Constant(c1)) => {
@@ -779,22 +805,21 @@ impl<'m> Machine<'m> {
                     }
                 }
             }
-            Instruction::Allocate { n } => Ok(self.memory.allocate(n, self.cp, &[])?),
+            Instruction::Allocate { n } => Ok(self.memory.allocate(n, self.cp, &[])??),
             Instruction::Trim { n } => Ok(self.memory.trim(n)?),
             Instruction::Deallocate => Ok(self.memory.deallocate(&mut self.cp)?),
             Instruction::Call { p, n } => {
                 match self.currently_executing {
                     CurrentlyExecuting::Query => {
-                        self.currently_executing = CurrentlyExecuting::Program;
+                        let saved_registers = self.registers.get(..n);
 
-                        let registers = self.registers.get(..n);
-
-                        for &value in registers {
-                            log_trace!("Saved Register Value: {}", OptionDisplay(value));
+                        for &saved_register in saved_registers {
+                            log_trace!("Saved Register Value: {}", OptionDisplay(saved_register));
                         }
 
-                        self.memory.allocate(n, None, registers)?;
+                        self.memory.allocate(n, None, saved_registers)??;
 
+                        self.currently_executing = CurrentlyExecuting::Program;
                         self.cp = None;
                     }
                     CurrentlyExecuting::Program => {
@@ -830,7 +855,7 @@ impl<'m> Machine<'m> {
                     p,
                     self.cp,
                     self.registers.get(..self.argument_count),
-                )?;
+                )??;
                 Ok(())
             }
             Instruction::RetryMeElse { p } => {
@@ -862,12 +887,10 @@ impl<'m> Machine<'m> {
         }
     }
 
-    fn run_garbage_collection(&mut self) -> Result<(), heap::MemoryError> {
-        while let heap::GarbageCollectionIsRunning::Running =
-            self.memory.run_garbage_collection(self.registers.all())?
-        {}
-
-        Ok(())
+    fn run_garbage_collection(
+        &mut self,
+    ) -> Result<heap::GarbageCollectionIsRunning, heap::MemoryError> {
+        self.memory.run_garbage_collection(self.registers.all())
     }
 
     fn get_register_value(
@@ -899,25 +922,25 @@ impl<'m> Machine<'m> {
     }
 
     fn new_variable(&mut self) -> Result<Address, ExecutionFailure<'m>> {
-        Ok(self.memory.new_variable()?)
+        Ok(self.memory.new_variable()??)
     }
 
     fn new_structure(&mut self, f: Functor, n: Arity) -> Result<Address, ExecutionFailure<'m>> {
-        let address = self.memory.new_structure(f, n)?;
+        let address = self.memory.new_structure(f, n)??;
         self.structure_iteration_state.start_writing(address)?;
 
         Ok(address)
     }
 
     fn new_list(&mut self) -> Result<Address, ExecutionFailure<'m>> {
-        let address = self.memory.new_list()?;
+        let address = self.memory.new_list()??;
         self.structure_iteration_state.start_writing(address)?;
 
         Ok(address)
     }
 
     fn new_constant(&mut self, c: Constant) -> Result<Address, ExecutionFailure<'m>> {
-        Ok(self.memory.new_constant(c)?)
+        Ok(self.memory.new_constant(c)??)
     }
 
     fn unify_variable<I, E>(
@@ -982,7 +1005,7 @@ impl<'m> Machine<'m> {
         log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
         Ok(match ((a1, v1), (a2, v2)) {
             ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {
-                self.memory.bind_variables(a1, a2)?;
+                self.memory.bind_variables(a1, a2)??;
                 Ok(())
             }
             (
@@ -994,7 +1017,7 @@ impl<'m> Machine<'m> {
                 (variable_address, ReferenceOrValue::Reference(_)),
             ) => {
                 self.memory
-                    .bind_variable_to_value(variable_address, value_address)?;
+                    .bind_variable_to_value(variable_address, value_address)??;
                 Ok(())
             }
             (

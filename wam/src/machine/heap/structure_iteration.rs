@@ -1,11 +1,13 @@
 use super::{Address, Arity, Heap, TupleAddress};
 use crate::{log_trace, machine::heap::TupleEntry};
 
+#[derive(Clone)]
 pub enum ReadWriteMode {
     Read,
     Write,
 }
 
+#[derive(Clone)]
 struct InnerState {
     read_write_mode: ReadWriteMode,
     address: Address,
@@ -33,8 +35,15 @@ impl From<super::TupleMemoryError> for Error {
     }
 }
 
+impl From<super::NoRegistryEntryAt> for Error {
+    fn from(error: super::NoRegistryEntryAt) -> Self {
+        Self::Memory(error.into())
+    }
+}
+
 pub type Result<T> = core::result::Result<T, Error>;
 
+#[derive(Clone)]
 pub struct State(Option<InnerState>);
 
 impl State {
@@ -130,7 +139,9 @@ impl State {
     pub fn write_next(&mut self, heap: &mut Heap, address: Address) -> Result<()> {
         self.with_next(heap, |heap, index, term_address| {
             log_trace!("Writing {} to {}", address, index);
-            Ok(heap.tuple_memory.store(term_address, address.encode())?)
+            heap.tuple_memory.store(term_address, address.encode())?;
+            heap.mark_moved_value(Some(address))?;
+            Ok(())
         })
     }
 
