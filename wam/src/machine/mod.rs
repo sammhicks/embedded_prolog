@@ -526,6 +526,8 @@ impl<'m> Machine<'m> {
     fn continue_execution(&mut self) -> Result<ExecutionSuccess, ExecutionFailure> {
         loop {
             let Some(pc) = self.pc else {
+                self.do_full_garbage_collection()?;
+
                 return Ok(if self.memory.query_has_multiple_solutions() {
                     ExecutionSuccess::MultipleAnswers
                 } else {
@@ -558,13 +560,7 @@ impl<'m> Machine<'m> {
                     self.memory.restore_saved_trail(saved_trail_top)?;
                     self.structure_iteration_state = saved_structure_iteration_state;
 
-                    for _ in 0..2 {
-                        self.memory.resume_garbage_collection();
-
-                        while let heap::GarbageCollectionIsRunning::Running =
-                            self.run_garbage_collection()?
-                        {}
-                    }
+                    self.do_full_garbage_collection()?;
 
                     self.execute_instruction(&instruction)?;
                 }
@@ -575,6 +571,16 @@ impl<'m> Machine<'m> {
 
             log_trace!("");
         }
+    }
+
+    fn do_full_garbage_collection(&mut self) -> Result<(), heap::MemoryError> {
+        while let heap::GarbageCollectionIsRunning::Running = self.run_garbage_collection()? {}
+
+        self.memory.resume_garbage_collection();
+
+        while let heap::GarbageCollectionIsRunning::Running = self.run_garbage_collection()? {}
+
+        Ok(())
     }
 
     fn execute_instruction(
