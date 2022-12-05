@@ -4,6 +4,7 @@
               read_u8/2,
               read_u16/2,
               read_u32/2,
+              decode_be_bytes/2,
               write_u16/2,
               write_words_with_hash/2
           ]).
@@ -50,6 +51,10 @@ read_un(Stream, Count, N) :-
     length(Hex_Chars, Char_Count),
     maplist(get_char(Stream), Hex_Chars),
     hex_bytes(Hex_Chars, Bytes),
+    decode_be_bytes(Bytes, N).
+
+
+decode_be_bytes(Bytes, N) :-
     foldl(be_bytes, Bytes, 0, N).
 
 

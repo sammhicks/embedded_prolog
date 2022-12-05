@@ -28,6 +28,18 @@ impl Serializable for u16 {
     }
 }
 
+impl Serializable for i16 {
+    type Bytes = [u8; 2];
+
+    fn from_be_bytes(bytes: Self::Bytes) -> Self {
+        Self::from_be_bytes(bytes)
+    }
+
+    fn into_be_bytes(self) -> Self::Bytes {
+        Self::to_be_bytes(self)
+    }
+}
+
 impl Serializable for u32 {
     type Bytes = [u8; 4];
 

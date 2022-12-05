@@ -159,6 +159,143 @@ impl SerializableWrapper for Constant {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum IntegerSign {
+    Positive = 0,
+    Negative = 1,
+}
+
+impl IntegerSign {
+    pub fn from_u8(s: u8) -> Option<Self> {
+        IntoIterator::into_iter([Self::Positive, Self::Negative])
+            .find_map(|sign| ((sign as u8) == s).then_some(sign))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ShortInteger {
+    sign: IntegerSign,
+    value: u32,
+}
+
+impl ShortInteger {
+    pub fn new(i: i16) -> Self {
+        Self {
+            sign: if i < 0 {
+                IntegerSign::Negative
+            } else {
+                IntegerSign::Positive
+            },
+            value: i.unsigned_abs().into(),
+        }
+    }
+
+    pub fn into_value(self) -> i16 {
+        let sign = match self.sign {
+            IntegerSign::Positive => 1,
+            IntegerSign::Negative => -1,
+        };
+
+        sign * (self.value as i16)
+    }
+
+    pub fn as_long(&self) -> LongInteger {
+        LongInteger {
+            sign: self.sign,
+            words: core::slice::from_ref(&self.value),
+        }
+    }
+}
+
+impl fmt::Debug for ShortInteger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ShortInteger({})", self)
+    }
+}
+
+impl fmt::Display for ShortInteger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04X}", self.into_value())
+    }
+}
+
+impl SerializableWrapper for ShortInteger {
+    type Inner = i16;
+
+    fn from_inner(inner: Self::Inner) -> Self {
+        Self::new(inner)
+    }
+
+    fn into_inner(self) -> Self::Inner {
+        self.into_value()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct LongInteger<'memory> {
+    pub sign: IntegerSign,
+    pub words: &'memory [u32],
+}
+
+fn is_zero(n: u8) -> bool {
+    n == 0
+}
+
+impl<'memory> LongInteger<'memory> {
+    fn as_be_bytes(&self) -> impl Iterator<Item = u8> + 'memory {
+        self.words.iter().copied().flat_map(u32::to_be_bytes)
+    }
+
+    pub fn words_match(&self, mut other: impl Iterator<Item = u8>) -> bool {
+        let mut me = self.as_be_bytes();
+
+        loop {
+            match (me.next(), other.next()) {
+                (None, None) => return true,
+                (Some(me), Some(other)) => {
+                    if me != other {
+                        return false;
+                    }
+                }
+                (Some(n), None) => return (n == 0) && me.all(is_zero),
+                (None, Some(n)) => return (n == 0) && other.all(is_zero),
+            }
+        }
+    }
+}
+
+struct DisplayLongIntegerWords<'memory>(&'memory [u32]);
+
+impl<'memory> fmt::Display for DisplayLongIntegerWords<'memory> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for &word in self.0 {
+            write!(f, "{:08X}", word)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<'memory> fmt::Debug for LongInteger<'memory> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LongInteger({})", self)
+    }
+}
+
+impl<'memory> fmt::Display for LongInteger<'memory> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let &Self { sign, words } = self;
+
+        let sign = match sign {
+            IntegerSign::Positive => "",
+            IntegerSign::Negative => "-",
+        };
+
+        write!(f, "{}{}", sign, DisplayLongIntegerWords(words))
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ProgramCounter(NonZeroU16);
 

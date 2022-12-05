@@ -27,8 +27,9 @@
     + Tail: u32 in hex
   + C - Constant, followed by value: BE u16 in hex
   + I - Integer, followed by:
-    + Word count: BE u8 in hex
-    + List of Words: BE u32 in hex per word
+    + Sign: `-` if negative, `+` otherwise
+    + Word count: BE u32 in hex
+    + List of Words: BE u8 in hex per word
 
 # Error Responses
 + 'E' then bytes in hex then 'S'

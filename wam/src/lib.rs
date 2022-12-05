@@ -27,9 +27,6 @@ impl core::fmt::Display for IoError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for IoError {}
-
 #[derive(Debug)]
 pub enum ProcessInputError {
     Unexpected(u8),
@@ -134,6 +131,7 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
         &mut self,
         address: machine::Address,
         value: machine::ReferenceOrValue,
+        data: impl Iterator<Item = u8>,
         subterms: impl Iterator<Item = Option<machine::Address>>,
     ) -> Result<(), IoError> {
         match value {
@@ -153,6 +151,18 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
                 self.write_char('C')?;
                 self.write_be_serializable_hex(c)?;
             }
+            machine::ReferenceOrValue::Value(machine::Value::Integer { sign, bytes_count }) => {
+                self.write_char('I')?;
+                self.write_char(match sign {
+                    machine::IntegerSign::Positive => '+',
+                    machine::IntegerSign::Negative => '-',
+                })?;
+                self.write_be_serializable_hex(bytes_count)?;
+            }
+        }
+
+        for byte in data {
+            self.write_be_serializable_hex(byte)?;
         }
 
         for subterm in subterms {

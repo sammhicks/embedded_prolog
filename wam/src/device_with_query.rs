@@ -76,18 +76,19 @@ impl<'m, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'m, 's, S> {
                     CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
                     CommandHeader::SubmitQuery => return Ok(UnhandledCommand::SubmitQuery),
                     CommandHeader::LookupMemory => {
-                        let (address, value, subterms) = match machine
+                        match machine
                             .lookup_memory(self.serial_connection.read_be_serializable_hex()?)
                         {
-                            Ok(result) => result,
+                            Ok((address, value, data, subterms)) => {
+                                self.serial_connection
+                                    .write_value(address, value, data, subterms)?;
+                                self.serial_connection.flush()?;
+                            }
                             Err(err) => {
                                 crate::error!(self.serial_connection, "{:?}", err)?;
                                 return Ok(UnhandledCommand::Reset);
                             }
                         };
-                        self.serial_connection
-                            .write_value(address, value, subterms)?;
-                        self.serial_connection.flush()?;
                     }
                     CommandHeader::NextSolution => {
                         break machine.next_solution();

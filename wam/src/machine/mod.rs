@@ -8,8 +8,10 @@ use crate::{
 mod basic_types;
 mod heap;
 
-pub use basic_types::OptionDisplay;
-use basic_types::{Ai, Arity, Constant, Functor, ProgramCounter, RegisterIndex, Xn, Yn};
+use basic_types::{
+    Ai, Arity, Constant, Functor, LongInteger, ProgramCounter, RegisterIndex, ShortInteger, Xn, Yn,
+};
+pub use basic_types::{IntegerSign, OptionDisplay};
 use heap::{
     structure_iteration::{ReadWriteMode, State as StructureIterationState},
     Heap,
@@ -103,7 +105,7 @@ impl<'m> From<ProgramCounterOutOfRange> for Error<'m> {
 }
 
 #[derive(Debug)]
-enum Instruction {
+enum Instruction<'memory> {
     PutVariableXn { ai: Ai, xn: Xn },
     PutVariableYn { ai: Ai, yn: Yn },
     PutValueXn { ai: Ai, xn: Xn },
@@ -111,6 +113,8 @@ enum Instruction {
     PutStructure { ai: Ai, f: Functor, n: Arity },
     PutList { ai: Ai },
     PutConstant { ai: Ai, c: Constant },
+    PutShortInteger { ai: Ai, i: ShortInteger },
+    PutInteger { ai: Ai, i: LongInteger<'memory> },
     PutVoid { ai: Ai, n: Arity },
     GetVariableXn { ai: Ai, xn: Xn },
     GetVariableYn { ai: Ai, yn: Yn },
@@ -119,17 +123,23 @@ enum Instruction {
     GetStructure { ai: Ai, f: Functor, n: Arity },
     GetList { ai: Ai },
     GetConstant { ai: Ai, c: Constant },
+    GetShortInteger { ai: Ai, i: ShortInteger },
+    GetInteger { ai: Ai, i: LongInteger<'memory> },
     SetVariableXn { xn: Xn },
     SetVariableYn { yn: Yn },
     SetValueXn { xn: Xn },
     SetValueYn { yn: Yn },
     SetConstant { c: Constant },
+    SetShortInteger { i: ShortInteger },
+    SetInteger { i: LongInteger<'memory> },
     SetVoid { n: Arity },
     UnifyVariableXn { xn: Xn },
     UnifyVariableYn { yn: Yn },
     UnifyValueXn { xn: Xn },
     UnifyValueYn { yn: Yn },
     UnifyConstant { c: Constant },
+    UnifyShortInteger { i: ShortInteger },
+    UnifyInteger { i: LongInteger<'memory> },
     UnifyVoid { n: Arity },
     Allocate { n: Arity },
     Trim { n: Arity },
@@ -147,7 +157,7 @@ enum Instruction {
     Fail,
 }
 
-impl Instruction {
+impl<'memory> Instruction<'memory> {
     fn decode_structure_long_functor(
         instructions: Instructions,
         pc: ProgramCounter,
@@ -160,8 +170,21 @@ impl Instruction {
         Ok(Functor(u16::from_be_bytes([f1, f0])))
     }
 
-    fn decode(
+    fn decode_long_integer_words(
         instructions: Instructions,
+        pc: ProgramCounter,
+        n: u8,
+    ) -> Result<&[u32], Error> {
+        Ok(instructions
+            .get(pc, u16::from(n))?
+            .1
+            .split_first()
+            .expect("Zero length instruction")
+            .1)
+    }
+
+    fn decode(
+        instructions: Instructions<'memory>,
         pc: ProgramCounter,
     ) -> Result<(ProgramCounter, Self), Error> {
         let (word, range) = instructions.get(pc, 0)?;
@@ -216,6 +239,24 @@ impl Instruction {
                 Instruction::PutConstant {
                     ai: Ai { ai },
                     c: Constant::from_be_bytes([c1, c0]),
+                },
+            ),
+            [0x08, ai, i1, i0] => (
+                pc.offset(1),
+                Instruction::PutShortInteger {
+                    ai: Ai { ai },
+                    i: ShortInteger::from_be_bytes([i1, i0]),
+                },
+            ),
+            [0x09, ai, s, n] => (
+                pc.offset(1 + u16::from(n)),
+                Instruction::PutInteger {
+                    ai: Ai { ai },
+                    i: LongInteger {
+                        sign: IntegerSign::from_u8(s)
+                            .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                        words: Self::decode_long_integer_words(instructions, pc, n)?,
+                    },
                 },
             ),
             [0x0a, ai, 0, n] => (
@@ -277,6 +318,24 @@ impl Instruction {
                     c: Constant::from_be_bytes([c1, c0]),
                 },
             ),
+            [0x18, ai, i1, i0] => (
+                pc.offset(1),
+                Instruction::GetShortInteger {
+                    ai: Ai { ai },
+                    i: ShortInteger::from_be_bytes([i1, i0]),
+                },
+            ),
+            [0x19, ai, s, n] => (
+                pc.offset(1 + u16::from(n)),
+                Instruction::GetInteger {
+                    ai: Ai { ai },
+                    i: LongInteger {
+                        sign: IntegerSign::from_u8(s)
+                            .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                        words: Self::decode_long_integer_words(instructions, pc, n)?,
+                    },
+                },
+            ),
             [0x20, 0, 0, xn] => (pc.offset(1), Instruction::SetVariableXn { xn: Xn { xn } }),
             [0x21, 0, 0, yn] => (pc.offset(1), Instruction::SetVariableYn { yn: Yn { yn } }),
             [0x22, 0, 0, xn] => (pc.offset(1), Instruction::SetValueXn { xn: Xn { xn } }),
@@ -285,6 +344,22 @@ impl Instruction {
                 pc.offset(1),
                 Instruction::SetConstant {
                     c: Constant::from_be_bytes([c1, c0]),
+                },
+            ),
+            [0x28, 0, i1, i0] => (
+                pc.offset(1),
+                Instruction::SetShortInteger {
+                    i: ShortInteger::from_be_bytes([i1, i0]),
+                },
+            ),
+            [0x29, 0, s, n] => (
+                pc.offset(1 + u16::from(n)),
+                Instruction::SetInteger {
+                    i: LongInteger {
+                        sign: IntegerSign::from_u8(s)
+                            .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                        words: Self::decode_long_integer_words(instructions, pc, n)?,
+                    },
                 },
             ),
             [0x2a, 0, 0, n] => (pc.offset(1), Instruction::SetVoid { n: Arity(n) }),
@@ -296,6 +371,22 @@ impl Instruction {
                 pc.offset(1),
                 Instruction::UnifyConstant {
                     c: Constant::from_be_bytes([c1, c0]),
+                },
+            ),
+            [0x38, 0, i1, i0] => (
+                pc.offset(1),
+                Instruction::UnifyShortInteger {
+                    i: ShortInteger::from_be_bytes([i1, i0]),
+                },
+            ),
+            [0x39, 0, s, n] => (
+                pc.offset(1 + u16::from(n)),
+                Instruction::UnifyInteger {
+                    i: LongInteger {
+                        sign: IntegerSign::from_u8(s)
+                            .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                        words: Self::decode_long_integer_words(instructions, pc, n)?,
+                    },
                 },
             ),
             [0x3a, 0, 0, n] => (pc.offset(1), Instruction::UnifyVoid { n: Arity(n) }),
@@ -625,6 +716,14 @@ impl<'m> Machine<'m> {
                 self.registers.store(ai, address)?;
                 Ok(())
             }
+            Instruction::PutShortInteger { ai, i } => {
+                self.execute_instruction(&Instruction::PutInteger { ai, i: i.as_long() })
+            }
+            Instruction::PutInteger { ai, i } => {
+                let address = self.new_integer(i)?;
+                self.registers.store(ai, address)?;
+                Ok(())
+            }
             Instruction::PutVoid { ai, n } => {
                 for ai in (ai.ai..).take(n.0 as usize).map(|ai| Ai { ai }) {
                     let address = self.new_variable()?;
@@ -670,9 +769,9 @@ impl<'m> Machine<'m> {
                             self.backtrack()?;
                         }
                     }
-                    ReferenceOrValue::Value(Value::List | Value::Constant(_)) => {
-                        self.backtrack()?
-                    }
+                    ReferenceOrValue::Value(
+                        Value::List | Value::Constant(_) | Value::Integer { .. },
+                    ) => self.backtrack()?,
                 }
                 Ok(())
             }
@@ -691,9 +790,9 @@ impl<'m> Machine<'m> {
                         log_trace!("Reading list");
                         self.structure_iteration_state.start_reading(address)?;
                     }
-                    ReferenceOrValue::Value(Value::Structure(..) | Value::Constant(_)) => {
-                        self.backtrack()?
-                    }
+                    ReferenceOrValue::Value(
+                        Value::Structure(..) | Value::Constant(_) | Value::Integer { .. },
+                    ) => self.backtrack()?,
                 }
                 Ok(())
             }
@@ -707,6 +806,27 @@ impl<'m> Machine<'m> {
                 ReferenceOrValue::Value(Value::Constant(rc)) if rc == c => Ok(()),
                 _ => self.backtrack(),
             },
+            Instruction::GetShortInteger { ai, i } => {
+                self.execute_instruction(&Instruction::GetInteger { ai, i: i.as_long() })
+            }
+            Instruction::GetInteger { ai, i } => {
+                let (_, value, data) = self.get_register_value_with_data(ai)?;
+                let words_match = i.words_match(data);
+                match value {
+                    ReferenceOrValue::Reference(variable_address) => {
+                        let value_address = self.new_integer(i)?;
+                        self.memory
+                            .bind_variable_to_value(variable_address, value_address)??;
+                        Ok(())
+                    }
+                    ReferenceOrValue::Value(Value::Integer { sign, .. })
+                        if i.sign == sign && words_match =>
+                    {
+                        Ok(())
+                    }
+                    _ => self.backtrack(),
+                }
+            }
             Instruction::SetVariableXn { xn } => {
                 let address = self.new_variable()?;
                 self.registers.store(xn, address)?;
@@ -735,6 +855,15 @@ impl<'m> Machine<'m> {
             }
             Instruction::SetConstant { c } => {
                 let address = self.new_constant(c)?;
+                self.structure_iteration_state
+                    .write_next(&mut self.memory, address)?;
+                Ok(())
+            }
+            Instruction::SetShortInteger { i } => {
+                self.execute_instruction(&Instruction::SetInteger { i: i.as_long() })
+            }
+            Instruction::SetInteger { i } => {
+                let address = self.new_integer(i)?;
                 self.structure_iteration_state
                     .write_next(&mut self.memory, address)?;
                 Ok(())
@@ -781,13 +910,53 @@ impl<'m> Machine<'m> {
                                     self.backtrack()
                                 }
                             }
-                            ReferenceOrValue::Value(Value::Structure(..) | Value::List) => {
-                                self.backtrack()
-                            }
+                            ReferenceOrValue::Value(
+                                Value::Structure(..) | Value::List | Value::Integer { .. },
+                            ) => self.backtrack(),
                         }
                     }
                     ReadWriteMode::Write => {
                         let address = self.new_constant(c)?;
+                        self.structure_iteration_state
+                            .write_next(&mut self.memory, address)?;
+
+                        Ok(())
+                    }
+                }
+            }
+            Instruction::UnifyShortInteger { i } => {
+                self.execute_instruction(&Instruction::UnifyInteger { i: i.as_long() })
+            }
+            Instruction::UnifyInteger { i } => {
+                match self.structure_iteration_state.read_write_mode()? {
+                    ReadWriteMode::Read => {
+                        let term_address =
+                            self.structure_iteration_state.read_next(&self.memory)?;
+
+                        let (_, value, data, _) = self.memory.get_value(term_address)?;
+                        let words_match = i.words_match(data);
+
+                        match value {
+                            ReferenceOrValue::Reference(variable_address) => {
+                                let value_address = self.new_integer(i)?;
+                                self.memory
+                                    .bind_variable_to_value(variable_address, value_address)??;
+                                Ok(())
+                            }
+                            ReferenceOrValue::Value(Value::Integer { sign, .. }) => {
+                                if i.sign == sign && words_match {
+                                    Ok(())
+                                } else {
+                                    self.backtrack()
+                                }
+                            }
+                            ReferenceOrValue::Value(
+                                Value::Structure(..) | Value::List | Value::Constant(..),
+                            ) => self.backtrack(),
+                        }
+                    }
+                    ReadWriteMode::Write => {
+                        let address = self.new_integer(i)?;
                         self.structure_iteration_state
                             .write_next(&mut self.memory, address)?;
 
@@ -903,8 +1072,17 @@ impl<'m> Machine<'m> {
         &self,
         index: Ai,
     ) -> Result<(Address, ReferenceOrValue), ExecutionFailure<'m>> {
-        let (address, value, _) = self.memory.get_value(self.registers.load(index)?)?;
-        Ok((address, value))
+        self.get_register_value_with_data(index)
+            .map(|(address, value, _)| (address, value))
+    }
+
+    fn get_register_value_with_data(
+        &self,
+        index: Ai,
+    ) -> Result<(Address, ReferenceOrValue, impl Iterator<Item = u8> + '_), ExecutionFailure<'m>>
+    {
+        let (address, value, data, _) = self.memory.get_value(self.registers.load(index)?)?;
+        Ok((address, value, data))
     }
 
     pub fn solution_registers(
@@ -920,6 +1098,7 @@ impl<'m> Machine<'m> {
         (
             Address,
             ReferenceOrValue,
+            impl Iterator<Item = u8> + '_,
             impl Iterator<Item = Option<Address>> + '_,
         ),
         heap::MemoryError,
@@ -947,6 +1126,10 @@ impl<'m> Machine<'m> {
 
     fn new_constant(&mut self, c: Constant) -> Result<Address, ExecutionFailure<'m>> {
         Ok(self.memory.new_constant(c)??)
+    }
+
+    fn new_integer(&mut self, i: LongInteger) -> Result<Address, ExecutionFailure<'m>> {
+        Ok(self.memory.new_integer(i)??)
     }
 
     fn unify_variable<I, E>(
@@ -1006,8 +1189,8 @@ impl<'m> Machine<'m> {
         a2: Address,
     ) -> Result<Result<(), UnificationFailure>, ExecutionFailure<'m>> {
         log_trace!("Unifying {} and {}", a1, a2);
-        let (a1, v1, _) = self.memory.get_value(a1)?;
-        let (a2, v2, _) = self.memory.get_value(a2)?;
+        let (a1, v1, _, _) = self.memory.get_value(a1)?;
+        let (a2, v2, _, _) = self.memory.get_value(a2)?;
         log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
         Ok(match ((a1, v1), (a2, v2)) {
             ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {

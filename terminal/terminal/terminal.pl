@@ -86,6 +86,7 @@ compile_program(File, Result) :-
         retractall(program_compile_state(_)),
         compile_program(Program, State, Program_Words),
         write(Stream, 'P'),
+        flush_output(Stream),
         write_words_with_hash(Stream, Program_Words),
         flush_output(Stream),
         read_program_result(Stream, Result),
@@ -198,6 +199,17 @@ resolve_value_description(list(Head_Reference, Tail_Reference), _Functors, [Head
 resolve_value_description(constant(C), Functors, Value, [], []) :-
     nth0(C, Functors, Value).
 
+resolve_value_description(integer(S, W), _Functors, I, [], []) :-
+    char_code(SC, S),
+    resolve_integer_description(SC, W, I).
+
+
+resolve_integer_description('+', W, I) :-
+    decode_be_bytes(W, I).
+resolve_integer_description('-', W, I) :-
+    decode_be_bytes(W, SI),
+    I is -SI.
+
 
 read_value('R', Stream, reference(R)) :-
     read_u16(Stream, R).
@@ -214,6 +226,12 @@ read_value('L', Stream, list(H, T)) :-
 
 read_value('C', Stream, constant(C)) :-
     read_u16(Stream, C).
+
+read_value('I', Stream, integer(S, W)) :-
+    get_code(Stream, S),
+    read_u32(Stream, N),
+    length(W, N),
+    maplist(read_u8(Stream), W).
 
 
 insert_entries([], Table, Table).

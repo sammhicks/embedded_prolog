@@ -24,7 +24,7 @@
 | put list                             | `06` | `Ai` | `00` | `00` |
 | put constant                         | `07` | `Ai` | `c`1 | `c`0 |
 | put integer                          | `08` | `Ai` | `i`1 | `i`0 |
-| put integer                          | `09` | `Ai` | `00` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
+| put integer                          | `09` | `Ai` |  `S` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
 | put void                             | `0a` | `Ai` | `00` | `00` |
 | get variable                         | `10` | `Ai` | `00` | `Xn` |
 | get variable                         | `11` | `Ai` | `00` | `Yn` |
@@ -35,14 +35,14 @@
 | get list                             | `16` | `Ai` | `00` | `00` |
 | get constant                         | `17` | `Ai` | `c`1 | `c`0 |
 | get integer                          | `18` | `Ai` | `i`1 | `i`0 |
-| get integer                          | `19` | `Ai` | `00` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
+| get integer                          | `19` | `Ai` |  `S` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
 | set variable                         | `20` | `00` | `00` | `Xn` |
 | set variable                         | `21` | `00` | `00` | `Yn` |
 | set value                            | `22` | `00` | `00` | `Xn` |
 | set value                            | `23` | `00` | `00` | `Yn` |
 | set constant                         | `27` | `00` | `c`1 | `c`0 |
 | set integer                          | `28` | `00` | `i`1 | `i`0 |
-| get integer                          | `29` | `00` | `00` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
+| get integer                          | `29` | `00` |  `S` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
 | set void                             | `2a` | `00` | `00` |  `n` |
 | unify variable                       | `30` | `00` | `00` | `Xn` |
 | unify variable                       | `31` | `00` | `00` | `Yn` |
@@ -50,7 +50,7 @@
 | unify value                          | `33` | `00` | `00` | `Yn` |
 | unify constant                       | `37` | `00` | `c`1 | `c`0 |
 | unify integer                        | `38` | `00` | `i`1 | `i`0 |
-| unify integer                        | `39` | `00` | `00` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
+| unify integer                        | `39` | `00` |  `S` |  `N` | `i`3 | `i`2 | `i`1 | `i`0 | ... |
 | unify void                           | `3a` | `00` | `00` |  `n` |
 | allocate                             | `40` | `00` | `00` |  `N` |
 | trim                                 | `41` | `00` | `00` |  `N` |
