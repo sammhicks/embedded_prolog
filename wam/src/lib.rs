@@ -1,7 +1,5 @@
 #![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 
-use core::convert::TryFrom;
-
 pub use embedded_hal::serial::{Read as SerialRead, Write as SerialWrite};
 pub use nb;
 use num_enum::{IntoPrimitive, TryFromPrimitive};

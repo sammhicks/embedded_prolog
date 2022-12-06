@@ -1,4 +1,4 @@
-use core::{cmp::Ordering, convert::TryInto};
+use core::cmp::Ordering;
 
 type Word = u16;
 type DoubleWord = u32;

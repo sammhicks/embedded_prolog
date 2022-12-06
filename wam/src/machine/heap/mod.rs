@@ -1,4 +1,4 @@
-use core::{convert::TryFrom, fmt, num::NonZeroU16};
+use core::{fmt, num::NonZeroU16};
 
 use crate::{log_trace, serializable::SerializableWrapper};
 
