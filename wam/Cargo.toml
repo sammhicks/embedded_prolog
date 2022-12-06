@@ -13,6 +13,9 @@ nb = "1.0.0"
 num_enum = { version = "0.5.7", default-features = false }
 sha2 = { version = "0.10.6", default-features = false }
 
+[dev-dependencies]
+rand = "0.8.5"
+
 [features]
 logging = [ "dep:log", "std" ]
 std = []

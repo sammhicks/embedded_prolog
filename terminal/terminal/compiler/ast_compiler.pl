@@ -14,11 +14,12 @@
 
 % --- Query ---
 
-compile_query_ast(query(Functor, Terms), Combined_Codes) :-
+compile_query_ast(query(Functor, Terms), Final_Codes) :-
 	allocate_atom_registers(Terms, [], Allocation),
 	tokenize_query_allocation(Functor, Allocation, Tokens, []),
 	convert_query_tokens(Tokens, [], Codes, []),
-	combine_voids(Codes, Combined_Codes).
+	combine_voids(Codes, Codes_With_Combined_Voids),
+	append(Codes_With_Combined_Voids, [proceed], Final_Codes).
 
 
 convert_query_tokens([], _) -->

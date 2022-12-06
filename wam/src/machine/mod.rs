@@ -85,6 +85,7 @@ pub enum Error<'m> {
     Memory(heap::MemoryError),
     PermanentVariable(heap::PermanentVariableError),
     StructureIterationState(heap::structure_iteration::Error),
+    ExpressionEvaluation(heap::ExpressionEvaluationError),
     OutOfMemory(heap::OutOfMemory),
 }
 
@@ -153,6 +154,7 @@ enum Instruction<'memory> {
     NeckCut,
     GetLevel { yn: Yn },
     Cut { yn: Yn },
+    Is,
     True,
     Fail,
 }
@@ -424,6 +426,7 @@ impl<'memory> Instruction<'memory> {
             [0x53, 0, 0, 0] => (pc.offset(1), Instruction::NeckCut),
             [0x54, 0, 0, yn] => (pc.offset(1), Instruction::GetLevel { yn: Yn { yn } }),
             [0x55, 0, 0, yn] => (pc.offset(1), Instruction::Cut { yn: Yn { yn } }),
+            [0x66, 0, 0, 0] => (pc.offset(1), Instruction::Is),
             [0x70, 0, 0, 0] => (pc.offset(1), Instruction::True),
             [0x71, 0, 0, 0] => (pc.offset(1), Instruction::Fail),
             _ => return Err(Error::BadInstruction(pc, BadMemoryRange(range))),
@@ -557,6 +560,12 @@ impl<'m> From<heap::CutError> for ExecutionFailure<'m> {
             heap::CutError::PermanentVariable(inner) => inner.into(),
             heap::CutError::Memory(inner) => inner.into(),
         }
+    }
+}
+
+impl<'m> From<heap::ExpressionEvaluationError> for ExecutionFailure<'m> {
+    fn from(expression_evaluation_error: heap::ExpressionEvaluationError) -> Self {
+        Self::Error(Error::ExpressionEvaluation(expression_evaluation_error))
     }
 }
 
@@ -986,13 +995,7 @@ impl<'m> Machine<'m> {
             Instruction::Call { p, n } => {
                 match self.currently_executing {
                     CurrentlyExecuting::Query => {
-                        let saved_registers = self.registers.get(..n);
-
-                        for &saved_register in saved_registers {
-                            log_trace!("Saved Register Value: {}", OptionDisplay(saved_register));
-                        }
-
-                        self.memory.allocate(n, None, saved_registers)??;
+                        self.save_query_registers(n)?;
 
                         self.currently_executing = CurrentlyExecuting::Program;
                         self.cp = None;
@@ -1057,6 +1060,12 @@ impl<'m> Machine<'m> {
                 self.memory.cut(yn)?;
                 Ok(())
             }
+            Instruction::Is => {
+                let [a1, a2] = self.special_functor()?;
+                let a2 = self.memory.evaluate(a2)??;
+                self.unify(a1, a2)?
+                    .or_else(|UnificationFailure| self.backtrack())
+            }
             Instruction::True => Ok(()),
             Instruction::Fail => self.backtrack(),
         }
@@ -1083,6 +1092,33 @@ impl<'m> Machine<'m> {
     {
         let (address, value, data, _) = self.memory.get_value(self.registers.load(index)?)?;
         Ok((address, value, data))
+    }
+
+    fn save_query_registers(&mut self, n: Arity) -> Result<(), ExecutionFailure<'m>> {
+        if let CurrentlyExecuting::Query = self.currently_executing {
+            let saved_registers = self.registers.get(..n);
+
+            for &saved_register in saved_registers {
+                log_trace!("Saved Register Value: {}", OptionDisplay(saved_register));
+            }
+
+            self.memory.allocate(n, None, saved_registers)??;
+        }
+
+        Ok(())
+    }
+
+    fn special_functor<const N: usize>(&mut self) -> Result<[Address; N], ExecutionFailure<'m>> {
+        self.save_query_registers(Arity(N as u8))?;
+
+        // Safety: We then initialise the entire array, and Addresses are plain old data
+        let mut registers = unsafe { core::mem::zeroed::<[Address; N]>() };
+
+        for (ai, register) in (0..).zip(registers.iter_mut()) {
+            *register = self.registers.load(Ai { ai })?;
+        }
+
+        Ok(registers)
     }
 
     pub fn solution_registers(
@@ -1189,34 +1225,84 @@ impl<'m> Machine<'m> {
         a2: Address,
     ) -> Result<Result<(), UnificationFailure>, ExecutionFailure<'m>> {
         log_trace!("Unifying {} and {}", a1, a2);
-        let (a1, v1, _, _) = self.memory.get_value(a1)?;
-        let (a2, v2, _, _) = self.memory.get_value(a2)?;
+        let (a1, v1, d1, _) = self.memory.get_value(a1)?;
+        let (a2, v2, d2, _) = self.memory.get_value(a2)?;
         log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
-        Ok(match ((a1, v1), (a2, v2)) {
-            ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {
-                self.memory.bind_variables(a1, a2)??;
+
+        Ok(if a1 == a2 {
+            Ok(())
+        } else if let (
+            &ReferenceOrValue::Value(Value::Integer {
+                sign: s1,
+                bytes_count: n1,
+            }),
+            &ReferenceOrValue::Value(Value::Integer {
+                sign: s2,
+                bytes_count: n2,
+            }),
+        ) = (&v1, &v2)
+        {
+            if s1 == s2
+                && core::iter::zip(
+                    d1.rev().chain(core::iter::repeat(0)),
+                    d2.rev().chain(core::iter::repeat(0)),
+                )
+                .take(n1.max(n2) as usize)
+                .all(|(b1, b2)| b1 == b2)
+            {
                 Ok(())
+            } else {
+                Err(UnificationFailure)
             }
-            (
-                (variable_address, ReferenceOrValue::Reference(_)),
-                (value_address, ReferenceOrValue::Value(_)),
-            )
-            | (
-                (value_address, ReferenceOrValue::Value(_)),
-                (variable_address, ReferenceOrValue::Reference(_)),
-            ) => {
-                self.memory
-                    .bind_variable_to_value(variable_address, value_address)??;
-                Ok(())
-            }
-            (
-                (a1, ReferenceOrValue::Value(Value::Structure(f1, n1))),
-                (a2, ReferenceOrValue::Value(Value::Structure(f2, n2))),
-            ) => {
-                if f1 == f2 && n1 == n2 {
+        } else {
+            drop(d1);
+            drop(d2);
+            match ((a1, v1), (a2, v2)) {
+                ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {
+                    self.memory.bind_variables(a1, a2)??;
+                    Ok(())
+                }
+                (
+                    (variable_address, ReferenceOrValue::Reference(_)),
+                    (value_address, ReferenceOrValue::Value(_)),
+                )
+                | (
+                    (value_address, ReferenceOrValue::Value(_)),
+                    (variable_address, ReferenceOrValue::Reference(_)),
+                ) => {
+                    self.memory
+                        .bind_variable_to_value(variable_address, value_address)??;
+                    Ok(())
+                }
+                (
+                    (a1, ReferenceOrValue::Value(Value::Structure(f1, n1))),
+                    (a2, ReferenceOrValue::Value(Value::Structure(f2, n2))),
+                ) => {
+                    if f1 == f2 && n1 == n2 {
+                        let mut terms_1 = StructureIterationState::structure_reader(a1);
+                        let mut terms_2 = StructureIterationState::structure_reader(a2);
+                        for _ in 0..n1.0 {
+                            let a1 = terms_1.read_next(&self.memory)?;
+                            let a2 = terms_2.read_next(&self.memory)?;
+                            match self.unify(a1, a2) {
+                                Ok(Ok(())) => (),
+                                Ok(Err(err)) => return Ok(Err(err)),
+                                Err(err) => return Err(err),
+                            }
+                        }
+
+                        Ok(())
+                    } else {
+                        Err(UnificationFailure)
+                    }
+                }
+                (
+                    (a1, ReferenceOrValue::Value(Value::List)),
+                    (a2, ReferenceOrValue::Value(Value::List)),
+                ) => {
                     let mut terms_1 = StructureIterationState::structure_reader(a1);
                     let mut terms_2 = StructureIterationState::structure_reader(a2);
-                    for _ in 0..n1.0 {
+                    for _ in 0..2 {
                         let a1 = terms_1.read_next(&self.memory)?;
                         let a2 = terms_2.read_next(&self.memory)?;
                         match self.unify(a1, a2) {
@@ -1227,40 +1313,21 @@ impl<'m> Machine<'m> {
                     }
 
                     Ok(())
-                } else {
-                    Err(UnificationFailure)
                 }
-            }
-            (
-                (a1, ReferenceOrValue::Value(Value::List)),
-                (a2, ReferenceOrValue::Value(Value::List)),
-            ) => {
-                let mut terms_1 = StructureIterationState::structure_reader(a1);
-                let mut terms_2 = StructureIterationState::structure_reader(a2);
-                for _ in 0..2 {
-                    let a1 = terms_1.read_next(&self.memory)?;
-                    let a2 = terms_2.read_next(&self.memory)?;
-                    match self.unify(a1, a2) {
-                        Ok(Ok(())) => (),
-                        Ok(Err(err)) => return Ok(Err(err)),
-                        Err(err) => return Err(err),
+                (
+                    (_, ReferenceOrValue::Value(Value::Constant(c1))),
+                    (_, ReferenceOrValue::Value(Value::Constant(c2))),
+                ) => {
+                    if c1 == c2 {
+                        Ok(())
+                    } else {
+                        Err(UnificationFailure)
                     }
                 }
 
-                Ok(())
-            }
-            (
-                (_, ReferenceOrValue::Value(Value::Constant(c1))),
-                (_, ReferenceOrValue::Value(Value::Constant(c2))),
-            ) => {
-                if c1 == c2 {
-                    Ok(())
-                } else {
+                ((_, ReferenceOrValue::Value(_)), (_, ReferenceOrValue::Value(_))) => {
                     Err(UnificationFailure)
                 }
-            }
-            ((_, ReferenceOrValue::Value(_)), (_, ReferenceOrValue::Value(_))) => {
-                Err(UnificationFailure)
             }
         })
     }

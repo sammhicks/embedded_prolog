@@ -1,13 +1,69 @@
-use core::{fmt, num::NonZeroU16};
+use core::{convert::TryFrom, fmt, num::NonZeroU16};
 
 use crate::{log_trace, serializable::SerializableWrapper};
 
 use super::basic_types::{
-    Arity, Constant, Functor, IntegerSign, LongInteger, NoneRepresents, OptionDisplay,
-    ProgramCounter, Yn,
+    self, Arity, Constant, Functor, LongInteger, NoneRepresents, OptionDisplay, ProgramCounter, Yn,
 };
 
+mod integer_operations;
 pub mod structure_iteration;
+
+type IntegerSign = core::cmp::Ordering;
+
+enum SpecialFunctor {
+    BinaryOperation {
+        calculate_words_count: fn(TupleAddress, TupleAddress) -> TupleAddress,
+        operation: fn(
+            (
+                integer_operations::UnsignedOutput,
+                integer_operations::SignedInput,
+                integer_operations::SignedInput,
+            ),
+        ) -> IntegerSign,
+    },
+    MinMax {
+        select_first_if: fn(
+            (
+                integer_operations::SignedInput,
+                integer_operations::SignedInput,
+            ),
+        ) -> bool,
+    },
+}
+
+impl TryFrom<StructureValue> for SpecialFunctor {
+    type Error = ExpressionEvaluationError;
+
+    fn try_from(StructureValue(f, n): StructureValue) -> Result<Self, Self::Error> {
+        Ok(match (f, n) {
+            // Addition
+            (Functor(0), Arity(2)) => Self::BinaryOperation {
+                calculate_words_count: |a, b| TupleAddress::max(a, b) + 1,
+                operation: integer_operations::add_signed,
+            },
+            // Subtraction
+            (Functor(1), Arity(2)) => Self::BinaryOperation {
+                calculate_words_count: |a, b| TupleAddress::max(a, b) + 1,
+                operation: integer_operations::sub_signed,
+            },
+            // Multiplication
+            (Functor(2), Arity(2)) => Self::BinaryOperation {
+                calculate_words_count: |a, b| a + b + 1,
+                operation: integer_operations::mul_signed,
+            },
+            // Min
+            (Functor(4), Arity(2)) => Self::MinMax {
+                select_first_if: |(a, b)| a < b,
+            },
+            // Max
+            (Functor(5), Arity(2)) => Self::MinMax {
+                select_first_if: |(a, b)| a > b,
+            },
+            _ => return Err(ExpressionEvaluationError::BadStructure(f, n)),
+        })
+    }
+}
 
 #[derive(Debug)]
 pub enum BadValueType {
@@ -149,6 +205,10 @@ impl TupleAddress {
 
     fn into_view(self) -> TupleAddressView {
         TupleAddressView(self)
+    }
+
+    fn max(Self(lhs): Self, Self(rhs): Self) -> Self {
+        Self(lhs.max(rhs))
     }
 }
 
@@ -565,7 +625,10 @@ impl<'m> TupleMemory<'m> {
     fn load_terms(
         &self,
         terms: Option<core::ops::Range<TupleAddress>>,
-    ) -> Result<impl Iterator<Item = Option<Address>> + '_, TupleMemoryError> {
+    ) -> Result<
+        impl core::iter::FusedIterator + Iterator<Item = Option<Address>> + '_,
+        TupleMemoryError,
+    > {
         Ok(match terms {
             Some(terms) => self.get(terms)?,
             None => &[],
@@ -585,6 +648,45 @@ impl<'m> TupleMemory<'m> {
             usize::from(start)..usize::from(end),
             usize::from(destination),
         );
+    }
+
+    unsafe fn get_integer_input_input(
+        &self,
+        (s1, w1): (IntegerSign, IntegerWordsSlice),
+        (s2, w2): (IntegerSign, IntegerWordsSlice),
+    ) -> (
+        integer_operations::SignedInput,
+        integer_operations::SignedInput,
+    ) {
+        (
+            integer_operations::SignedInput::new(
+                s1,
+                self.get(w1.into_address_range()).unwrap_unchecked(),
+            ),
+            integer_operations::SignedInput::new(
+                s2,
+                self.get(w2.into_address_range()).unwrap_unchecked(),
+            ),
+        )
+    }
+
+    // The caller must ensure that w0 does not overlap with either w1 or w2, and that all ranges are valid
+    unsafe fn get_integer_output_input_input(
+        &mut self,
+        w0: IntegerWordsSlice,
+        w1: (IntegerSign, IntegerWordsSlice),
+        w2: (IntegerSign, IntegerWordsSlice),
+    ) -> (
+        integer_operations::UnsignedOutput,
+        integer_operations::SignedInput,
+        integer_operations::SignedInput,
+    ) {
+        let w0 = integer_operations::UnsignedOutput::new(core::slice::from_raw_parts_mut(
+            self.0.as_mut_ptr().offset(w0.data_start.0 as isize),
+            w0.words_count.0.into(),
+        ));
+        let (w1, w2) = self.get_integer_input_input(w1, w2);
+        (w0, w1, w2)
     }
 }
 
@@ -908,6 +1010,16 @@ impl BaseTuple for ConstantValue {
     type Terms = NoTerms;
 }
 
+struct FillWithZero;
+
+impl BaseTupleInitialData<IntegerWordsSlice> for FillWithZero {
+    fn encode(&self, tuple_memory: &mut [TupleWord]) {
+        for slot in tuple_memory {
+            *slot = 0;
+        }
+    }
+}
+
 struct IntegerWords<'a> {
     words: &'a [u32],
 }
@@ -925,6 +1037,7 @@ impl<'a> BaseTupleInitialData<IntegerWordsSlice> for IntegerWords<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 struct IntegerWordsSlice {
     data_start: TupleAddress,
     words_count: TupleAddress,
@@ -974,6 +1087,24 @@ impl BaseTuple for IntegerValue {
     type Data = IntegerWordsSlice;
     type InitialTerms<'a> = NoTerms;
     type Terms = NoTerms;
+}
+
+#[derive(Debug)]
+#[repr(transparent)]
+struct IntegerEvaluationOutput(IntegerValue);
+
+impl TupleDataInfo for IntegerEvaluationOutput {
+    fn data_size(&self) -> TupleAddress {
+        self.0.data_size()
+    }
+}
+
+impl BaseTuple for IntegerEvaluationOutput {
+    const VALUE_TYPE: ValueType = IntegerValue::VALUE_TYPE;
+    type InitialData<'a> = FillWithZero;
+    type Data = <IntegerValue as BaseTuple>::Data;
+    type InitialTerms<'a> = <IntegerValue as BaseTuple>::InitialTerms<'a>;
+    type Terms = <IntegerValue as BaseTuple>::Terms;
 }
 
 #[derive(Debug)]
@@ -1045,7 +1176,10 @@ pub enum Value {
     Structure(Functor, Arity),
     List,
     Constant(Constant),
-    Integer { sign: IntegerSign, bytes_count: u32 },
+    Integer {
+        sign: basic_types::IntegerSign,
+        bytes_count: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -1074,6 +1208,15 @@ impl<I: Iterator<Item = u8>> Iterator for DataIterator<I> {
         match self {
             Self::NoData => (0, Some(0)),
             Self::Integer(i) => i.size_hint(),
+        }
+    }
+}
+
+impl<I: DoubleEndedIterator + Iterator<Item = u8>> DoubleEndedIterator for DataIterator<I> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::NoData => None,
+            Self::Integer(i) => i.next_back(),
         }
     }
 }
@@ -1230,6 +1373,40 @@ impl From<TupleMemoryError> for CutError {
     }
 }
 
+#[derive(Debug)]
+pub enum ExpressionEvaluationError {
+    UnboundVariable(Address),
+    NotAValidValue(Address, ValueType),
+    BadStructure(Functor, Arity),
+    Memory(MemoryError),
+}
+
+enum ExpressionEvaluationOrOutOfMemory {
+    ExpressionEvaluationError(ExpressionEvaluationError),
+    OutOfMemory(OutOfMemory),
+}
+
+impl From<ExpressionEvaluationError> for ExpressionEvaluationOrOutOfMemory {
+    fn from(inner: ExpressionEvaluationError) -> Self {
+        Self::ExpressionEvaluationError(inner)
+    }
+}
+
+impl From<OutOfMemory> for ExpressionEvaluationOrOutOfMemory {
+    fn from(inner: OutOfMemory) -> Self {
+        Self::OutOfMemory(inner)
+    }
+}
+
+impl<T> From<T> for ExpressionEvaluationOrOutOfMemory
+where
+    MemoryError: From<T>,
+{
+    fn from(inner: T) -> Self {
+        Self::ExpressionEvaluationError(ExpressionEvaluationError::Memory(inner.into()))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ScanningState {
     current_items_to_scan: Address,
@@ -1359,12 +1536,40 @@ impl<'m> Heap<'m> {
         LongInteger { sign, words }: LongInteger<'_>,
     ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
         self.new_value(
-            |_| IntegerValue {
-                sign,
-                words_count: IntegerValue::words_count(words),
+            |_| {
+                if words.iter().copied().all(|word| word == 0) {
+                    IntegerValue {
+                        sign: IntegerSign::Equal,
+                        words_count: TupleAddress(0),
+                    }
+                } else {
+                    IntegerValue {
+                        sign: match sign {
+                            basic_types::IntegerSign::Positive => IntegerSign::Greater,
+                            basic_types::IntegerSign::Negative => IntegerSign::Less,
+                        },
+                        words_count: IntegerValue::words_count(words),
+                    }
+                }
             },
             NoTerms,
             IntegerWords { words },
+        )
+    }
+
+    fn new_integer_output(
+        &mut self,
+        words_count: TupleAddress,
+    ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
+        self.new_value(
+            |_| {
+                IntegerEvaluationOutput(IntegerValue {
+                    sign: IntegerSign::Equal,
+                    words_count,
+                })
+            },
+            NoTerms,
+            FillWithZero,
         )
     }
 
@@ -1392,7 +1597,7 @@ impl<'m> Heap<'m> {
         (
             Address,
             ReferenceOrValue,
-            impl Iterator<Item = u8> + '_,
+            impl DoubleEndedIterator + Iterator<Item = u8> + '_,
             impl Iterator<Item = Option<Address>> + '_,
         ),
         MemoryError,
@@ -1473,6 +1678,13 @@ impl<'m> Heap<'m> {
                             registry_entry.tuple_address,
                         )?;
 
+                    let sign = match sign {
+                        IntegerSign::Greater | IntegerSign::Equal => {
+                            basic_types::IntegerSign::Positive
+                        }
+                        IntegerSign::Less => basic_types::IntegerSign::Negative,
+                    };
+
                     let bytes_count =
                         u32::from(words_count.0) * (core::mem::size_of::<TupleWord>() as u32);
 
@@ -1499,6 +1711,7 @@ impl<'m> Heap<'m> {
                                 ValueType::Structure,
                                 ValueType::List,
                                 ValueType::Constant,
+                                ValueType::Integer,
                             ],
                             actual: registry_entry.value_type.clone(),
                         },
@@ -2077,6 +2290,168 @@ impl<'m> Heap<'m> {
 
     pub fn cut(&mut self, yn: Yn) -> Result<(), CutError> {
         self.do_cut(self.try_load_permanent_variable(yn)?)
+    }
+
+    fn do_evaluate(
+        &mut self,
+        address: Option<Address>,
+    ) -> Result<(Address, IntegerSign, IntegerWordsSlice), ExpressionEvaluationOrOutOfMemory> {
+        let mut address = address.ok_or(MemoryError::NoRegistryEntryAt {
+            address: AddressView(address.into_inner()),
+        })?;
+
+        loop {
+            log_trace!("Looking up memory at {}", address);
+            let registry_entry = self.registry.get(address)?;
+
+            return Ok(match &registry_entry.value_type {
+                ValueType::Reference => {
+                    let (ReferenceValue(reference_address), _) =
+                        ReferenceValue::decode_and_verify_address(
+                            &self.tuple_memory,
+                            address,
+                            registry_entry.tuple_address,
+                        )?;
+
+                    if reference_address == address {
+                        return Err(ExpressionEvaluationError::UnboundVariable(address).into());
+                    }
+
+                    address = reference_address;
+                    continue;
+                }
+                ValueType::Integer => {
+                    let (IntegerValue { sign, .. }, metadata) =
+                        IntegerValue::decode_and_verify_address(
+                            &self.tuple_memory,
+                            address,
+                            registry_entry.tuple_address,
+                        )?;
+
+                    (address, sign, metadata.data)
+                }
+                ValueType::Structure => {
+                    let (structure, metadata) = StructureValue::decode_and_verify_address(
+                        &self.tuple_memory,
+                        address,
+                        registry_entry.tuple_address,
+                    )?;
+
+                    match SpecialFunctor::try_from(structure)? {
+                        SpecialFunctor::BinaryOperation {
+                            calculate_words_count,
+                            operation,
+                        } => {
+                            let mut terms = self
+                                .tuple_memory
+                                .load_terms(metadata.terms.into_address_range())?;
+
+                            let a1 = terms.next().flatten();
+                            let a2 = terms.next().flatten();
+
+                            drop(terms);
+
+                            let (_, s1, w1) = self.do_evaluate(a1)?;
+                            let (_, s2, w2) = self.do_evaluate(a2)?;
+
+                            let w0_words_count =
+                                calculate_words_count(w1.words_count, w2.words_count);
+
+                            let a0 = self.new_integer_output(w0_words_count)??;
+                            let a0_entry = self.registry.get(a0)?;
+                            let (IntegerValue { .. }, a0_metadata) =
+                                IntegerValue::decode_and_verify_address(
+                                    &self.tuple_memory,
+                                    a0,
+                                    a0_entry.tuple_address,
+                                )?;
+
+                            let w0 = a0_metadata.data;
+
+                            // Safety: w0 corresponds to a newly created integer output, so has a unique address
+                            let s0 = unsafe {
+                                operation(self.tuple_memory.get_integer_output_input_input(
+                                    w0,
+                                    (s1, w1),
+                                    (s2, w2),
+                                ))
+                            };
+
+                            IntegerValue {
+                                sign: s0,
+                                words_count: w0_words_count,
+                            }
+                            .encode_head(
+                                a0,
+                                &mut self.tuple_memory,
+                                a0_entry.tuple_address,
+                            )?;
+
+                            (a0, s0, w0)
+                        }
+                        SpecialFunctor::MinMax { select_first_if } => {
+                            let mut terms = self
+                                .tuple_memory
+                                .load_terms(metadata.terms.into_address_range())?;
+
+                            let a1 = terms.next().flatten();
+                            let a2 = terms.next().flatten();
+
+                            drop(terms);
+
+                            let (a1, s1, w1) = self.do_evaluate(a1)?;
+                            let (a2, s2, w2) = self.do_evaluate(a2)?;
+
+                            if select_first_if(unsafe {
+                                self.tuple_memory
+                                    .get_integer_input_input((s1, w1), (s2, w2))
+                            }) {
+                                (a1, s1, w1)
+                            } else {
+                                (a2, s2, w2)
+                            }
+                        }
+                    }
+                }
+                value_type => {
+                    return Err(
+                        ExpressionEvaluationOrOutOfMemory::ExpressionEvaluationError(
+                            ExpressionEvaluationError::NotAValidValue(address, value_type.clone()),
+                        ),
+                    )
+                }
+            });
+        }
+
+        // let (address, value, data, terms) = self.get_value(address)?;
+
+        // let f = match value {
+        //     ReferenceOrValue::Reference(_) => {
+        //         return Err(ExpressionEvaluationError::UnboundVariable(address))
+        //     }
+        //     ReferenceOrValue::Value(Value::Integer {sign,..}) => return Ok(Ok((address, sign, ))),
+        //     ReferenceOrValue::Value(value @ (Value::List | Value::Constant(_))) => {
+        //         return Err(ExpressionEvaluationError::NotAValidValue(address, value))
+        //     }
+        //     ReferenceOrValue::Value(Value::Structure(f, n)) => {
+        //         SpecialFunctorWithArity::try_from((f, n))?
+        //     }
+        // };
+
+        // match (f, n) {
+        //     (SpecialFunctor::Add, _) =>
+        // }
+    }
+
+    pub fn evaluate(
+        &mut self,
+        address: Address,
+    ) -> Result<Result<Address, OutOfMemory>, ExpressionEvaluationError> {
+        match self.do_evaluate(Some(address)) {
+            Ok((address, _, _)) => Ok(Ok(address)),
+            Err(ExpressionEvaluationOrOutOfMemory::ExpressionEvaluationError(err)) => Err(err),
+            Err(ExpressionEvaluationOrOutOfMemory::OutOfMemory(err)) => Ok(Err(err)),
+        }
     }
 
     fn start_garbage_collection(
