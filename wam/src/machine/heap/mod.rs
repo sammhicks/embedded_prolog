@@ -11,6 +11,11 @@ pub mod structure_iteration;
 
 type IntegerSign = core::cmp::Ordering;
 
+enum DivOrMod {
+    Div,
+    Mod,
+}
+
 enum SpecialFunctor {
     BinaryOperation {
         calculate_words_count: fn(TupleAddress, TupleAddress) -> TupleAddress,
@@ -22,6 +27,7 @@ enum SpecialFunctor {
             ),
         ) -> IntegerSign,
     },
+    DivMod(DivOrMod),
     MinMax {
         select_first_if: fn(
             (
@@ -52,12 +58,16 @@ impl TryFrom<StructureValue> for SpecialFunctor {
                 calculate_words_count: |a, b| a + b + 1,
                 operation: integer_operations::mul_signed,
             },
+            // Integer Division
+            (Functor(3 | 4), Arity(2)) => Self::DivMod(DivOrMod::Div),
+            // Integer Modulo
+            (Functor(5), Arity(2)) => Self::DivMod(DivOrMod::Mod),
             // Min
-            (Functor(4), Arity(2)) => Self::MinMax {
+            (Functor(6), Arity(2)) => Self::MinMax {
                 select_first_if: |(a, b)| a < b,
             },
             // Max
-            (Functor(5), Arity(2)) => Self::MinMax {
+            (Functor(7), Arity(2)) => Self::MinMax {
                 select_first_if: |(a, b)| a > b,
             },
             _ => return Err(ExpressionEvaluationError::BadStructure(f, n)),
@@ -687,6 +697,31 @@ impl<'m> TupleMemory<'m> {
         ));
         let (w1, w2) = self.get_integer_input_input(w1, w2);
         (w0, w1, w2)
+    }
+
+    // The caller must ensure that o0 and o1 don't overlap does not overlap with either each other or i1 or i2, and that all ranges are valid
+    unsafe fn get_integer_output_output_input_input(
+        &mut self,
+        o0: IntegerWordsSlice,
+        o1: IntegerWordsSlice,
+        i0: (IntegerSign, IntegerWordsSlice),
+        i1: (IntegerSign, IntegerWordsSlice),
+    ) -> (
+        integer_operations::UnsignedOutput,
+        integer_operations::UnsignedOutput,
+        integer_operations::SignedInput,
+        integer_operations::SignedInput,
+    ) {
+        let o0 = integer_operations::UnsignedOutput::new(core::slice::from_raw_parts_mut(
+            self.0.as_mut_ptr().offset(o0.data_start.0 as isize),
+            o0.words_count.0.into(),
+        ));
+        let o1 = integer_operations::UnsignedOutput::new(core::slice::from_raw_parts_mut(
+            self.0.as_mut_ptr().offset(o1.data_start.0 as isize),
+            o1.words_count.0.into(),
+        ));
+        let (i0, i1) = self.get_integer_input_input(i0, i1);
+        (o0, o1, i0, i1)
     }
 }
 
@@ -2389,6 +2424,72 @@ impl<'m> Heap<'m> {
 
                             (a0, s0, w0)
                         }
+                        SpecialFunctor::DivMod(select) => {
+                            let mut terms = self
+                                .tuple_memory
+                                .load_terms(metadata.terms.into_address_range())?;
+
+                            let a0 = terms.next().flatten();
+                            let a1 = terms.next().flatten();
+
+                            drop(terms);
+
+                            let (_, s0, w0) = self.do_evaluate(a0)?;
+                            let (_, s1, w1) = self.do_evaluate(a1)?;
+
+                            let words_count = w0.words_count;
+
+                            let ad = self.new_integer_output(words_count)??;
+                            let ad_entry = self.registry.get(ad)?;
+                            let (IntegerValue { .. }, ad_metadata) =
+                                IntegerValue::decode_and_verify_address(
+                                    &self.tuple_memory,
+                                    ad,
+                                    ad_entry.tuple_address,
+                                )?;
+
+                            let td = ad_entry.tuple_address;
+                            let wd = ad_metadata.data;
+
+                            let am = self.new_integer_output(words_count)??;
+                            let am_entry = self.registry.get(am)?;
+                            let (IntegerValue { .. }, am_metadata) =
+                                IntegerValue::decode_and_verify_address(
+                                    &self.tuple_memory,
+                                    am,
+                                    am_entry.tuple_address,
+                                )?;
+
+                            let tm = am_entry.tuple_address;
+                            let wm = am_metadata.data;
+
+                            // Safety: wd and wm corresponds to a newly created integer output, so has a unique address
+                            let (sd, sm) = unsafe {
+                                integer_operations::div_mod_signed(
+                                    self.tuple_memory.get_integer_output_output_input_input(
+                                        wd,
+                                        wm,
+                                        (s0, w0),
+                                        (s1, w1),
+                                    ),
+                                )
+                            };
+
+                            for (sign, registry_address, tuple_address) in
+                                [(sd, ad, td), (sm, am, tm)]
+                            {
+                                IntegerValue { sign, words_count }.encode_head(
+                                    registry_address,
+                                    &mut self.tuple_memory,
+                                    tuple_address,
+                                )?;
+                            }
+
+                            match select {
+                                DivOrMod::Div => (ad, sd, wd),
+                                DivOrMod::Mod => (am, sm, wm),
+                            }
+                        }
                         SpecialFunctor::MinMax { select_first_if } => {
                             let mut terms = self
                                 .tuple_memory
@@ -2422,25 +2523,6 @@ impl<'m> Heap<'m> {
                 }
             });
         }
-
-        // let (address, value, data, terms) = self.get_value(address)?;
-
-        // let f = match value {
-        //     ReferenceOrValue::Reference(_) => {
-        //         return Err(ExpressionEvaluationError::UnboundVariable(address))
-        //     }
-        //     ReferenceOrValue::Value(Value::Integer {sign,..}) => return Ok(Ok((address, sign, ))),
-        //     ReferenceOrValue::Value(value @ (Value::List | Value::Constant(_))) => {
-        //         return Err(ExpressionEvaluationError::NotAValidValue(address, value))
-        //     }
-        //     ReferenceOrValue::Value(Value::Structure(f, n)) => {
-        //         SpecialFunctorWithArity::try_from((f, n))?
-        //     }
-        // };
-
-        // match (f, n) {
-        //     (SpecialFunctor::Add, _) =>
-        // }
     }
 
     pub fn evaluate(

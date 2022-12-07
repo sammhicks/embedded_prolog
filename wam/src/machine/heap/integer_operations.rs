@@ -142,6 +142,14 @@ impl<'a> UnsignedOutput<'a> {
         Self { words }
     }
 
+    fn as_ref(&self) -> UnsignedInput {
+        UnsignedInput { words: self.words }
+    }
+
+    fn reborrow(&mut self) -> UnsignedOutput {
+        UnsignedOutput { words: self.words }
+    }
+
     fn words_mut(self) -> impl Iterator<Item = &'a mut Word> {
         self.words.iter_mut()
     }
@@ -255,6 +263,57 @@ pub fn mul_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> S
         } else {
             Ordering::Less
         }
+    }
+}
+
+fn div_mod_unsigned(rd: UnsignedOutput, rm: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) {
+    fn sub_unsigned_assign_unchecked(r0: UnsignedOutput, r1: &UnsignedInput) {
+        r0.words_mut()
+            .zip(r1.infinite_words())
+            .fold(false, |carry, (r0, r1)| {
+                let (value, carry) = borrowing_sub(*r0, r1, carry);
+                *r0 = value;
+                carry
+            });
+    }
+
+    for rd in rd.words.iter_mut() {
+        *rd = 0;
+    }
+
+    for (rm, r1) in rm.words.iter_mut().zip(r1.infinite_words()) {
+        *rm = r1;
+    }
+
+    for i in (0..rm.words.len()).rev() {
+        let mut rm = UnsignedOutput::new(&mut rm.words[i..]);
+
+        while rm.as_ref() >= r2 {
+            sub_unsigned_assign_unchecked(rm.reborrow(), &r2);
+            rd.words[i] += 1;
+        }
+    }
+}
+
+pub fn div_mod_signed(
+    (rd, rm, r1, r2): (UnsignedOutput, UnsignedOutput, SignedInput, SignedInput),
+) -> (Sign, Sign) {
+    let (s1, r1) = r1.split();
+    let (s2, r2) = r2.split();
+
+    if s1.is_eq() || s2.is_eq() {
+        rd.zero();
+        rm.zero();
+        (Sign::Equal, Sign::Equal)
+    } else {
+        div_mod_unsigned(rd, rm, r1, r2);
+        let sd = if s1 == s2 {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        };
+        let sm = s1;
+        (sd, sm)
     }
 }
 
@@ -435,6 +494,60 @@ mod tests {
             let actual = read_signed((sign, words));
 
             assert_eq!(expected, actual, "{r1} * {r2} = {expected}");
+        }
+    }
+
+    #[test]
+    fn unsigned_div_mod() {
+        for _ in 0..1000 {
+            let r1 = u128::from(rand::random::<u64>());
+            let r2 = u128::from(rand::random::<u64>());
+
+            let mut words_div = Words::default();
+            let mut words_mod = Words::default();
+
+            div_mod_unsigned(
+                UnsignedOutput::new(&mut words_div),
+                UnsignedOutput::new(&mut words_mod),
+                UnsignedInput::new(&write_unsigned(r1)),
+                UnsignedInput::new(&write_unsigned(r2)),
+            );
+
+            let expected_div = r1 / r2;
+            let expected_mod = r1 % r2;
+
+            let actual_div = read_unsigned(words_div);
+            let actual_mod = read_unsigned(words_mod);
+
+            assert_eq!(expected_div, actual_div, "{r1} / {r2} = {expected_div}");
+            assert_eq!(expected_mod, actual_mod, "{r1} % {r2} = {expected_mod}");
+        }
+    }
+
+    #[test]
+    fn signed_div_mod() {
+        for _ in 0..1000 {
+            let r1 = i128::from(rand::random::<i64>());
+            let r2 = i128::from(rand::random::<i64>());
+
+            let mut words_div = Words::default();
+            let mut words_mod = Words::default();
+
+            let (sign_div, sign_mod) = div_mod_signed((
+                UnsignedOutput::new(&mut words_div),
+                UnsignedOutput::new(&mut words_mod),
+                borrow_signed(&write_signed(r1)),
+                borrow_signed(&write_signed(r2)),
+            ));
+
+            let expected_div = r1 / r2;
+            let expected_mod = r1 % r2;
+
+            let actual_div = read_signed((sign_div, words_div));
+            let actual_mod = read_signed((sign_mod, words_mod));
+
+            assert_eq!(expected_div, actual_div, "{r1} / {r2} = {expected_div}");
+            assert_eq!(expected_mod, actual_mod, "{r1} % {r2} = {expected_mod}");
         }
     }
 }

@@ -96,6 +96,8 @@ special_functors([
     -,
     *,
     //,
+    div,
+    mod,
     min,
     max,
     clamp
