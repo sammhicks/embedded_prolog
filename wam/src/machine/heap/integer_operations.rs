@@ -3,6 +3,8 @@ use core::cmp::Ordering;
 type Word = u16;
 type DoubleWord = u32;
 
+type WordUsage = u16;
+
 struct SplitDouble {
     lesser: Word,
     greater: Word,
@@ -150,21 +152,30 @@ impl<'a> UnsignedOutput<'a> {
         UnsignedOutput { words: self.words }
     }
 
-    fn words_mut(self) -> impl Iterator<Item = &'a mut Word> {
+    fn usage(&self) -> WordUsage {
+        self.words
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, n)| (*n != 0).then_some((i + 1) as WordUsage))
+            .unwrap_or(0)
+    }
+
+    fn words_mut(&mut self) -> impl Iterator<Item = &mut Word> {
         self.words.iter_mut()
     }
 
-    fn zero(self) -> Sign {
+    fn zero(mut self) -> (Sign, WordUsage) {
         for word in self.words_mut() {
             *word = 0;
         }
 
-        Sign::Equal
+        (Sign::Equal, 0)
     }
 
-    fn copy_from(self, (sign, src): (Sign, UnsignedInput)) -> Sign {
+    fn copy_from(self, (sign, src): (Sign, UnsignedInput)) -> (Sign, WordUsage) {
         self.words[..src.words.len()].copy_from_slice(src.words);
-        sign
+        (sign, self.usage())
     }
 }
 
@@ -180,7 +191,7 @@ fn borrowing_sub(r1: Word, r2: Word, borrow: bool) -> (Word, bool) {
     (c, b || d)
 }
 
-fn add_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) {
+fn add_unsigned(mut r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) -> WordUsage {
     r0.words_mut()
         .zip(r1.infinite_words().zip(r2.infinite_words()))
         .fold(false, |carry, (r0, (r1, r2))| {
@@ -188,27 +199,29 @@ fn add_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) {
             *r0 = value;
             carry
         });
+
+    r0.usage()
 }
 
-pub fn add_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> Sign {
+pub fn add_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> (Sign, WordUsage) {
     match (r1.split(), r2.split()) {
         ((Ordering::Equal, _), r2) => r0.copy_from(r2),
         (r1, (Ordering::Equal, _)) => r0.copy_from(r1),
         ((Ordering::Greater, r1), (Ordering::Greater, r2)) => {
-            add_unsigned(r0, r1, r2);
-            Sign::Greater
+            (Sign::Greater, add_unsigned(r0, r1, r2))
         }
         ((Ordering::Greater, r1), (Ordering::Less, r2)) => sub_unsigned(r0, r1, r2),
         ((Ordering::Less, r1), (Ordering::Greater, r2)) => sub_unsigned(r0, r2, r1),
-        ((Ordering::Less, r1), (Ordering::Less, r2)) => {
-            add_unsigned(r0, r1, r2);
-            Sign::Less
-        }
+        ((Ordering::Less, r1), (Ordering::Less, r2)) => (Sign::Less, add_unsigned(r0, r1, r2)),
     }
 }
 
-fn sub_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) -> Sign {
-    fn sub_unsigned_unchecked(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) {
+fn sub_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) -> (Sign, WordUsage) {
+    fn sub_unsigned_unchecked(
+        mut r0: UnsignedOutput,
+        r1: UnsignedInput,
+        r2: UnsignedInput,
+    ) -> WordUsage {
         r0.words_mut()
             .zip(r1.infinite_words().zip(r2.infinite_words()))
             .fold(false, |carry, (r0, (r1, r2))| {
@@ -216,26 +229,22 @@ fn sub_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) -> Sig
                 *r0 = value;
                 carry
             });
+
+        r0.usage()
     }
 
     match r1.cmp(&r2) {
-        Ordering::Equal => Sign::Equal,
-        Ordering::Less => {
-            sub_unsigned_unchecked(r0, r2, r1);
-            Ordering::Less
-        }
-        Ordering::Greater => {
-            sub_unsigned_unchecked(r0, r1, r2);
-            Ordering::Greater
-        }
+        Ordering::Equal => (Sign::Equal, 0),
+        Ordering::Less => (Ordering::Less, sub_unsigned_unchecked(r0, r2, r1)),
+        Ordering::Greater => (Ordering::Greater, sub_unsigned_unchecked(r0, r1, r2)),
     }
 }
 
-pub fn sub_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> Sign {
+pub fn sub_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> (Sign, WordUsage) {
     add_signed((r0, r1, -r2))
 }
 
-fn mul_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) {
+fn mul_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) -> WordUsage {
     for (i1, r1) in r1.double_words().enumerate() {
         r2.double_words()
             .chain(core::iter::once(0))
@@ -248,26 +257,35 @@ fn mul_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) {
                 greater
             });
     }
+
+    r0.usage()
 }
 
-pub fn mul_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> Sign {
+pub fn mul_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> (Sign, WordUsage) {
     let (s1, r1) = r1.split();
     let (s2, r2) = r2.split();
 
     if s1.is_eq() || s2.is_eq() {
         r0.zero()
     } else {
-        mul_unsigned(r0, r1, r2);
-        if s1 == s2 {
-            Ordering::Greater
-        } else {
-            Ordering::Less
-        }
+        (
+            if s1 == s2 {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            },
+            mul_unsigned(r0, r1, r2),
+        )
     }
 }
 
-fn div_mod_unsigned(rd: UnsignedOutput, rm: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) {
-    fn sub_unsigned_assign_unchecked(r0: UnsignedOutput, r1: &UnsignedInput) {
+fn div_mod_unsigned(
+    rd: UnsignedOutput,
+    rm: UnsignedOutput,
+    r1: UnsignedInput,
+    r2: UnsignedInput,
+) -> (WordUsage, WordUsage) {
+    fn sub_unsigned_assign_unchecked(mut r0: UnsignedOutput, r1: &UnsignedInput) {
         r0.words_mut()
             .zip(r1.infinite_words())
             .fold(false, |carry, (r0, r1)| {
@@ -293,27 +311,27 @@ fn div_mod_unsigned(rd: UnsignedOutput, rm: UnsignedOutput, r1: UnsignedInput, r
             rd.words[i] += 1;
         }
     }
+
+    (rd.usage(), rm.usage())
 }
 
 pub fn div_mod_signed(
     (rd, rm, r1, r2): (UnsignedOutput, UnsignedOutput, SignedInput, SignedInput),
-) -> (Sign, Sign) {
+) -> ((Sign, WordUsage), (Sign, WordUsage)) {
     let (s1, r1) = r1.split();
     let (s2, r2) = r2.split();
 
     if s1.is_eq() || s2.is_eq() {
-        rd.zero();
-        rm.zero();
-        (Sign::Equal, Sign::Equal)
+        (rd.zero(), rm.zero())
     } else {
-        div_mod_unsigned(rd, rm, r1, r2);
+        let (ud, um) = div_mod_unsigned(rd, rm, r1, r2);
         let sd = if s1 == s2 {
             Ordering::Greater
         } else {
             Ordering::Less
         };
         let sm = s1;
-        (sd, sm)
+        ((sd, ud), (sm, um))
     }
 }
 
@@ -331,12 +349,18 @@ mod tests {
         SignedInput::new(*sign, words)
     }
 
-    fn read_unsigned(words: Words) -> u128 {
+    fn read_unsigned(words: Words, usage: WordUsage) -> u128 {
         let mut buffer = [0_u8; 16];
 
         buffer
             .iter_mut()
-            .zip(words.iter().copied().flat_map(Word::to_le_bytes))
+            .zip(
+                words
+                    .iter()
+                    .take(usize::from(usage))
+                    .copied()
+                    .flat_map(Word::to_le_bytes),
+            )
             .for_each(write);
 
         u128::from_le_bytes(buffer)
@@ -357,8 +381,8 @@ mod tests {
         words
     }
 
-    fn read_signed((sign, words): (Sign, Words)) -> i128 {
-        let n = read_unsigned(words) as i128;
+    fn read_signed(((sign, usage), words): ((Sign, WordUsage), Words)) -> i128 {
+        let n = read_unsigned(words, usage) as i128;
 
         if let Sign::Less = sign {
             -n
@@ -379,14 +403,14 @@ mod tests {
 
             let mut words = Words::default();
 
-            add_unsigned(
+            let usage = add_unsigned(
                 UnsignedOutput::new(&mut words),
                 UnsignedInput::new(&write_unsigned(r1)),
                 UnsignedInput::new(&write_unsigned(r2)),
             );
 
             let expected = r1 + r2;
-            let actual = read_unsigned(words);
+            let actual = read_unsigned(words, usage);
 
             assert_eq!(expected, actual, "{r1} + {r2} = {expected}");
         }
@@ -463,14 +487,14 @@ mod tests {
 
             let mut words = Words::default();
 
-            mul_unsigned(
+            let usage = mul_unsigned(
                 UnsignedOutput::new(&mut words),
                 UnsignedInput::new(&write_unsigned(r1)),
                 UnsignedInput::new(&write_unsigned(r2)),
             );
 
             let expected = r1 * r2;
-            let actual = read_unsigned(words);
+            let actual = read_unsigned(words, usage);
 
             assert_eq!(expected, actual, "{r1} * {r2} = {expected}");
         }
@@ -506,7 +530,7 @@ mod tests {
             let mut words_div = Words::default();
             let mut words_mod = Words::default();
 
-            div_mod_unsigned(
+            let (usage_div, usage_mod) = div_mod_unsigned(
                 UnsignedOutput::new(&mut words_div),
                 UnsignedOutput::new(&mut words_mod),
                 UnsignedInput::new(&write_unsigned(r1)),
@@ -516,8 +540,8 @@ mod tests {
             let expected_div = r1 / r2;
             let expected_mod = r1 % r2;
 
-            let actual_div = read_unsigned(words_div);
-            let actual_mod = read_unsigned(words_mod);
+            let actual_div = read_unsigned(words_div, usage_div);
+            let actual_mod = read_unsigned(words_mod, usage_mod);
 
             assert_eq!(expected_div, actual_div, "{r1} / {r2} = {expected_div}");
             assert_eq!(expected_mod, actual_mod, "{r1} % {r2} = {expected_mod}");
