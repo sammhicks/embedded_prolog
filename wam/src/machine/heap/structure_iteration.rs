@@ -109,7 +109,7 @@ impl State {
         let inner_state = self.0.as_mut().ok_or(Error::NotActive)?;
 
         let super::TermsSlice {
-            first_term,
+            terms_start: first_term,
             terms_count,
         } = heap.structure_term_addresses(inner_state.address)?;
 

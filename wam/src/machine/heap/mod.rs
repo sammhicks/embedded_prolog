@@ -9,8 +9,35 @@ use super::basic_types::{
 mod integer_operations;
 pub mod structure_iteration;
 
+use structure_iteration::State as StructureIterationState;
+
 type IntegerSign = core::cmp::Ordering;
 type IntegerWordUsage = u16;
+
+pub enum UnificationError {
+    UnificationFailure,
+    OutOfMemory(OutOfMemory),
+    MemoryError(MemoryError),
+    StructureIteration(structure_iteration::Error),
+}
+
+impl From<OutOfMemory> for UnificationError {
+    fn from(inner: OutOfMemory) -> Self {
+        Self::OutOfMemory(inner)
+    }
+}
+
+impl From<MemoryError> for UnificationError {
+    fn from(inner: MemoryError) -> Self {
+        Self::MemoryError(inner)
+    }
+}
+
+impl From<structure_iteration::Error> for UnificationError {
+    fn from(inner: structure_iteration::Error) -> Self {
+        Self::StructureIteration(inner)
+    }
+}
 
 trait NeqAssign {
     fn neq_assign(&mut self, new: Self, message: &str) -> bool;
@@ -698,10 +725,18 @@ impl<'m> TupleMemory<'m> {
         )
     }
 
+    // The caller must ensure that the data doesn't overlap with any other data
+    unsafe fn get_integer_output(
+        &mut self,
+        output: IntegerEvaluationOutputData,
+    ) -> integer_operations::UnsignedOutput {
+        integer_operations::UnsignedOutput::new(self.0.as_mut_ptr(), output)
+    }
+
     // The caller must ensure that w0 does not overlap with either w1 or w2, and that all ranges are valid
     unsafe fn get_integer_output_input_input(
         &mut self,
-        w0: IntegerWordsSlice,
+        w0: IntegerEvaluationOutputData,
         w1: (IntegerSign, IntegerWordsSlice),
         w2: (IntegerSign, IntegerWordsSlice),
     ) -> (
@@ -709,10 +744,7 @@ impl<'m> TupleMemory<'m> {
         integer_operations::SignedInput,
         integer_operations::SignedInput,
     ) {
-        let w0 = integer_operations::UnsignedOutput::new(core::slice::from_raw_parts_mut(
-            self.0.as_mut_ptr().offset(w0.data_start.0 as isize),
-            w0.words_count.0.into(),
-        ));
+        let w0 = integer_operations::UnsignedOutput::new(self.0.as_mut_ptr(), w0);
         let (w1, w2) = self.get_integer_input_input(w1, w2);
         (w0, w1, w2)
     }
@@ -720,8 +752,8 @@ impl<'m> TupleMemory<'m> {
     // The caller must ensure that o0 and o1 don't overlap does not overlap with either each other or i1 or i2, and that all ranges are valid
     unsafe fn get_integer_output_output_input_input(
         &mut self,
-        o0: IntegerWordsSlice,
-        o1: IntegerWordsSlice,
+        o0: IntegerEvaluationOutputData,
+        o1: IntegerEvaluationOutputData,
         i0: (IntegerSign, IntegerWordsSlice),
         i1: (IntegerSign, IntegerWordsSlice),
     ) -> (
@@ -730,14 +762,8 @@ impl<'m> TupleMemory<'m> {
         integer_operations::SignedInput,
         integer_operations::SignedInput,
     ) {
-        let o0 = integer_operations::UnsignedOutput::new(core::slice::from_raw_parts_mut(
-            self.0.as_mut_ptr().offset(o0.data_start.0 as isize),
-            o0.words_count.0.into(),
-        ));
-        let o1 = integer_operations::UnsignedOutput::new(core::slice::from_raw_parts_mut(
-            self.0.as_mut_ptr().offset(o1.data_start.0 as isize),
-            o1.words_count.0.into(),
-        ));
+        let o0 = integer_operations::UnsignedOutput::new(self.0.as_mut_ptr(), o0);
+        let o1 = integer_operations::UnsignedOutput::new(self.0.as_mut_ptr(), o1);
         let (i0, i1) = self.get_integer_input_input(i0, i1);
         (o0, o1, i0, i1)
     }
@@ -760,17 +786,17 @@ impl BaseTupleInitialData<NoData> for NoData {
 }
 
 trait BaseTupleData {
-    fn from_range<T: Tuple<Data = Self>>(tuple: &T, data_start: TupleAddress) -> Self;
+    fn from_range(data_start: TupleAddress, data_usage: TupleAddress) -> Self;
 }
 
 impl BaseTupleData for NoData {
-    fn from_range<T: Tuple<Data = Self>>(_: &T, _: TupleAddress) -> Self {
+    fn from_range(_data_start: TupleAddress, _data_usage: TupleAddress) -> Self {
         Self
     }
 }
 
 struct TermsSlice {
-    first_term: TupleAddress,
+    terms_start: TupleAddress,
     terms_count: Arity,
 }
 
@@ -806,12 +832,12 @@ impl<'a> BaseTupleInitialTerms<TermsSlice> for &'a [Option<Address>] {
 }
 
 trait BaseTupleTerms {
-    fn from_range<T: Tuple<Terms = Self>>(tuple: &T, first_term: TupleAddress) -> Self;
+    fn from_range(terms_start: TupleAddress, terms_count: Arity) -> Self;
     fn into_address_range(self) -> Option<core::ops::Range<TupleAddress>>;
 }
 
 impl BaseTupleTerms for NoTerms {
-    fn from_range<T: Tuple<Terms = Self>>(_: &T, _: TupleAddress) -> Self {
+    fn from_range(_terms_start: TupleAddress, _terms_count: Arity) -> Self {
         Self
     }
 
@@ -821,16 +847,16 @@ impl BaseTupleTerms for NoTerms {
 }
 
 impl BaseTupleTerms for TermsSlice {
-    fn from_range<T: Tuple<Terms = Self>>(tuple: &T, first_term: TupleAddress) -> Self {
+    fn from_range(terms_start: TupleAddress, terms_count: Arity) -> Self {
         Self {
-            first_term,
-            terms_count: tuple.terms_count(),
+            terms_start,
+            terms_count,
         }
     }
 
     fn into_address_range(self) -> Option<core::ops::Range<TupleAddress>> {
         let TermsSlice {
-            first_term,
+            terms_start: first_term,
             terms_count,
         } = self;
         Some(core::ops::Range {
@@ -986,6 +1012,19 @@ struct TupleMetadata<T: Tuple> {
     next_tuple: TupleAddress,
 }
 
+struct TupleLayout<T: Tuple> {
+    registry_address: Address,
+    tuple_address: TupleAddress,
+    data: T::Data,
+    next_tuple: TupleAddress,
+}
+
+impl<T: Tuple> TupleLayout<T> {
+    fn registry_address(self) -> Address {
+        self.registry_address
+    }
+}
+
 trait TupleNextFreeSpaceInfo {
     fn next_free_space(&self, head_end: TupleAddress) -> TupleAddress;
 }
@@ -1004,7 +1043,7 @@ struct TupleEndInfo {
     next_tuple: TupleAddress,
 }
 
-trait Tuple: BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNextFreeSpaceInfo {
+trait Tuple: fmt::Debug + BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNextFreeSpaceInfo {
     fn decode(
         tuple_memory: &TupleMemory,
         tuple_address: TupleAddress,
@@ -1018,14 +1057,16 @@ trait Tuple: BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNextFreeSpaceInfo
         ) = AddressWithTuple::<Self>::decode(tuple_memory, tuple_address)?;
 
         let data_size = tuple.data_size();
+        let data_usage = tuple.data_usage();
         let data_start = head_end;
         let data_end = data_start + data_size;
-        let data = <Self::Data>::from_range(&tuple, data_start);
+        let data = <Self::Data>::from_range(data_start, data_usage);
 
         let terms_size = tuple.terms_size();
+        let terms_count = tuple.terms_count();
         let terms_start = data_end;
         let terms_end = terms_start + terms_size;
-        let terms = <Self::Terms>::from_range(&tuple, terms_start);
+        let terms = <Self::Terms>::from_range(terms_start, terms_count);
 
         let next_free_space = tuple.next_free_space(head_end);
         let next_tuple = terms_end;
@@ -1062,19 +1103,48 @@ trait Tuple: BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNextFreeSpaceInfo
         tuple_address: TupleAddress,
         terms: Self::InitialTerms<'_>,
         data: Self::InitialData<'_>,
-    ) -> Result<TupleAddress, TupleMemoryError> {
+    ) -> Result<TupleLayout<Self>, TupleMemoryError> {
+        let data_size = self.data_size();
+        let data_usage = self.data_usage();
         let terms_count = self.terms_count();
         let terms_size = self.terms_size();
-        let data_size = self.data_size();
 
-        let terms_start = self.encode_head(registry_address, tuple_memory, tuple_address)?;
-        let terms_end = terms_start + terms_count;
-        terms.encode(tuple_memory.get_mut(terms_start..terms_end)?);
+        let head_end = self.encode_head(registry_address, tuple_memory, tuple_address)?;
 
-        let data_start = terms_start + terms_size;
+        let data_start = head_end;
         let data_end = data_start + data_size;
-        data.encode(tuple_memory.get_mut(data_start..data_end)?);
-        Ok(data_end)
+        data.encode(tuple_memory.get_mut(data_start..(data_start + data_usage))?);
+
+        let terms_start = data_end;
+        let terms_end = terms_start + terms_size;
+        terms.encode(tuple_memory.get_mut(terms_start..(terms_start + terms_count))?);
+
+        let next_tuple = terms_end;
+
+        Ok(TupleLayout {
+            registry_address,
+            tuple_address,
+            data: <Self::Data>::from_range(data_start, data_usage),
+            next_tuple,
+        })
+    }
+
+    fn decode_and_verify_address(
+        tuple_memory: &TupleMemory,
+        address: Address,
+        tuple_address: TupleAddress,
+    ) -> Result<(Self, TupleMetadata<Self>), MemoryError> {
+        let (tuple, metadata) = Self::decode(tuple_memory, tuple_address)?;
+
+        if address == metadata.registry_address {
+            Ok((tuple, metadata))
+        } else {
+            Err(MemoryError::TupleDoesNotReferToRegistryAddress {
+                registry_address: address,
+                tuple_address: tuple_address.into_view(),
+                tuple_registry_address: metadata.registry_address,
+            })
+        }
     }
 
     fn decode_and_trim(
@@ -1105,7 +1175,10 @@ trait Tuple: BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNextFreeSpaceInfo
     }
 }
 
-impl<T: BaseTuple + TupleTermsInfo + TupleDataInfo + TupleNextFreeSpaceInfo> Tuple for T {}
+impl<T: fmt::Debug + BaseTuple + TupleTermsInfo + TupleDataInfo + TupleNextFreeSpaceInfo> Tuple
+    for T
+{
+}
 
 #[derive(Debug)]
 struct ReferenceValue(Address);
@@ -1164,16 +1237,6 @@ impl BaseTuple for ConstantValue {
     type Terms = NoTerms;
 }
 
-struct FillWithZero;
-
-impl BaseTupleInitialData<IntegerWordsSlice> for FillWithZero {
-    fn encode(&self, tuple_memory: &mut [TupleWord]) {
-        for slot in tuple_memory {
-            *slot = 0;
-        }
-    }
-}
-
 struct IntegerWords<'a> {
     words: &'a [u32],
 }
@@ -1198,10 +1261,10 @@ struct IntegerWordsSlice {
 }
 
 impl BaseTupleData for IntegerWordsSlice {
-    fn from_range<T: Tuple<Data = Self>>(tuple: &T, data_start: TupleAddress) -> Self {
+    fn from_range(data_start: TupleAddress, data_usage: TupleAddress) -> Self {
         Self {
             data_start,
-            words_count: tuple.data_usage(),
+            words_count: data_usage,
         }
     }
 }
@@ -1253,6 +1316,55 @@ impl BaseTuple for IntegerValue {
     type Terms = NoTerms;
 }
 
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct IntegerEvaluationOutputData(IntegerWordsSlice);
+
+impl BaseTupleData for IntegerEvaluationOutputData {
+    fn from_range(data_start: TupleAddress, data_usage: TupleAddress) -> Self {
+        Self(IntegerWordsSlice::from_range(data_start, data_usage))
+    }
+}
+
+impl NonEmptyData for IntegerEvaluationOutputData {}
+
+struct FillWithZero;
+
+impl BaseTupleInitialData<IntegerEvaluationOutputData> for FillWithZero {
+    fn encode(&self, tuple_memory: &mut [TupleWord]) {
+        for slot in tuple_memory {
+            *slot = 0;
+        }
+    }
+}
+
+pub struct IntegerEvaluationOutputLayout {
+    registry_address: Address,
+    tuple_address: TupleAddress,
+    data: IntegerEvaluationOutputData,
+}
+
+impl IntegerEvaluationOutputLayout {
+    fn new(
+        TupleLayout {
+            registry_address,
+            tuple_address,
+            data,
+            ..
+        }: TupleLayout<IntegerEvaluationOutput>,
+    ) -> Self {
+        Self {
+            registry_address,
+            tuple_address,
+            data,
+        }
+    }
+
+    pub fn registry_address(&self) -> Address {
+        self.registry_address
+    }
+}
+
 #[derive(Debug)]
 #[repr(transparent)]
 struct IntegerEvaluationOutput(IntegerValue);
@@ -1274,7 +1386,7 @@ impl TupleDataInfo for IntegerEvaluationOutput {
 impl BaseTuple for IntegerEvaluationOutput {
     const VALUE_TYPE: ValueType = IntegerValue::VALUE_TYPE;
     type InitialData<'a> = FillWithZero;
-    type Data = <IntegerValue as BaseTuple>::Data;
+    type Data = IntegerEvaluationOutputData;
     type InitialTerms<'a> = <IntegerValue as BaseTuple>::InitialTerms<'a>;
     type Terms = <IntegerValue as BaseTuple>::Terms;
 }
@@ -1289,7 +1401,7 @@ struct Environment {
 
 impl TupleTermsInfo for Environment {
     fn terms_count(&self) -> Arity {
-        self.number_of_permanent_variables
+        self.number_of_active_permanent_variables
     }
 
     fn terms_size(&self) -> Arity {
@@ -1467,28 +1579,6 @@ impl From<TupleMemoryError> for MemoryError {
     }
 }
 
-trait DecodeAndVerify: Tuple {
-    fn decode_and_verify_address(
-        tuple_memory: &TupleMemory,
-        address: Address,
-        tuple_address: TupleAddress,
-    ) -> Result<(Self, TupleMetadata<Self>), MemoryError> {
-        let (tuple, metadata) = Self::decode(tuple_memory, tuple_address)?;
-
-        if address == metadata.registry_address {
-            Ok((tuple, metadata))
-        } else {
-            Err(MemoryError::TupleDoesNotReferToRegistryAddress {
-                registry_address: address,
-                tuple_address: tuple_address.into_view(),
-                tuple_registry_address: metadata.registry_address,
-            })
-        }
-    }
-}
-
-impl<T: Tuple> DecodeAndVerify for T {}
-
 #[derive(Debug)]
 pub enum PermanentVariableError {
     IndexOutOfRange {
@@ -1652,12 +1742,13 @@ impl<'m> Heap<'m> {
         }
     }
 
-    fn new_value<T: Tuple + core::fmt::Debug>(
+    fn new_value<T: Tuple + core::fmt::Debug, D>(
         &mut self,
         factory: impl FnOnce(Address) -> T,
         terms: T::InitialTerms<'_>,
         data: T::InitialData<'_>,
-    ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
+        required_info: fn(TupleLayout<T>) -> D,
+    ) -> Result<Result<D, OutOfMemory>, MemoryError> {
         let Some((address, registry_entry)) = self.registry.new_registry_entry() else {
             return Ok(Err(OutOfMemory::OutOfRegistryEntries));
         };
@@ -1668,11 +1759,11 @@ impl<'m> Heap<'m> {
 
         log_trace!("New value at {}: {:?}", tuple_address, value);
 
-        let Ok(memory_end) = value.encode(address, &mut self.tuple_memory, tuple_address, terms, data) else {
+        let Ok(tuple_layout) = value.encode(address, &mut self.tuple_memory, tuple_address, terms, data) else {
             return Ok(Err(OutOfMemory::OutOfTupleSpace));
         };
 
-        self.tuple_memory_end = memory_end;
+        self.tuple_memory_end = tuple_layout.next_tuple;
 
         log_trace!("h = {}", self.tuple_memory_end);
 
@@ -1684,11 +1775,16 @@ impl<'m> Heap<'m> {
 
         self.mark_moved_value(Some(address))?;
 
-        Ok(Ok(address))
+        Ok(Ok(required_info(tuple_layout)))
     }
 
     pub fn new_variable(&mut self) -> Result<Result<Address, OutOfMemory>, MemoryError> {
-        self.new_value(ReferenceValue, NoTerms, NoData)
+        self.new_value(
+            ReferenceValue,
+            NoTerms,
+            NoData,
+            TupleLayout::registry_address,
+        )
     }
 
     pub fn new_structure(
@@ -1696,18 +1792,33 @@ impl<'m> Heap<'m> {
         f: Functor,
         n: Arity,
     ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
-        self.new_value(|_| StructureValue(f, n), FillWithNone, NoData)
+        self.new_value(
+            |_| StructureValue(f, n),
+            FillWithNone,
+            NoData,
+            TupleLayout::registry_address,
+        )
     }
 
     pub fn new_list(&mut self) -> Result<Result<Address, OutOfMemory>, MemoryError> {
-        self.new_value(|_| ListValue, FillWithNone, NoData)
+        self.new_value(
+            |_| ListValue,
+            FillWithNone,
+            NoData,
+            TupleLayout::registry_address,
+        )
     }
 
     pub fn new_constant(
         &mut self,
         c: Constant,
     ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
-        self.new_value(|_| ConstantValue(c), NoTerms, NoData)
+        self.new_value(
+            |_| ConstantValue(c),
+            NoTerms,
+            NoData,
+            TupleLayout::registry_address,
+        )
     }
 
     pub fn new_integer(
@@ -1736,13 +1847,14 @@ impl<'m> Heap<'m> {
             },
             NoTerms,
             IntegerWords { words },
+            TupleLayout::registry_address,
         )
     }
 
     fn new_integer_output(
         &mut self,
         words_count: TupleAddress,
-    ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
+    ) -> Result<Result<IntegerEvaluationOutputLayout, OutOfMemory>, MemoryError> {
         self.new_value(
             |_| {
                 IntegerEvaluationOutput(IntegerValue {
@@ -1753,7 +1865,20 @@ impl<'m> Heap<'m> {
             },
             NoTerms,
             FillWithZero,
+            IntegerEvaluationOutputLayout::new,
         )
+    }
+
+    pub fn new_system_call_integer_output(
+        &mut self,
+    ) -> Result<Result<IntegerEvaluationOutputLayout, OutOfMemory>, MemoryError> {
+        let bytes_count = core::mem::size_of::<u128>();
+        let word_size = core::mem::size_of::<TupleWord>();
+        let words_count = TupleAddress(
+            (bytes_count / word_size) as u16 + u16::from((bytes_count % word_size) > 0),
+        );
+
+        self.new_integer_output(words_count)
     }
 
     pub fn get_maybe_value(
@@ -1973,7 +2098,7 @@ impl<'m> Heap<'m> {
             });
         }
 
-        Ok(metadata.terms.first_term + yn)
+        Ok(metadata.terms.terms_start + yn)
     }
 
     fn try_load_permanent_variable(
@@ -2093,6 +2218,106 @@ impl<'m> Heap<'m> {
         }
     }
 
+    pub fn unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationError> {
+        log_trace!("Unifying {} and {}", a1, a2);
+        let (a1, v1, d1, _) = self.get_value(a1)?;
+        let (a2, v2, d2, _) = self.get_value(a2)?;
+        log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
+
+        if a1 == a2 {
+            Ok(())
+        } else if let (
+            &ReferenceOrValue::Value(Value::Integer {
+                sign: s1,
+                bytes_count: n1,
+            }),
+            &ReferenceOrValue::Value(Value::Integer {
+                sign: s2,
+                bytes_count: n2,
+            }),
+        ) = (&v1, &v2)
+        {
+            if s1 == s2
+                && core::iter::zip(
+                    d1.rev().chain(core::iter::repeat(0)),
+                    d2.rev().chain(core::iter::repeat(0)),
+                )
+                .take(n1.max(n2) as usize)
+                .all(|(b1, b2)| b1 == b2)
+            {
+                Ok(())
+            } else {
+                Err(UnificationError::UnificationFailure)
+            }
+        } else {
+            drop(d1);
+            drop(d2);
+            match ((a1, v1), (a2, v2)) {
+                ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {
+                    self.bind_variables(a1, a2)??;
+                    Ok(())
+                }
+                (
+                    (variable_address, ReferenceOrValue::Reference(_)),
+                    (value_address, ReferenceOrValue::Value(_)),
+                )
+                | (
+                    (value_address, ReferenceOrValue::Value(_)),
+                    (variable_address, ReferenceOrValue::Reference(_)),
+                ) => {
+                    self.bind_variable_to_value(variable_address, value_address)??;
+                    Ok(())
+                }
+                (
+                    (a1, ReferenceOrValue::Value(Value::Structure(f1, n1))),
+                    (a2, ReferenceOrValue::Value(Value::Structure(f2, n2))),
+                ) => {
+                    if f1 == f2 && n1 == n2 {
+                        let mut terms_1 = StructureIterationState::structure_reader(a1);
+                        let mut terms_2 = StructureIterationState::structure_reader(a2);
+                        for _ in 0..n1.0 {
+                            let a1 = terms_1.read_next(self)?;
+                            let a2 = terms_2.read_next(self)?;
+                            self.unify(a1, a2)?
+                        }
+
+                        Ok(())
+                    } else {
+                        Err(UnificationError::UnificationFailure)
+                    }
+                }
+                (
+                    (a1, ReferenceOrValue::Value(Value::List)),
+                    (a2, ReferenceOrValue::Value(Value::List)),
+                ) => {
+                    let mut terms_1 = StructureIterationState::structure_reader(a1);
+                    let mut terms_2 = StructureIterationState::structure_reader(a2);
+                    for _ in 0..2 {
+                        let a1 = terms_1.read_next(self)?;
+                        let a2 = terms_2.read_next(self)?;
+                        self.unify(a1, a2)?
+                    }
+
+                    Ok(())
+                }
+                (
+                    (_, ReferenceOrValue::Value(Value::Constant(c1))),
+                    (_, ReferenceOrValue::Value(Value::Constant(c2))),
+                ) => {
+                    if c1 == c2 {
+                        Ok(())
+                    } else {
+                        Err(UnificationError::UnificationFailure)
+                    }
+                }
+
+                ((_, ReferenceOrValue::Value(_)), (_, ReferenceOrValue::Value(_))) => {
+                    Err(UnificationError::UnificationFailure)
+                }
+            }
+        }
+    }
+
     pub fn allocate(
         &mut self,
         number_of_permanent_variables: Arity,
@@ -2117,6 +2342,7 @@ impl<'m> Heap<'m> {
                 },
                 saved_registers,
                 NoData,
+                TupleLayout::registry_address,
             )?
             .map(|new_environment| {
                 self.current_environment = Some(new_environment);
@@ -2213,6 +2439,7 @@ impl<'m> Heap<'m> {
                 },
                 saved_registers,
                 NoData,
+                TupleLayout::registry_address,
             )?
             .map(|new_choice_point| {
                 self.latest_choice_point = Some(new_choice_point);
@@ -2261,7 +2488,7 @@ impl<'m> Heap<'m> {
         for (register, value_address) in registers.iter_mut().zip(
             metadata
                 .terms
-                .first_term
+                .terms_start
                 .iter(choice_point.number_of_saved_registers),
         ) {
             let address = Address::from_word(self.tuple_memory.load(value_address)?);
@@ -2347,6 +2574,7 @@ impl<'m> Heap<'m> {
                 },
                 NoTerms,
                 NoData,
+                TupleLayout::registry_address,
             )?
             .map(|new_trail_item| {
                 self.trail_top = Some(new_trail_item);
@@ -2539,21 +2767,12 @@ impl<'m> Heap<'m> {
                             let w0_words_count =
                                 calculate_words_count(w1.words_count, w2.words_count);
 
-                            let a0 = self.new_integer_output(w0_words_count)??;
-                            let a0_entry = self.registry.get(a0)?;
-                            let (IntegerValue { .. }, a0_metadata) =
-                                IntegerValue::decode_and_verify_address(
-                                    &self.tuple_memory,
-                                    a0,
-                                    a0_entry.tuple_address,
-                                )?;
-
-                            let w0 = a0_metadata.data;
+                            let o0 = self.new_integer_output(w0_words_count)??;
 
                             // Safety: w0 corresponds to a newly created integer output, so has a unique address
                             let (s0, w0_words_usage) = unsafe {
                                 operation(self.tuple_memory.get_integer_output_input_input(
-                                    w0,
+                                    o0.data,
                                     (s1, w1),
                                     (s2, w2),
                                 ))
@@ -2565,12 +2784,12 @@ impl<'m> Heap<'m> {
                                 words_usage: TupleAddress(w0_words_usage),
                             }
                             .encode_head(
-                                a0,
+                                o0.registry_address,
                                 &mut self.tuple_memory,
-                                a0_entry.tuple_address,
+                                o0.tuple_address,
                             )?;
 
-                            (a0, s0, w0)
+                            (o0.registry_address, s0, o0.data.0)
                         }
                         SpecialFunctor::DivMod(select) => {
                             let mut terms = self
@@ -2587,36 +2806,15 @@ impl<'m> Heap<'m> {
 
                             let words_count = w0.words_count;
 
-                            let ad = self.new_integer_output(words_count)??;
-                            let ad_entry = self.registry.get(ad)?;
-                            let (IntegerValue { .. }, ad_metadata) =
-                                IntegerValue::decode_and_verify_address(
-                                    &self.tuple_memory,
-                                    ad,
-                                    ad_entry.tuple_address,
-                                )?;
-
-                            let td = ad_entry.tuple_address;
-                            let wd = ad_metadata.data;
-
-                            let am = self.new_integer_output(words_count)??;
-                            let am_entry = self.registry.get(am)?;
-                            let (IntegerValue { .. }, am_metadata) =
-                                IntegerValue::decode_and_verify_address(
-                                    &self.tuple_memory,
-                                    am,
-                                    am_entry.tuple_address,
-                                )?;
-
-                            let tm = am_entry.tuple_address;
-                            let wm = am_metadata.data;
+                            let od = self.new_integer_output(words_count)??;
+                            let om = self.new_integer_output(words_count)??;
 
                             // Safety: wd and wm corresponds to a newly created integer output, so has a unique address
                             let ((sd, ud), (sm, um)) = unsafe {
                                 integer_operations::div_mod_signed(
                                     self.tuple_memory.get_integer_output_output_input_input(
-                                        wd,
-                                        wm,
+                                        od.data,
+                                        om.data,
                                         (s0, w0),
                                         (s1, w1),
                                     ),
@@ -2624,8 +2822,8 @@ impl<'m> Heap<'m> {
                             };
 
                             for (sign, words_usage, registry_address, tuple_address) in [
-                                (sd, TupleAddress(ud), ad, td),
-                                (sm, TupleAddress(um), am, tm),
+                                (sd, TupleAddress(ud), od.registry_address, od.tuple_address),
+                                (sm, TupleAddress(um), om.registry_address, om.tuple_address),
                             ] {
                                 IntegerValue {
                                     sign,
@@ -2640,8 +2838,8 @@ impl<'m> Heap<'m> {
                             }
 
                             match select {
-                                DivOrMod::Div => (ad, sd, wd),
-                                DivOrMod::Mod => (am, sm, wm),
+                                DivOrMod::Div => (od.registry_address, sd, od.data.0),
+                                DivOrMod::Mod => (om.registry_address, sm, om.data.0),
                             }
                         }
                         SpecialFunctor::MinMax { select_first_if } => {
@@ -2688,6 +2886,50 @@ impl<'m> Heap<'m> {
             Err(ExpressionEvaluationOrOutOfMemory::ExpressionEvaluationError(err)) => Err(err),
             Err(ExpressionEvaluationOrOutOfMemory::OutOfMemory(err)) => Ok(Err(err)),
         }
+    }
+
+    pub fn write_system_call_integer(
+        &mut self,
+        integer: IntegerEvaluationOutputLayout,
+        sign: IntegerSign,
+        le_bytes: &[u8],
+    ) -> Result<(), MemoryError> {
+        fn write<T>((dest, src): (&mut T, T)) {
+            *dest = src;
+        }
+
+        let mut unsigned_output = unsafe { self.tuple_memory.get_integer_output(integer.data) };
+
+        let mut le_bytes = le_bytes.iter().copied();
+
+        let mut infinite_le_bytes = le_bytes.by_ref().chain(core::iter::repeat(0));
+
+        unsigned_output
+            .words_mut()
+            .zip(core::iter::from_fn(|| {
+                let mut buffer = [0_u8; core::mem::size_of::<TupleWord>()];
+                buffer
+                    .iter_mut()
+                    .zip(infinite_le_bytes.by_ref())
+                    .for_each(write);
+                Some(TupleWord::from_le_bytes(buffer))
+            }))
+            .for_each(write);
+
+        assert!(le_bytes.all(|n| n == 0));
+
+        IntegerValue {
+            sign,
+            words_count: integer.data.0.words_count,
+            words_usage: TupleAddress(unsigned_output.usage()),
+        }
+        .encode_head(
+            integer.registry_address,
+            &mut self.tuple_memory,
+            integer.tuple_address,
+        )?;
+
+        Ok(())
     }
 
     fn start_garbage_collection(
@@ -2948,7 +3190,7 @@ impl<'m> Heap<'m> {
                 log_trace!("Keeping {registry_address}");
 
                 self.tuple_memory
-                    .copy_within(source..next_tuple, destination);
+                    .copy_within(source..next_free_space, destination);
 
                 registry_entry.tuple_address = destination;
 

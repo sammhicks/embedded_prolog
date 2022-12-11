@@ -7,6 +7,7 @@ use crate::{
 
 mod basic_types;
 mod heap;
+mod system_call;
 
 use basic_types::{
     Ai, Arity, Constant, Functor, LongInteger, ProgramCounter, RegisterIndex, ShortInteger, Xn, Yn,
@@ -17,6 +18,7 @@ use heap::{
     Heap,
 };
 pub use heap::{Address, ReferenceOrValue, Value};
+pub use system_call::{system_call_handler, system_calls, SystemCalls};
 
 struct ProgramCounterOutOfRange {
     pc: ProgramCounter,
@@ -86,6 +88,7 @@ pub enum Error<'m> {
     PermanentVariable(heap::PermanentVariableError),
     StructureIterationState(heap::structure_iteration::Error),
     ExpressionEvaluation(heap::ExpressionEvaluationError),
+    SystemCallIndexOutOfRange(system_call::SystemCallIndexOutOfRange),
     OutOfMemory(heap::OutOfMemory),
 }
 
@@ -157,6 +160,7 @@ enum Instruction<'memory> {
     Is,
     True,
     Fail,
+    SystemCall { i: system_call::SystemCallIndex },
 }
 
 impl<'memory> Instruction<'memory> {
@@ -429,6 +433,12 @@ impl<'memory> Instruction<'memory> {
             [0x66, 0, 0, 0] => (pc.offset(1), Instruction::Is),
             [0x70, 0, 0, 0] => (pc.offset(1), Instruction::True),
             [0x71, 0, 0, 0] => (pc.offset(1), Instruction::Fail),
+            [0x80, 0, 0, n] => (
+                pc.offset(1),
+                Instruction::SystemCall {
+                    i: system_call::SystemCallIndex(n),
+                },
+            ),
             _ => return Err(Error::BadInstruction(pc, BadMemoryRange(range))),
         })
     }
@@ -446,7 +456,7 @@ pub enum RegisterBlockError {
 }
 
 #[derive(Debug)]
-struct RegisterBlock([Option<Address>; 32]);
+pub struct RegisterBlock([Option<Address>; 32]);
 
 impl RegisterBlock {
     fn new() -> Self {
@@ -570,8 +580,8 @@ impl<'m> From<heap::ExpressionEvaluationError> for ExecutionFailure<'m> {
 }
 
 impl<'m> From<heap::structure_iteration::Error> for ExecutionFailure<'m> {
-    fn from(err: heap::structure_iteration::Error) -> Self {
-        Self::Error(Error::StructureIterationState(err))
+    fn from(structure_iteration_error: heap::structure_iteration::Error) -> Self {
+        Self::Error(Error::StructureIterationState(structure_iteration_error))
     }
 }
 
@@ -581,16 +591,7 @@ pub enum ExecutionSuccess {
     MultipleAnswers,
 }
 
-#[derive(Debug)]
-struct UnificationFailure;
-
-pub struct MachineMemory<'m> {
-    pub program: Instructions<'m>,
-    pub query: Instructions<'m>,
-    pub memory: &'m mut [u32],
-}
-
-pub struct Machine<'m> {
+pub struct Machine<'m, Calls: system_call::SystemCalls> {
     currently_executing: CurrentlyExecuting,
     structure_iteration_state: StructureIterationState,
     pc: Option<ProgramCounter>,
@@ -600,15 +601,15 @@ pub struct Machine<'m> {
     program: Instructions<'m>,
     query: Instructions<'m>,
     memory: Heap<'m>,
+    system_calls: &'m mut Calls,
 }
 
-impl<'m> Machine<'m> {
+impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
     pub fn new(
-        MachineMemory {
-            program,
-            query,
-            memory,
-        }: MachineMemory<'m>,
+        program: Instructions<'m>,
+        query: Instructions<'m>,
+        memory: &'m mut [u32],
+        system_calls: &'m mut Calls,
     ) -> Self {
         Self {
             currently_executing: CurrentlyExecuting::Query,
@@ -620,6 +621,7 @@ impl<'m> Machine<'m> {
             program,
             query,
             memory: Heap::init(memory),
+            system_calls,
         }
     }
 
@@ -749,15 +751,13 @@ impl<'m> Machine<'m> {
                 self.memory.store_permanent_variable(yn, address)?;
                 Ok(())
             }
-            Instruction::GetValueXn { ai, xn } => self
-                .unify(self.registers.load(xn)?, self.registers.load(ai)?)?
-                .or_else(|UnificationFailure| self.backtrack()),
-            Instruction::GetValueYn { ai, yn } => self
-                .unify(
-                    self.memory.load_permanent_variable(yn)?,
-                    self.registers.load(ai)?,
-                )?
-                .or_else(|UnificationFailure| self.backtrack()),
+            Instruction::GetValueXn { ai, xn } => {
+                self.unify(self.registers.load(xn)?, self.registers.load(ai)?)
+            }
+            Instruction::GetValueYn { ai, yn } => self.unify(
+                self.memory.load_permanent_variable(yn)?,
+                self.registers.load(ai)?,
+            ),
             Instruction::GetStructure { ai, f, n } => {
                 let (address, value) = self.get_register_value(ai)?;
                 match value {
@@ -1063,11 +1063,33 @@ impl<'m> Machine<'m> {
             Instruction::Is => {
                 let [a1, a2] = self.special_functor()?;
                 let a2 = self.memory.evaluate(a2)??;
-                self.unify(a1, a2)?
-                    .or_else(|UnificationFailure| self.backtrack())
+                self.unify(a1, a2)
             }
             Instruction::True => Ok(()),
             Instruction::Fail => self.backtrack(),
+            Instruction::SystemCall { i } => {
+                match self.system_calls.execute(
+                    system_call::Machine {
+                        registers: &mut self.registers,
+                        memory: &mut self.memory,
+                    },
+                    i,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(system_call::SystemCallError::UnificationFailure) => self.backtrack(),
+                    Err(system_call::SystemCallError::RegisterBlockError(inner)) => {
+                        Err(inner.into())
+                    }
+                    Err(system_call::SystemCallError::MemoryError(inner)) => Err(inner.into()),
+                    Err(system_call::SystemCallError::StructureIteration(inner)) => {
+                        Err(inner.into())
+                    }
+                    Err(system_call::SystemCallError::OutOfMemory(inner)) => Err(inner.into()),
+                    Err(system_call::SystemCallError::SystemCallIndexOutOfRange(inner)) => Err(
+                        ExecutionFailure::Error(Error::SystemCallIndexOutOfRange(inner)),
+                    ),
+                }
+            }
         }
     }
 
@@ -1207,8 +1229,7 @@ impl<'m> Machine<'m> {
 
                 let register_address = load(self, index)?;
 
-                self.unify(register_address, term_address)?
-                    .or_else(|UnificationFailure| self.backtrack())
+                self.unify(register_address, term_address)
             }
             ReadWriteMode::Write => {
                 let address = load(self, index)?;
@@ -1219,117 +1240,14 @@ impl<'m> Machine<'m> {
         }
     }
 
-    fn unify(
-        &mut self,
-        a1: Address,
-        a2: Address,
-    ) -> Result<Result<(), UnificationFailure>, ExecutionFailure<'m>> {
-        log_trace!("Unifying {} and {}", a1, a2);
-        let (a1, v1, d1, _) = self.memory.get_value(a1)?;
-        let (a2, v2, d2, _) = self.memory.get_value(a2)?;
-        log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
-
-        Ok(if a1 == a2 {
-            Ok(())
-        } else if let (
-            &ReferenceOrValue::Value(Value::Integer {
-                sign: s1,
-                bytes_count: n1,
-            }),
-            &ReferenceOrValue::Value(Value::Integer {
-                sign: s2,
-                bytes_count: n2,
-            }),
-        ) = (&v1, &v2)
-        {
-            if s1 == s2
-                && core::iter::zip(
-                    d1.rev().chain(core::iter::repeat(0)),
-                    d2.rev().chain(core::iter::repeat(0)),
-                )
-                .take(n1.max(n2) as usize)
-                .all(|(b1, b2)| b1 == b2)
-            {
-                Ok(())
-            } else {
-                Err(UnificationFailure)
-            }
-        } else {
-            drop(d1);
-            drop(d2);
-            match ((a1, v1), (a2, v2)) {
-                ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {
-                    self.memory.bind_variables(a1, a2)??;
-                    Ok(())
-                }
-                (
-                    (variable_address, ReferenceOrValue::Reference(_)),
-                    (value_address, ReferenceOrValue::Value(_)),
-                )
-                | (
-                    (value_address, ReferenceOrValue::Value(_)),
-                    (variable_address, ReferenceOrValue::Reference(_)),
-                ) => {
-                    self.memory
-                        .bind_variable_to_value(variable_address, value_address)??;
-                    Ok(())
-                }
-                (
-                    (a1, ReferenceOrValue::Value(Value::Structure(f1, n1))),
-                    (a2, ReferenceOrValue::Value(Value::Structure(f2, n2))),
-                ) => {
-                    if f1 == f2 && n1 == n2 {
-                        let mut terms_1 = StructureIterationState::structure_reader(a1);
-                        let mut terms_2 = StructureIterationState::structure_reader(a2);
-                        for _ in 0..n1.0 {
-                            let a1 = terms_1.read_next(&self.memory)?;
-                            let a2 = terms_2.read_next(&self.memory)?;
-                            match self.unify(a1, a2) {
-                                Ok(Ok(())) => (),
-                                Ok(Err(err)) => return Ok(Err(err)),
-                                Err(err) => return Err(err),
-                            }
-                        }
-
-                        Ok(())
-                    } else {
-                        Err(UnificationFailure)
-                    }
-                }
-                (
-                    (a1, ReferenceOrValue::Value(Value::List)),
-                    (a2, ReferenceOrValue::Value(Value::List)),
-                ) => {
-                    let mut terms_1 = StructureIterationState::structure_reader(a1);
-                    let mut terms_2 = StructureIterationState::structure_reader(a2);
-                    for _ in 0..2 {
-                        let a1 = terms_1.read_next(&self.memory)?;
-                        let a2 = terms_2.read_next(&self.memory)?;
-                        match self.unify(a1, a2) {
-                            Ok(Ok(())) => (),
-                            Ok(Err(err)) => return Ok(Err(err)),
-                            Err(err) => return Err(err),
-                        }
-                    }
-
-                    Ok(())
-                }
-                (
-                    (_, ReferenceOrValue::Value(Value::Constant(c1))),
-                    (_, ReferenceOrValue::Value(Value::Constant(c2))),
-                ) => {
-                    if c1 == c2 {
-                        Ok(())
-                    } else {
-                        Err(UnificationFailure)
-                    }
-                }
-
-                ((_, ReferenceOrValue::Value(_)), (_, ReferenceOrValue::Value(_))) => {
-                    Err(UnificationFailure)
-                }
-            }
-        })
+    fn unify(&mut self, a1: Address, a2: Address) -> Result<(), ExecutionFailure<'m>> {
+        match self.memory.unify(a1, a2) {
+            Ok(()) => Ok(()),
+            Err(heap::UnificationError::UnificationFailure) => self.backtrack(),
+            Err(heap::UnificationError::OutOfMemory(inner)) => Err(inner.into()),
+            Err(heap::UnificationError::MemoryError(inner)) => Err(inner.into()),
+            Err(heap::UnificationError::StructureIteration(inner)) => Err(inner.into()),
+        }
     }
 
     fn backtrack(&mut self) -> Result<(), ExecutionFailure<'static>> {

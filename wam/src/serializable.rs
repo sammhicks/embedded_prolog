@@ -73,25 +73,3 @@ where
         self.into_inner().into_be_bytes()
     }
 }
-
-impl<A, B> Serializable for (A, B)
-where
-    A: Serializable<Bytes = [u8; 2]>,
-    B: Serializable<Bytes = [u8; 2]>,
-{
-    type Bytes = [u8; 4];
-
-    fn from_be_bytes(bytes: Self::Bytes) -> Self {
-        let [a1, a0, b1, b0] = bytes;
-        (A::from_be_bytes([a1, a0]), B::from_be_bytes([b1, b0]))
-    }
-
-    fn into_be_bytes(self) -> Self::Bytes {
-        let (a, b) = self;
-
-        let [a1, a0] = a.into_be_bytes();
-        let [b1, b0] = b.into_be_bytes();
-
-        [a1, a0, b1, b0]
-    }
-}

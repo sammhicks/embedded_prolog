@@ -1,6 +1,6 @@
 use super::{
-    load_code, log_debug, log_info, log_trace, CommandHeader, IoError, LoadedCode, Never,
-    ProcessInputError, SerialConnection, SerialRead, SerialWrite, SUCCESS,
+    load_code, log_debug, log_info, log_trace, machine::SystemCalls, CommandHeader, IoError,
+    LoadedCode, Never, ProcessInputError, SerialConnection, SerialRead, SerialWrite, SUCCESS,
 };
 
 enum Action {
@@ -8,14 +8,18 @@ enum Action {
     ProcessCommand(CommandHeader),
 }
 
-pub struct Device<'a, S> {
+pub struct Device<'a, Serial, Calls> {
     pub memory: &'a mut [u32],
-    pub serial_connection: SerialConnection<S>,
+    pub serial_connection: SerialConnection<Serial>,
+    pub system_calls: Calls,
 }
 
-impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
+impl<'a, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls> Device<'a, Serial, Calls> {
     fn handle_submit_program(&mut self) -> Result<Action, ProcessInputError> {
         log_info!("Loading program");
+
+        self.serial_connection
+            .write_system_calls(&self.system_calls)?;
 
         let LoadedCode {
             code_section: program,
@@ -31,6 +35,7 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
             program,
             memory,
             serial_connection: &mut self.serial_connection,
+            system_calls: &mut self.system_calls,
         }
         .run()?;
 
@@ -84,7 +89,7 @@ impl<'a, S: SerialRead<u8> + SerialWrite<u8>> Device<'a, S> {
                 Ok(Action::ProcessNextCommand) => self.serial_connection.read_ascii_char()?,
                 Ok(Action::ProcessCommand(command)) => command as u8,
                 Err(ProcessInputError::Unexpected(b)) => b,
-                Err(ProcessInputError::ReadError) => return Err(IoError),
+                Err(ProcessInputError::IoError) => return Err(IoError),
             };
 
             command_header = next_command_header;

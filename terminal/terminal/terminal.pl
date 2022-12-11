@@ -82,17 +82,29 @@ can_submit_program(no_answers).
 compile_program(File, Result) :-
     status(Stream, Status),
     (   can_submit_program(Status)
-    ->  read_terms_from_file(File, Program),
-        retractall(program_compile_state(_)),
-        compile_program(Program, State, Program_Words),
-        write(Stream, 'P'),
+    ->  write(Stream, 'P'),
         flush_output(Stream),
+        read_u16(Stream, System_Call_Count),
+        length(System_Calls, System_Call_Count),
+        maplist(read_system_call(Stream), System_Calls),
+        read_terms_from_file(File, Program),
+        retractall(program_compile_state(_)),
+        compile_program(System_Calls, Program, State, Program_Words),
         write_words_with_hash(Stream, Program_Words),
         flush_output(Stream),
         read_program_result(Stream, Result),
         assertz(program_compile_state(State))
     ;   Result = cannot_submit_program(Status)
     ).
+
+
+read_system_call(Stream, Name/Arity) :-
+    read_u8(Stream, Name_Length),
+    length(Name_Bytes, Name_Length),
+    maplist(read_u8(Stream), Name_Bytes),
+    utf8_codes(Name_Codes, Name_Bytes, []),
+    atom_codes(Name, Name_Codes),
+    read_u8(Stream, Arity).
 
 
 read_program_result(Stream, Result) :-

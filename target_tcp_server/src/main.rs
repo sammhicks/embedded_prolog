@@ -35,6 +35,38 @@ impl wam::SerialWrite<u8> for Channels {
     }
 }
 
+#[derive(Default)]
+struct SystemState {
+    value: i32,
+}
+
+impl SystemState {
+    fn hello() {
+        println!("Hello");
+    }
+
+    fn get(&self) -> i32 {
+        self.value
+    }
+
+    fn put(&mut self, value: i32) {
+        self.value = value;
+    }
+
+    fn increment(&mut self) {
+        self.value += 1;
+    }
+}
+
+macro_rules! system_calls {
+    ($($call:ident),*) => {
+        ::wam::system_calls(
+            &[$(&::wam::system_call_handler(stringify!($call), SystemState::$call)),*],
+            SystemState::default(),
+        )
+    };
+}
+
 #[derive(Debug)]
 struct DisplayError(Box<dyn std::error::Error>);
 
@@ -54,12 +86,13 @@ fn main() -> Result<(), DisplayError> {
 
         let mut memory = [0; 32768];
 
-        let device = wam::Device {
+        match (wam::Device {
             memory: &mut memory,
             serial_connection: wam::SerialConnection(Channels(stream)),
-        };
-
-        match device.run() {
+            system_calls: system_calls!(hello, get, put, increment),
+        })
+        .run()
+        {
             Ok(never) => match never {},
             Err(wam::IoError) => {}
         }

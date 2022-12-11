@@ -17,5 +17,5 @@ sha2 = { version = "0.10.6", default-features = false }
 rand = "0.8.5"
 
 [features]
-logging = [ "dep:log", "std" ]
+logging = ["dep:log"]
 std = []

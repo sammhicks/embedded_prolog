@@ -1,6 +1,6 @@
 use super::{
-    log_debug, log_info, log_trace, machine::Instructions, CommandHeader, ProcessInputError,
-    SerialConnection, SerialRead, SerialWrite,
+    log_debug, log_info, log_trace, machine::Instructions, machine::SystemCalls, CommandHeader,
+    ProcessInputError, SerialConnection, SerialRead, SerialWrite,
 };
 
 use crate::machine::{ExecutionFailure, OptionDisplay};
@@ -13,20 +13,20 @@ pub enum UnhandledCommand {
     SubmitQuery,
 }
 
-pub struct Device<'m, 's, S> {
+pub struct Device<'m, 's, Serial, Calls> {
     pub program: Instructions<'m>,
     pub query: Instructions<'m>,
     pub memory: &'m mut [u32],
-    pub serial_connection: &'s mut SerialConnection<S>,
+    pub serial_connection: &'s mut SerialConnection<Serial>,
+    pub system_calls: &'s mut Calls,
 }
 
-impl<'m, 's, S: SerialRead<u8> + SerialWrite<u8>> Device<'m, 's, S> {
+impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
+    Device<'m, 's, Serial, Calls>
+{
     pub fn run(self) -> Result<UnhandledCommand, ProcessInputError> {
-        let mut machine = crate::machine::Machine::new(super::machine::MachineMemory {
-            program: self.program,
-            query: self.query,
-            memory: self.memory,
-        });
+        let mut machine =
+            crate::machine::Machine::new(self.program, self.query, self.memory, self.system_calls);
 
         let mut execution_result = machine.next_solution();
 

@@ -5,11 +5,17 @@ pub use nb;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use sha2::Digest;
 
+mod device;
+mod device_with_program;
+mod device_with_query;
 mod errors;
 mod hex;
 mod logging;
 mod machine;
 mod serializable;
+
+pub use device::Device;
+pub use machine::{system_call_handler, system_calls, SystemCalls};
 
 #[derive(Debug)]
 pub enum Never {}
@@ -28,12 +34,12 @@ impl core::fmt::Display for IoError {
 #[derive(Debug)]
 pub enum ProcessInputError {
     Unexpected(u8),
-    ReadError,
+    IoError,
 }
 
 impl From<IoError> for ProcessInputError {
     fn from(_: IoError) -> Self {
-        Self::ReadError
+        Self::IoError
     }
 }
 
@@ -171,6 +177,25 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
 
         Ok(())
     }
+
+    fn write_system_calls<Calls: SystemCalls>(
+        &mut self,
+        system_calls: &Calls,
+    ) -> Result<(), IoError> {
+        self.write_be_serializable_hex(system_calls.count())?;
+
+        system_calls.for_each_call(|name, arity| {
+            self.write_be_serializable_hex(name.len() as u8)?;
+            for b in name.bytes() {
+                self.write_be_serializable_hex(b)?;
+            }
+            self.write_be_serializable_hex(arity)?;
+
+            Ok(())
+        })?;
+
+        self.flush()
+    }
 }
 
 struct LoadedCode<'code, 'rest> {
@@ -261,9 +286,3 @@ impl CommandHeader {
         Self::try_from(value).map_err(|_err| ProcessInputError::Unexpected(value))
     }
 }
-
-mod device;
-mod device_with_program;
-mod device_with_query;
-
-pub use device::Device;

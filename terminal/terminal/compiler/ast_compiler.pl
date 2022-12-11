@@ -1,7 +1,7 @@
 
 :- module(ast_compiler, [
 	      compile_query_ast/2,      % +Query_AST, -Codes
-	      compile_program_ast/2     % +Program_AST, -Codes
+	      compile_program_ast/3     % +System_Calls, +Program_AST, -Codes
 	  ]).
 
 :- use_module(library(lists)).
@@ -100,34 +100,29 @@ unchanged_query_token(is).
 unchanged_query_token(true).
 unchanged_query_token(fail).
 unchanged_query_token(=).
-unchanged_query_token(digital_input).
-unchanged_query_token(digital_output).
-unchanged_query_token(digital_input_pullup).
-unchanged_query_token(digital_input_pulldown).
-unchanged_query_token(digital_read).
-unchanged_query_token(digital_write).
-unchanged_query_token(analog_input).
-unchanged_query_token(configure_channel).
-unchanged_query_token(analog_output).
-unchanged_query_token(analog_read).
-unchanged_query_token(analog_write).
-unchanged_query_token(line_sensor).
-unchanged_query_token(millis).
-unchanged_query_token(delay).
 
 % --- Program ---
 
-compile_program_ast(Definitions, Codes) :-
-	compile_definitions_ast(Definitions, Codes0),
-	combine_voids(Codes0, Codes1),
-	last_call_optimisation(Codes1, Codes).
+compile_program_ast(System_Calls, Definitions, Codes) :-
+	compile_system_calls(System_Calls, 0, Codes0),
+	compile_definitions_ast(Definitions, Codes1, Codes0),
+	combine_voids(Codes1, Codes2),
+	last_call_optimisation(Codes2, Codes).
 
 
-compile_definitions_ast([], []).
+compile_system_calls([], _Index, []).
 
-compile_definitions_ast([Definition|Definitions], Codes) :-
-	compile_definition_ast(Definition, Codes, Definitions_Codes),
-	compile_definitions_ast(Definitions, Definitions_Codes).
+compile_system_calls([(System_Call)|System_Calls], Index, [label(System_Call), system_call(Index), end_of_rule|Codes]) :-
+	Next_Index is Index + 1,
+	compile_system_calls(System_Calls, Next_Index, Codes).
+
+
+
+compile_definitions_ast([], Codes, Codes).
+
+compile_definitions_ast([Definition|Definitions]) -->
+	compile_definition_ast(Definition),
+	compile_definitions_ast(Definitions).
 
 
 compile_definition_ast(fact(Functor, Arguments)) -->

@@ -71,8 +71,8 @@ impl<'a> Ord for UnsignedInput<'a> {
             .take(usize::max(self.words.len(), other.words.len()))
             .fold(None, |current_cmp, (my_word, other_word)| {
                 match my_word.cmp(&other_word) {
-                    std::cmp::Ordering::Equal => current_cmp,
-                    cmp @ (std::cmp::Ordering::Less | std::cmp::Ordering::Greater) => Some(cmp),
+                    Ordering::Equal => current_cmp,
+                    cmp @ (Ordering::Less | Ordering::Greater) => Some(cmp),
                 }
             })
             .unwrap_or(Ordering::Equal)
@@ -140,8 +140,16 @@ pub struct UnsignedOutput<'a> {
 }
 
 impl<'a> UnsignedOutput<'a> {
-    pub fn new(words: &'a mut [Word]) -> Self {
-        Self { words }
+    pub(super) unsafe fn new(
+        data_start: *mut Word,
+        data: super::IntegerEvaluationOutputData,
+    ) -> Self {
+        Self {
+            words: core::slice::from_raw_parts_mut(
+                data_start.offset(data.0.data_start.0 as isize),
+                data.0.words_count.0.into(),
+            ),
+        }
     }
 
     fn as_ref(&self) -> UnsignedInput {
@@ -152,7 +160,7 @@ impl<'a> UnsignedOutput<'a> {
         UnsignedOutput { words: self.words }
     }
 
-    fn usage(&self) -> WordUsage {
+    pub fn usage(&self) -> WordUsage {
         self.words
             .iter()
             .enumerate()
@@ -161,7 +169,7 @@ impl<'a> UnsignedOutput<'a> {
             .unwrap_or(0)
     }
 
-    fn words_mut(&mut self) -> impl Iterator<Item = &mut Word> {
+    pub fn words_mut(&mut self) -> impl Iterator<Item = &mut Word> {
         self.words.iter_mut()
     }
 
@@ -304,7 +312,9 @@ fn div_mod_unsigned(
     }
 
     for i in (0..rm.words.len()).rev() {
-        let mut rm = UnsignedOutput::new(&mut rm.words[i..]);
+        let mut rm = UnsignedOutput {
+            words: &mut rm.words[i..],
+        };
 
         while rm.as_ref() >= r2 {
             sub_unsigned_assign_unchecked(rm.reborrow(), &r2);
@@ -367,15 +377,17 @@ mod tests {
     }
 
     fn write_unsigned(n: u128) -> Words {
-        let mut words = [0; 8];
+        let mut words = Words::default();
+
+        let mut le_bytes = IntoIterator::into_iter(n.to_le_bytes()).chain(core::iter::repeat(0));
 
         words
             .iter_mut()
-            .zip(
-                n.to_le_bytes()
-                    .chunks(core::mem::size_of::<Word>())
-                    .map(|bytes| Word::from_le_bytes(bytes.try_into().unwrap())),
-            )
+            .zip(core::iter::from_fn(|| {
+                let mut buffer = [0_u8; core::mem::size_of::<Word>()];
+                buffer.iter_mut().zip(le_bytes.by_ref()).for_each(write);
+                Some(Word::from_le_bytes(buffer))
+            }))
             .for_each(write);
 
         words
@@ -404,7 +416,7 @@ mod tests {
             let mut words = Words::default();
 
             let usage = add_unsigned(
-                UnsignedOutput::new(&mut words),
+                UnsignedOutput { words: &mut words },
                 UnsignedInput::new(&write_unsigned(r1)),
                 UnsignedInput::new(&write_unsigned(r2)),
             );
@@ -425,7 +437,7 @@ mod tests {
             let mut words = Words::default();
 
             let sign = add_signed((
-                UnsignedOutput::new(&mut words),
+                UnsignedOutput { words: &mut words },
                 borrow_signed(&write_signed(r1)),
                 borrow_signed(&write_signed(r2)),
             ));
@@ -446,7 +458,7 @@ mod tests {
             let mut words = Words::default();
 
             let sign = sub_unsigned(
-                UnsignedOutput::new(&mut words),
+                UnsignedOutput { words: &mut words },
                 UnsignedInput::new(&write_unsigned(r1.into())),
                 UnsignedInput::new(&write_unsigned(r2.into())),
             );
@@ -467,7 +479,7 @@ mod tests {
             let mut words = Words::default();
 
             let sign = sub_signed((
-                UnsignedOutput::new(&mut words),
+                UnsignedOutput { words: &mut words },
                 borrow_signed(&write_signed(r1)),
                 borrow_signed(&write_signed(r2)),
             ));
@@ -488,7 +500,7 @@ mod tests {
             let mut words = Words::default();
 
             let usage = mul_unsigned(
-                UnsignedOutput::new(&mut words),
+                UnsignedOutput { words: &mut words },
                 UnsignedInput::new(&write_unsigned(r1)),
                 UnsignedInput::new(&write_unsigned(r2)),
             );
@@ -509,7 +521,7 @@ mod tests {
             let mut words = Words::default();
 
             let sign = mul_signed((
-                UnsignedOutput::new(&mut words),
+                UnsignedOutput { words: &mut words },
                 borrow_signed(&write_signed(r1)),
                 borrow_signed(&write_signed(r2)),
             ));
@@ -531,8 +543,12 @@ mod tests {
             let mut words_mod = Words::default();
 
             let (usage_div, usage_mod) = div_mod_unsigned(
-                UnsignedOutput::new(&mut words_div),
-                UnsignedOutput::new(&mut words_mod),
+                UnsignedOutput {
+                    words: &mut words_div,
+                },
+                UnsignedOutput {
+                    words: &mut words_mod,
+                },
                 UnsignedInput::new(&write_unsigned(r1)),
                 UnsignedInput::new(&write_unsigned(r2)),
             );
@@ -558,8 +574,12 @@ mod tests {
             let mut words_mod = Words::default();
 
             let (sign_div, sign_mod) = div_mod_signed((
-                UnsignedOutput::new(&mut words_div),
-                UnsignedOutput::new(&mut words_mod),
+                UnsignedOutput {
+                    words: &mut words_div,
+                },
+                UnsignedOutput {
+                    words: &mut words_mod,
+                },
                 borrow_signed(&write_signed(r1)),
                 borrow_signed(&write_signed(r2)),
             ));

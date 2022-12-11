@@ -217,20 +217,6 @@ special_predicate((is)/2).
 special_predicate(true/0).
 special_predicate(fail/0).
 special_predicate((=)/2).
-special_predicate(digital_input/1).
-special_predicate(digital_output/1).
-special_predicate(digital_input_pullup/1).
-special_predicate(digital_input_pulldown/1).
-special_predicate(digital_read/2).
-special_predicate(digital_write/2).
-special_predicate(configure_channel/2).
-special_predicate(analog_input/1).
-special_predicate(analog_output/2).
-special_predicate(analog_read/2).
-special_predicate(analog_write/2).
-special_predicate(line_sensor/12).
-special_predicate(millis/1).
-special_predicate(delay/1).
 
 
 map_permanent_variables([], _Permanent_Variables, []).
