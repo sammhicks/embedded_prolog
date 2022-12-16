@@ -1065,7 +1065,10 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 let a2 = self.memory.evaluate(a2)??;
                 self.unify(a1, a2)
             }
-            Instruction::True => Ok(()),
+            Instruction::True => {
+                self.special_functor::<0>()?;
+                Ok(())
+            }
             Instruction::Fail => self.backtrack(),
             Instruction::SystemCall { i } => {
                 match self.system_calls.execute(
@@ -1145,7 +1148,10 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
 
     pub fn solution_registers(
         &self,
-    ) -> Result<impl Iterator<Item = Option<Address>> + '_, heap::MemoryError> {
+    ) -> Result<
+        impl core::iter::ExactSizeIterator + Iterator<Item = Option<Address>> + '_,
+        heap::MemoryError,
+    > {
         self.memory.solution_registers()
     }
 

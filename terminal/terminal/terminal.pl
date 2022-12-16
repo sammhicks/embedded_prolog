@@ -163,12 +163,12 @@ read_answer(Stream, Query, Functors) :-
 
 
 read_answer(Stream, Query, Functors) :-
-    compound_name_arity(Query, Name, Arity),
+    read_u8(Stream, Arity),
     length(Register_References, Arity),
     maplist(read_u16(Stream), Register_References),
     read_answer_references(Register_References, Stream, Functors, [], [], Lookup_Table),
     maplist(get_lookup_value(Lookup_Table), Register_References, Arguments),
-    compound_name_arguments(Query, Name, Arguments).
+    compound_name_arguments(Query, _Name, Arguments).
 
 
 read_answer_references([], _Stream, _Functors, _Resolved_References, Lookup_Table, Lookup_Table).

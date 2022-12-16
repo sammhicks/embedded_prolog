@@ -57,6 +57,8 @@ impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
             };
 
             self.serial_connection.write_char(success_code)?;
+            self.serial_connection
+                .write_be_u8_hex(solution_registers.len() as u8)?;
             for address in solution_registers {
                 log_trace!("Solution Register: {}", OptionDisplay(address));
                 self.serial_connection.write_be_serializable_hex(address)?;
@@ -82,11 +84,10 @@ impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
                             Ok((address, value, data, subterms)) => {
                                 self.serial_connection
                                     .write_value(address, value, data, subterms)?;
-                                self.serial_connection.flush()?;
                             }
                             Err(err) => {
                                 crate::error!(self.serial_connection, "{:?}", err)?;
-                                return Ok(UnhandledCommand::Reset);
+                                self.serial_connection.flush()?;
                             }
                         };
                     }

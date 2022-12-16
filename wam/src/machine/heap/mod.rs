@@ -681,7 +681,10 @@ impl<'m> TupleMemory<'m> {
         &self,
         terms: Option<core::ops::Range<TupleAddress>>,
     ) -> Result<
-        impl core::iter::FusedIterator + Iterator<Item = Option<Address>> + '_,
+        impl core::iter::ExactSizeIterator
+            + core::iter::FusedIterator
+            + Iterator<Item = Option<Address>>
+            + '_,
         TupleMemoryError,
     > {
         Ok(match terms {
@@ -3300,7 +3303,10 @@ impl<'m> Heap<'m> {
 
     pub fn solution_registers(
         &self,
-    ) -> Result<impl Iterator<Item = Option<Address>> + '_, MemoryError> {
+    ) -> Result<
+        impl core::iter::ExactSizeIterator + Iterator<Item = Option<Address>> + '_,
+        MemoryError,
+    > {
         let (environment, _, metadata) = self.get_environment()?;
         if let Some(continuation_environment) = environment.continuation_environment {
             return Err(MemoryError::ContinuationEnvironmentRemaining {

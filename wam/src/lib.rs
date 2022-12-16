@@ -175,7 +175,7 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
 
         self.write_be_serializable_hex(Some(address))?;
 
-        Ok(())
+        self.flush()
     }
 
     fn write_system_calls<Calls: SystemCalls>(
