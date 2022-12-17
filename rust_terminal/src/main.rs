@@ -187,12 +187,17 @@ impl<'a> fmt::Display for DisplayValue<'a> {
                     .fmt(f)
                 }
             }
-            Some(Value::Structure(name, terms)) => write!(
-                f,
-                "{}({})",
-                DisplayFunctorName { answer, name },
-                DisplayCommaSeparated(terms.iter().map(|address| DisplayValue { answer, address }))
-            ),
+            Some(Value::Structure(name, terms)) => {
+                write!(
+                    f,
+                    "{}",
+                    DisplayStructure {
+                        answer,
+                        name,
+                        terms
+                    }
+                )
+            }
             Some(Value::List(head, tail)) => write!(
                 f,
                 "[{}{}]",
@@ -221,6 +226,48 @@ impl<'a> fmt::Display for DisplayValue<'a> {
     }
 }
 
+struct DisplayStructure<'a> {
+    answer: &'a Answer<'a>,
+    name: &'a Functor,
+    terms: &'a [Address],
+}
+
+impl<'a> fmt::Display for DisplayStructure<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let answer = self.answer;
+
+        match self.answer.program_info.lookup_functor(self.name) {
+            None => write!(
+                f,
+                "<Unknown functor {}>({})",
+                self.name,
+                DisplayCommaSeparated(
+                    self.terms
+                        .iter()
+                        .map(|address| DisplayValue { answer, address })
+                )
+            ),
+            Some(name) => match (name, self.terms) {
+                ("*" | "//" | "div" | "mod" | "+" | "-" | ":", [lhs, rhs]) => {
+                    write!(
+                        f,
+                        "({} {name} {})",
+                        DisplayValue {
+                            answer,
+                            address: lhs
+                        },
+                        DisplayValue {
+                            answer,
+                            address: rhs
+                        }
+                    )
+                }
+                _ => write!(f, "{name}"),
+            },
+        }
+    }
+}
+
 struct DisplayListTail<'a> {
     answer: &'a Answer<'a>,
     address: &'a Address,
@@ -244,9 +291,12 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
             }
             Some(Value::Structure(name, terms)) => write!(
                 f,
-                "|{}({})",
-                DisplayFunctorName { answer, name },
-                DisplayCommaSeparated(terms.iter().map(|address| DisplayValue { answer, address }))
+                "|{}",
+                DisplayStructure {
+                    answer,
+                    name,
+                    terms
+                }
             ),
             Some(Value::List(head, tail)) => write!(
                 f,

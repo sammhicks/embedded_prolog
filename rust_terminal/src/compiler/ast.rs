@@ -32,7 +32,7 @@ impl<T: Eq + Hash> Extend<T> for CountingSet<T> {
     }
 }
 
-pub const EMPTY_LIST: ArcStr = arcstr::literal!("[|]");
+pub const EMPTY_LIST: ArcStr = arcstr::literal!("[]");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VariableName<'a> {

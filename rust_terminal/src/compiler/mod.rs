@@ -813,19 +813,6 @@ impl<'a> InstructionList<'a> {
     }
 
     fn last_call_optimisation(mut self) -> Self {
-        // // First remove Trims immediately before Deallocates
-        // let mut i = 0;
-        // while i < self.0.len() {
-        //     if let Some(
-        //         [Labelled::Instruction(Instruction::Trim { .. }), Labelled::Instruction(Instruction::Deallocate), ..],
-        //     ) = self.0.get(i..)
-        //     {
-        //         self.0.remove(i);
-        //     } else {
-        //         i += 1;
-        //     }
-        // }
-
         // Then add proceeds after deallocates where the last goal isn't a call, e.g. true or system calls
         let mut i = 0;
         while i < self.0.len() {
