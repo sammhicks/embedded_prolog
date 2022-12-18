@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
-use compiler::{Functor, ProgramInfo, Query};
+use compiler::{CallName, Functor, ProgramInfo, Query};
 use crossterm::{
     event::{Event, KeyCode, KeyEvent, KeyEventKind},
     style::{style, Print, Stylize},
@@ -166,9 +166,23 @@ impl<'a> fmt::Display for DisplayFunctorName<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Precedence(u8);
+
+impl Precedence {
+    fn decrement(self) -> Self {
+        Self(self.0 - 1)
+    }
+
+    fn display_brackets(&self, parent_precedence: Option<Precedence>) -> bool {
+        parent_precedence.map_or(false, |parent_precedence| self.0 > parent_precedence.0)
+    }
+}
+
 struct DisplayValue<'a> {
     answer: &'a Answer<'a>,
     address: &'a Address,
+    precedence: Option<Precedence>,
 }
 
 impl<'a> fmt::Display for DisplayValue<'a> {
@@ -183,6 +197,7 @@ impl<'a> fmt::Display for DisplayValue<'a> {
                     DisplayValue {
                         answer,
                         address: reference,
+                        precedence: self.precedence,
                     }
                     .fmt(f)
                 }
@@ -194,7 +209,8 @@ impl<'a> fmt::Display for DisplayValue<'a> {
                     DisplayStructure {
                         answer,
                         name,
-                        terms
+                        terms,
+                        precedence: self.precedence,
                     }
                 )
             }
@@ -203,11 +219,12 @@ impl<'a> fmt::Display for DisplayValue<'a> {
                 "[{}{}]",
                 DisplayValue {
                     answer,
-                    address: head
+                    address: head,
+                    precedence: None,
                 },
                 DisplayListTail {
                     answer,
-                    address: tail
+                    address: tail,
                 }
             ),
             Some(Value::Constant(name)) => {
@@ -230,6 +247,7 @@ struct DisplayStructure<'a> {
     answer: &'a Answer<'a>,
     name: &'a Functor,
     terms: &'a [Address],
+    precedence: Option<Precedence>,
 }
 
 impl<'a> fmt::Display for DisplayStructure<'a> {
@@ -241,29 +259,129 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
                 f,
                 "<Unknown functor {}>({})",
                 self.name,
-                DisplayCommaSeparated(
-                    self.terms
-                        .iter()
-                        .map(|address| DisplayValue { answer, address })
-                )
+                DisplayCommaSeparated(self.terms.iter().map(|address| DisplayValue {
+                    answer,
+                    address,
+                    precedence: None
+                }))
             ),
-            Some(name) => match (name, self.terms) {
-                ("*" | "//" | "div" | "mod" | "+" | "-" | ":", [lhs, rhs]) => {
-                    write!(
-                        f,
-                        "({} {name} {})",
-                        DisplayValue {
-                            answer,
-                            address: lhs
-                        },
-                        DisplayValue {
-                            answer,
-                            address: rhs
-                        }
-                    )
+            Some(operator) => match (operator, self.terms) {
+                (":", [lhs, rhs]) => DisplayInfix {
+                    answer,
+                    operator,
+                    precedence: Precedence(6),
+                    parent_precedence: self.precedence,
+                    lhs,
+                    rhs,
                 }
-                _ => write!(f, "{name}"),
+                .fmt(f),
+                ("+" | "-", [lhs, rhs]) => DisplayInfix {
+                    answer,
+                    operator,
+                    precedence: Precedence(5),
+                    parent_precedence: self.precedence,
+                    lhs,
+                    rhs,
+                }
+                .fmt(f),
+                ("*" | "//" | "div" | "mod", [lhs, rhs]) => DisplayInfix {
+                    answer,
+                    operator,
+                    precedence: Precedence(4),
+                    parent_precedence: self.precedence,
+                    lhs,
+                    rhs,
+                }
+                .fmt(f),
+                ("+" | "-", [term]) => DisplayPrefix {
+                    answer,
+                    operator,
+                    precedence: Precedence(2),
+                    parent_precedence: self.precedence,
+                    term,
+                }
+                .fmt(f),
+                _ => write!(
+                    f,
+                    "{operator}({})",
+                    DisplayCommaSeparated(self.terms.iter().map(|address| DisplayValue {
+                        answer,
+                        address,
+                        precedence: None
+                    }))
+                ),
             },
+        }
+    }
+}
+
+struct DisplayPrefix<'a> {
+    answer: &'a Answer<'a>,
+    operator: &'a str,
+    precedence: Precedence,
+    parent_precedence: Option<Precedence>,
+    term: &'a Address,
+}
+
+impl<'a> fmt::Display for DisplayPrefix<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            answer,
+            operator,
+            precedence,
+            parent_precedence,
+            term,
+        } = *self;
+
+        let term = DisplayValue {
+            answer,
+            address: term,
+            precedence: Some(precedence),
+        };
+
+        if precedence.display_brackets(parent_precedence) {
+            write!(f, "({operator}{term})")
+        } else {
+            write!(f, "{operator}{term}")
+        }
+    }
+}
+
+struct DisplayInfix<'a> {
+    answer: &'a Answer<'a>,
+    operator: &'a str,
+    precedence: Precedence,
+    parent_precedence: Option<Precedence>,
+    lhs: &'a Address,
+    rhs: &'a Address,
+}
+
+impl<'a> fmt::Display for DisplayInfix<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            answer,
+            operator,
+            precedence,
+            parent_precedence,
+            lhs,
+            rhs,
+        } = *self;
+
+        let lhs = DisplayValue {
+            answer,
+            address: lhs,
+            precedence: Some(precedence),
+        };
+        let rhs = DisplayValue {
+            answer,
+            address: rhs,
+            precedence: Some(precedence.decrement()),
+        };
+
+        if precedence.display_brackets(parent_precedence) {
+            write!(f, "({lhs} {operator} {rhs})")
+        } else {
+            write!(f, "{lhs} {operator} {rhs}")
         }
     }
 }
@@ -285,6 +403,7 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
                     DisplayValue {
                         answer,
                         address: reference,
+                        precedence: None,
                     }
                     .fmt(f)
                 }
@@ -295,7 +414,8 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
                 DisplayStructure {
                     answer,
                     name,
-                    terms
+                    terms,
+                    precedence: None,
                 }
             ),
             Some(Value::List(head, tail)) => write!(
@@ -303,7 +423,8 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
                 ",{}{}",
                 DisplayValue {
                     answer,
-                    address: head
+                    address: head,
+                    precedence: None,
                 },
                 DisplayListTail {
                     answer,
@@ -335,15 +456,32 @@ struct Answer<'a> {
 
 impl<'a> fmt::Display for Answer<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}({})",
-            self.query.name,
-            DisplayCommaSeparated(self.registers.iter().map(|address| DisplayValue {
-                answer: self,
-                address
-            }))
-        )
+        match (self.query.name.as_ref(), self.registers.as_slice()) {
+            (CallName::Is, [lhs, rhs]) => write!(
+                f,
+                "{} is {}",
+                DisplayValue {
+                    answer: self,
+                    address: lhs,
+                    precedence: None
+                },
+                DisplayValue {
+                    answer: self,
+                    address: rhs,
+                    precedence: None
+                }
+            ),
+            _ => write!(
+                f,
+                "{}({})",
+                self.query.name,
+                DisplayCommaSeparated(self.registers.iter().map(|address| DisplayValue {
+                    answer: self,
+                    address,
+                    precedence: None,
+                }))
+            ),
+        }
     }
 }
 

@@ -185,6 +185,11 @@ impl<'a> UnsignedOutput<'a> {
         self.words[..src.words.len()].copy_from_slice(src.words);
         (sign, self.usage())
     }
+
+    fn negate(self, (sign, src): (Sign, UnsignedInput)) -> (Sign, WordUsage) {
+        self.words[..src.words.len()].copy_from_slice(src.words);
+        (sign.reverse(), self.usage())
+    }
 }
 
 fn carrying_add(r1: Word, r2: Word, carry: bool) -> (Word, bool) {
@@ -197,6 +202,14 @@ fn borrowing_sub(r1: Word, r2: Word, borrow: bool) -> (Word, bool) {
     let (a, b) = r1.overflowing_sub(r2);
     let (c, d) = a.overflowing_sub(borrow.into());
     (c, b || d)
+}
+
+pub fn copy_signed((r0, r1): (UnsignedOutput, SignedInput)) -> (Sign, WordUsage) {
+    r0.copy_from(r1.split())
+}
+
+pub fn neg_signed((r0, r1): (UnsignedOutput, SignedInput)) -> (Sign, WordUsage) {
+    r0.negate(r1.split())
 }
 
 fn add_unsigned(mut r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) -> WordUsage {

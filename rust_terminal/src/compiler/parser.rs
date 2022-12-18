@@ -31,6 +31,24 @@ macro_rules! operators {
     };
 }
 
+fn maybe_prefix(
+    term: impl Parser<char, Term, Error = ParseError>,
+    operators: impl Parser<char, &'static str, Error = ParseError>,
+) -> impl Parser<char, Term, Error = ParseError> {
+    operators
+        .map_with_span(Name::new)
+        .then_ignore(text::whitespace())
+        .or_not()
+        .then(term)
+        .map(|(operator, term)| match operator {
+            Some(operator) => Term::Structure {
+                name: operator,
+                terms: TermList::from([term]),
+            },
+            None => term,
+        })
+}
+
 fn infix_many(
     term: impl Parser<char, Term, Error = ParseError> + 'static,
     operators: impl Parser<char, &'static str, Error = ParseError>,
@@ -47,7 +65,7 @@ fn infix_many(
         )
         .foldl(|lhs, (name, rhs)| Term::Structure {
             name,
-            terms: TermList::from(vec![lhs, rhs]),
+            terms: TermList::from([lhs, rhs]),
         })
 }
 
@@ -129,6 +147,7 @@ fn term() -> impl Parser<char, Term, Error = ParseError> {
             .or(void)
             .or(term.padded().delimited_by(just('('), just(')')));
 
+        let term = maybe_prefix(term, operators!("+", "-"));
         let term = infix_many(term, operators!("*", "//", "div", "mod"));
         let term = infix_many(term, operators!("+", "-"));
         let term = infix_many(term, operators!(":"));
@@ -172,7 +191,7 @@ fn is() -> impl Parser<char, TermList, Error = ParseError> {
     term.clone()
         .then_ignore(just("is").padded())
         .then(term)
-        .map(|(lhs, rhs)| TermList::from(vec![lhs, rhs]))
+        .map(|(lhs, rhs)| TermList::from([lhs, rhs]))
 }
 
 pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Vec<ParseError>> {

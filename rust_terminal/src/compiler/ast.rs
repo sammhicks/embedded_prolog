@@ -225,6 +225,12 @@ impl std::ops::Deref for TermList {
     }
 }
 
+impl<const N: usize> From<[Term; N]> for TermList {
+    fn from(terms: [Term; N]) -> Self {
+        Self(terms.into())
+    }
+}
+
 impl From<Vec<Term>> for TermList {
     fn from(terms: Vec<Term>) -> Self {
         Self(terms)
@@ -294,7 +300,7 @@ impl<T: fmt::Display> fmt::Display for CallName<T> {
             Self::Named(name) => name.fmt(f),
             Self::True => write!(f, "true"),
             Self::Fail => write!(f, "fail"),
-            Self::Is => write!(f, "'is'"),
+            Self::Is => write!(f, "is"),
         }
     }
 }

@@ -62,7 +62,15 @@ enum DivOrMod {
 }
 
 enum SpecialFunctor {
-    BinaryOperation {
+    PrefixOperation {
+        operation: fn(
+            (
+                integer_operations::UnsignedOutput,
+                integer_operations::SignedInput,
+            ),
+        ) -> (IntegerSign, IntegerWordUsage),
+    },
+    InfixOperation {
         calculate_words_count: fn(TupleAddress, TupleAddress) -> TupleAddress,
         operation: fn(
             (
@@ -88,18 +96,26 @@ impl TryFrom<StructureValue> for SpecialFunctor {
 
     fn try_from(StructureValue(f, n): StructureValue) -> Result<Self, Self::Error> {
         Ok(match (f, n) {
+            // Prefix of '+'
+            (Functor(0), Arity(1)) => Self::PrefixOperation {
+                operation: integer_operations::copy_signed,
+            },
             // Addition
-            (Functor(0), Arity(2)) => Self::BinaryOperation {
+            (Functor(0), Arity(2)) => Self::InfixOperation {
                 calculate_words_count: |a, b| TupleAddress::max(a, b) + 1,
                 operation: integer_operations::add_signed,
             },
+            // Negation
+            (Functor(1), Arity(1)) => Self::PrefixOperation {
+                operation: integer_operations::neg_signed,
+            },
             // Subtraction
-            (Functor(1), Arity(2)) => Self::BinaryOperation {
+            (Functor(1), Arity(2)) => Self::InfixOperation {
                 calculate_words_count: |a, b| TupleAddress::max(a, b) + 1,
                 operation: integer_operations::sub_signed,
             },
             // Multiplication
-            (Functor(2), Arity(2)) => Self::BinaryOperation {
+            (Functor(2), Arity(2)) => Self::InfixOperation {
                 calculate_words_count: |a, b| a + b + 1,
                 operation: integer_operations::mul_signed,
             },
@@ -708,6 +724,25 @@ impl<'m> TupleMemory<'m> {
         );
     }
 
+    // The caller must ensure that the data doesn't overlap with any other data
+    unsafe fn get_integer_output(
+        &mut self,
+        output: IntegerEvaluationOutputData,
+    ) -> integer_operations::UnsignedOutput {
+        integer_operations::UnsignedOutput::new(self.0.as_mut_ptr(), output)
+    }
+
+    // The caller must ensure that the data doesn't overlap with any other data
+    unsafe fn get_integer_input(
+        &self,
+        (s1, w1): (IntegerSign, IntegerWordsSlice),
+    ) -> integer_operations::SignedInput {
+        integer_operations::SignedInput::new(
+            s1,
+            self.get(w1.into_address_range()).unwrap_unchecked(),
+        )
+    }
+
     unsafe fn get_integer_input_input(
         &self,
         (s1, w1): (IntegerSign, IntegerWordsSlice),
@@ -728,12 +763,18 @@ impl<'m> TupleMemory<'m> {
         )
     }
 
-    // The caller must ensure that the data doesn't overlap with any other data
-    unsafe fn get_integer_output(
+    // The caller must ensure that w0 does not overlap with either w1 or w2, and that all ranges are valid
+    unsafe fn get_integer_output_input(
         &mut self,
-        output: IntegerEvaluationOutputData,
-    ) -> integer_operations::UnsignedOutput {
-        integer_operations::UnsignedOutput::new(self.0.as_mut_ptr(), output)
+        w0: IntegerEvaluationOutputData,
+        w1: (IntegerSign, IntegerWordsSlice),
+    ) -> (
+        integer_operations::UnsignedOutput,
+        integer_operations::SignedInput,
+    ) {
+        let w0 = integer_operations::UnsignedOutput::new(self.0.as_mut_ptr(), w0);
+        let w1 = self.get_integer_input(w1);
+        (w0, w1)
     }
 
     // The caller must ensure that w0 does not overlap with either w1 or w2, and that all ranges are valid
@@ -2751,7 +2792,43 @@ impl<'m> Heap<'m> {
                     )?;
 
                     match SpecialFunctor::try_from(structure)? {
-                        SpecialFunctor::BinaryOperation {
+                        SpecialFunctor::PrefixOperation { operation } => {
+                            let mut terms = self
+                                .tuple_memory
+                                .load_terms(metadata.terms.into_address_range())?;
+
+                            let a1 = terms.next().flatten();
+
+                            drop(terms);
+
+                            let (_, s1, w1) = self.do_evaluate(a1)?;
+
+                            let w0_words_count = w1.words_count + 1;
+
+                            let o0 = self.new_integer_output(w0_words_count)??;
+
+                            // Safety: w0 corresponds to a newly created integer output, so has a unique address
+                            let (s0, w0_words_usage) = unsafe {
+                                operation(
+                                    self.tuple_memory
+                                        .get_integer_output_input(o0.data, (s1, w1)),
+                                )
+                            };
+
+                            IntegerValue {
+                                sign: s0,
+                                words_count: w0_words_count,
+                                words_usage: TupleAddress(w0_words_usage),
+                            }
+                            .encode_head(
+                                o0.registry_address,
+                                &mut self.tuple_memory,
+                                o0.tuple_address,
+                            )?;
+
+                            (o0.registry_address, s0, o0.data.0)
+                        }
+                        SpecialFunctor::InfixOperation {
                             calculate_words_count,
                             operation,
                         } => {

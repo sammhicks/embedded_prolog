@@ -12,10 +12,10 @@ mod instructions;
 mod parser;
 
 use arcstr::ArcStr;
-use ast::{CallName, Definition, Disjunction, Goal, SourceId, Term, TermList, VariableName};
+use ast::{Definition, Disjunction, Goal, SourceId, Term, TermList, VariableName};
 use instructions::{Ai, Instruction, LongInteger, ShortInteger, Xn, Yn};
 
-pub use ast::{Name, Query, EMPTY_LIST};
+pub use ast::{CallName, Name, Query, EMPTY_LIST};
 pub use instructions::{Arity, Functor};
 use num_bigint::BigInt;
 
@@ -119,6 +119,7 @@ impl ProgramInfo {
                 arcstr::literal!("min"),
                 arcstr::literal!("max"),
                 arcstr::literal!("clamp"),
+                arcstr::literal!("is"),
             ]
             .into(),
         }
