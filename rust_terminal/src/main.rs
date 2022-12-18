@@ -326,7 +326,6 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
     }
 }
 
-#[derive(Debug)]
 struct Answer<'a> {
     program_info: &'a ProgramInfo,
     query: &'a Query,
@@ -747,7 +746,7 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
 
-            match compiler::compile_query(query.into(), program_info.clone()) {
+            match compiler::compile_query(query, &program_info) {
                 Ok(result) => break result,
                 Err(err) => {
                     stdout.execute(Print(err))?.execute(Print(EndOfLine))?;

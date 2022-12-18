@@ -15,4 +15,5 @@ crossterm = "0.25.0"
 num-bigint = "0.4.3"
 serialport = "4.2.0"
 sha2 = { version = "0.10.6", default-features = false }
+strsim = "0.10.0"
 thiserror = "1.0.37"

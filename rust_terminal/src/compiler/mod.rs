@@ -3,7 +3,8 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
     hash::Hash,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    rc::Rc,
 };
 
 mod ast;
@@ -11,12 +12,28 @@ mod instructions;
 mod parser;
 
 use arcstr::ArcStr;
-use ast::{CallName, Definition, Disjunction, Goal, Term, TermList, VariableName};
+use ast::{CallName, Definition, Disjunction, Goal, SourceId, Term, TermList, VariableName};
 use instructions::{Ai, Instruction, LongInteger, ShortInteger, Xn, Yn};
 
-pub use ast::{Query, EMPTY_LIST};
+pub use ast::{Name, Query, EMPTY_LIST};
 pub use instructions::{Arity, Functor};
 use num_bigint::BigInt;
+
+trait IntoOkOrError {
+    type Output;
+
+    fn into_ok_or_error(self) -> Self::Output;
+}
+
+impl<T> IntoOkOrError for Result<T, T> {
+    type Output = T;
+
+    fn into_ok_or_error(self) -> Self::Output {
+        match self {
+            Ok(t) | Err(t) => t,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct FunctorSet(BTreeMap<ArcStr, u16>);
@@ -52,15 +69,45 @@ impl<const N: usize> From<[ArcStr; N]> for FunctorSet {
     }
 }
 
-#[derive(Debug, Clone)]
+struct ProgramInfoSourceCache<'a> {
+    program_info: &'a ProgramInfo,
+}
+
+impl<'a> ariadne::Cache<SourceId> for ProgramInfoSourceCache<'a> {
+    fn fetch(&mut self, id: &SourceId) -> Result<&ariadne::Source, Box<dyn fmt::Debug + '_>> {
+        self.program_info
+            .source_files
+            .get(id)
+            .map(|source| source.as_ref())
+            .ok_or_else(|| Box::new(format!("No source for {id}")) as Box<dyn fmt::Debug>)
+    }
+
+    fn display<'b>(&self, id: &'b SourceId) -> Option<Box<dyn fmt::Display + 'b>> {
+        Some(Box::new(id))
+    }
+}
+
+#[derive(Clone)]
 pub struct ProgramInfo {
-    labels: HashMap<(ArcStr, Arity), u16>,
+    source_files: HashMap<SourceId, Rc<ariadne::Source>>,
+    labels: HashMap<(Name, Arity), u16>,
     functors: FunctorSet,
 }
 
 impl ProgramInfo {
-    pub fn new() -> Self {
+    pub fn new(system_call_source: &str, program_path: Rc<Path>, program_source: &str) -> Self {
         Self {
+            source_files: [
+                (
+                    SourceId::SystemCall,
+                    Rc::new(ariadne::Source::from(system_call_source)),
+                ),
+                (
+                    SourceId::Program(program_path),
+                    Rc::new(ariadne::Source::from(program_source)),
+                ),
+            ]
+            .into(),
             labels: HashMap::new(),
             functors: [
                 arcstr::literal!("+"),
@@ -77,8 +124,21 @@ impl ProgramInfo {
         }
     }
 
+    fn with_query_source(&self, query_source: &str) -> Self {
+        let mut new_info = self.clone();
+        new_info.source_files.insert(
+            SourceId::Query,
+            Rc::new(ariadne::Source::from(query_source)),
+        );
+        new_info
+    }
+
     pub fn lookup_functor(&self, name: &u16) -> Option<&str> {
         self.functors.lookup(name)
+    }
+
+    fn as_source_cache(&self) -> ProgramInfoSourceCache {
+        ProgramInfoSourceCache { program_info: self }
     }
 }
 
@@ -185,11 +245,11 @@ impl IsQueryMode for QueryMode {}
 enum TermAllocation<'a, Mode: CompilationMode> {
     Variable {
         vn: Mode::Variable,
-        name: &'a str,
+        name: &'a Name,
     },
     Structure {
         xn: Xn,
-        name: &'a str,
+        name: &'a Name,
         terms: Vec<TermAllocation<'a, Mode>>,
     },
     List {
@@ -197,7 +257,7 @@ enum TermAllocation<'a, Mode: CompilationMode> {
         terms: Vec<TermAllocation<'a, Mode>>,
     },
     Constant {
-        name: &'a str,
+        name: &'a Name,
     },
     Integer {
         i: &'a BigInt,
@@ -232,11 +292,11 @@ enum ArgumentAllocation<'a, Mode: CompilationMode> {
     Variable {
         ai: Ai,
         vn: Mode::Variable,
-        name: &'a str,
+        name: &'a Name,
     },
     Structure {
         ai: Ai,
-        name: &'a str,
+        name: &'a Name,
         terms: Vec<TermAllocation<'a, Mode>>,
     },
     List {
@@ -245,7 +305,7 @@ enum ArgumentAllocation<'a, Mode: CompilationMode> {
     },
     Constant {
         ai: Ai,
-        name: &'a str,
+        name: &'a Name,
     },
     Integer {
         ai: Ai,
@@ -318,7 +378,7 @@ struct PermanentVariablesAllocation<'a> {
 }
 
 impl<'a> PermanentVariablesAllocation<'a> {
-    fn new(head: &'a TermList, goals: &'a [Goal<ArcStr>]) -> Self {
+    fn new(head: &'a TermList, goals: &'a [Goal<Name>]) -> Self {
         let head_variables = head.variables(HashSet::from([VariableName::Cut]));
         let goals_variables = goals
             .iter()
@@ -475,15 +535,15 @@ impl<'a, Mode: CompilationMode<Variable = Vn>> RegisterAllocationState<'a, Mode>
 enum TermRegisterAllocation<'a, Mode: CompilationMode> {
     Variable {
         vn: Mode::Variable,
-        name: &'a str,
+        name: &'a Name,
     },
     Structure {
         xn: Xn,
-        name: &'a str,
+        name: &'a Name,
         terms: &'a [Term],
     },
     Constant {
-        name: &'a str,
+        name: &'a Name,
     },
     List {
         xn: Xn,
@@ -497,7 +557,7 @@ enum TermRegisterAllocation<'a, Mode: CompilationMode> {
 }
 
 impl<'a, Mode: CompilationMode> RegisterAllocationState<'a, Mode> {
-    fn reserve_variable_register(&mut self, name: &'a str) -> Mode::Variable {
+    fn reserve_variable_register(&mut self, name: &'a Name) -> Mode::Variable {
         *self
             .variables
             .entry(VariableName::Named(name))
@@ -588,13 +648,13 @@ impl<'a, Mode: CompilationMode> RegisterAllocationState<'a, Mode> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Label<'a> {
-    name: &'a str,
+    name: &'a Name,
     arity: Arity,
     retry: usize,
 }
 
 impl<'a> Label<'a> {
-    fn named(name: &'a str, arity: u8) -> Self {
+    fn named(name: &'a Name, arity: u8) -> Self {
         Self {
             name,
             arity,
@@ -602,8 +662,8 @@ impl<'a> Label<'a> {
         }
     }
 
-    fn is_named(&self) -> Option<(ArcStr, Arity)> {
-        (self.retry == 0).then(|| (self.name.into(), self.arity))
+    fn is_named(&self) -> Option<(Name, Arity)> {
+        (self.retry == 0).then(|| (self.name.clone(), self.arity))
     }
 
     fn retry(self) -> Self {
@@ -612,6 +672,15 @@ impl<'a> Label<'a> {
             name,
             arity,
             retry: retry + 1,
+        }
+    }
+
+    fn as_owned(&self) -> OwnedLabel {
+        let Label { name, arity, retry } = *self;
+        OwnedLabel {
+            name: Rc::new(name.clone()),
+            arity,
+            retry,
         }
     }
 }
@@ -627,12 +696,39 @@ impl<'a> fmt::Display for Label<'a> {
     }
 }
 
+pub struct OwnedLabel {
+    name: Rc<Name>,
+    arity: Arity,
+    retry: usize,
+}
+
+impl OwnedLabel {
+    fn named((name, arity): (Name, Arity)) -> Self {
+        Self {
+            name: Rc::new(name),
+            arity,
+            retry: 0,
+        }
+    }
+}
+
+impl fmt::Display for OwnedLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let OwnedLabel {
+            ref name,
+            arity,
+            retry,
+        } = *self;
+        Label { name, arity, retry }.fmt(f)
+    }
+}
+
 trait TokenHandler<Mode: CompilationMode> {
     fn token_xa(&mut self, xn: Xn, ai: Ai);
     fn token_va(&mut self, vn: Mode::Variable, ai: Ai);
 
-    fn token_sa(&mut self, name: &str, n: u8, ai: Ai);
-    fn token_sx(&mut self, name: &str, n: u8, xn: Xn) {
+    fn token_sa(&mut self, name: &Name, n: u8, ai: Ai);
+    fn token_sx(&mut self, name: &Name, n: u8, xn: Xn) {
         self.token_sa(name, n, xn.into())
     }
 
@@ -641,14 +737,14 @@ trait TokenHandler<Mode: CompilationMode> {
         self.token_la(xn.into())
     }
 
-    fn token_ca(&mut self, name: &str, ai: Ai);
+    fn token_ca(&mut self, name: &Name, ai: Ai);
     fn token_ia(&mut self, i: &BigInt, ai: Ai);
     fn token_void_a(&mut self, ai: Ai);
 
     fn token_x(&mut self, xn: Xn);
     fn token_v(&mut self, vn: Mode::Variable);
 
-    fn token_c(&mut self, name: &str);
+    fn token_c(&mut self, name: &Name);
     fn token_i(&mut self, i: &BigInt);
     fn token_void(&mut self);
 }
@@ -710,11 +806,110 @@ impl<'a, I: fmt::Display> fmt::Display for Labelled<'a, I> {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Label {0:?} not found")]
-pub struct LabelNotFound(String);
+enum AssemblyErrorType {
+    LabelNotFound {
+        label: OwnedLabel,
+    },
+    LabelAlreadyDeclared {
+        first: OwnedLabel,
+        second: OwnedLabel,
+    },
+}
 
-#[derive(Debug)]
+struct AssemblyError {
+    error_type: AssemblyErrorType,
+    program_info: ProgramInfo,
+}
+
+impl AssemblyError {
+    fn print_report(self) {
+        use chumsky::Span;
+
+        match self.error_type {
+            AssemblyErrorType::LabelNotFound { label } => {
+                let message = format!("{label} not found");
+                ariadne::Report::build(
+                    ariadne::ReportKind::Error,
+                    label.name.span().context(),
+                    label.name.span().start(),
+                )
+                .with_message(&message)
+                .with_label(
+                    ariadne::Label::new(label.name.span().clone())
+                        .with_message(message)
+                        .with_color(ariadne::Color::Red),
+                )
+                .finish()
+                .eprint(self.program_info.as_source_cache())
+                .unwrap();
+
+                let similar_labels = self
+                    .program_info
+                    .labels
+                    .keys()
+                    .filter_map(|similar_label @ (name, arity)| {
+                        let name_matches = name.as_ref() == label.name.as_ref().as_ref();
+                        let names_are_similar =
+                            strsim::jaro_winkler(name.as_ref(), label.name.as_ref().as_ref()) > 0.8;
+                        let arity_matches = *arity == label.arity;
+
+                        (name_matches || (names_are_similar && arity_matches))
+                            .then(|| ((name.span().context(), name.span().start()), similar_label))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+
+                for (name, arity) in similar_labels.values() {
+                    let message = format!("found {name}/{arity}");
+
+                    ariadne::Report::build(
+                        ariadne::ReportKind::Advice,
+                        name.span().context().clone(),
+                        name.span().start(),
+                    )
+                    .with_message(&message)
+                    .with_label(
+                        ariadne::Label::new(name.span().clone())
+                            .with_message(message)
+                            .with_color(ariadne::Color::Green),
+                    )
+                    .finish()
+                    .eprint(self.program_info.as_source_cache())
+                    .unwrap();
+                }
+            }
+            AssemblyErrorType::LabelAlreadyDeclared { first, second } => {
+                ariadne::Report::build(
+                    ariadne::ReportKind::Error,
+                    second.name.span().context(),
+                    second.name.span().start(),
+                )
+                .with_label(
+                    ariadne::Label::new(second.name.span().clone())
+                        .with_message(format!("{second} already declared"))
+                        .with_color(ariadne::Color::Red),
+                )
+                .finish()
+                .eprint(self.program_info.as_source_cache())
+                .unwrap();
+
+                ariadne::Report::build(
+                    ariadne::ReportKind::Advice,
+                    first.name.span().context(),
+                    first.name.span().start(),
+                )
+                .with_label(
+                    ariadne::Label::new(first.name.span().clone())
+                        .with_message(format!("{first} first declared here"))
+                        .with_color(ariadne::Color::Green),
+                )
+                .finish()
+                .eprint(self.program_info.as_source_cache())
+                .unwrap();
+            }
+        }
+    }
+}
+
 struct LabelSet<'a> {
     program_info: &'a mut ProgramInfo,
     new_labels: HashMap<Label<'a>, u16>,
@@ -728,15 +923,39 @@ impl<'a> LabelSet<'a> {
         }
     }
 
-    fn insert(&mut self, label: Label<'a>, pc: u16) {
+    fn insert(&mut self, label: Label<'a>, pc: u16) -> Result<(), AssemblyErrorType> {
+        use std::collections::hash_map::Entry;
+
         if let Some(name) = label.is_named() {
-            self.program_info.labels.insert(name, pc);
+            match self.program_info.labels.entry(name) {
+                Entry::Vacant(entry) => {
+                    entry.insert(pc);
+                }
+                Entry::Occupied(entry) => {
+                    return Err(AssemblyErrorType::LabelAlreadyDeclared {
+                        first: OwnedLabel::named(entry.key().clone()),
+                        second: label.as_owned(),
+                    });
+                }
+            }
         }
 
-        self.new_labels.insert(label, pc);
+        match self.new_labels.entry(label) {
+            Entry::Vacant(entry) => {
+                entry.insert(pc);
+            }
+            Entry::Occupied(entry) => {
+                return Err(AssemblyErrorType::LabelAlreadyDeclared {
+                    first: entry.key().as_owned(),
+                    second: label.as_owned(),
+                });
+            }
+        }
+
+        Ok(())
     }
 
-    fn get(&self, label: Label) -> Result<u16, LabelNotFound> {
+    fn get(&self, label: Label) -> Result<u16, AssemblyErrorType> {
         self.new_labels
             .get(&label)
             .copied()
@@ -745,7 +964,9 @@ impl<'a> LabelSet<'a> {
                     .is_named()
                     .and_then(|name| self.program_info.labels.get(&name).copied())
             })
-            .ok_or_else(|| LabelNotFound(label.to_string()))
+            .ok_or_else(|| AssemblyErrorType::LabelNotFound {
+                label: label.as_owned(),
+            })
     }
 }
 
@@ -756,7 +977,7 @@ impl<'a> InstructionList<'a> {
         Self(Vec::new())
     }
 
-    fn with_system_calls(system_calls: &'a [(String, u8)]) -> Self {
+    fn with_system_calls(system_calls: &'a [(Name, u8)]) -> Self {
         Self(
             (0..)
                 .zip(system_calls.iter())
@@ -850,10 +1071,20 @@ impl<'a> InstructionList<'a> {
         self
     }
 
-    fn assemble(
+    fn assemble_with_program_info(
         self,
         mut program_info: ProgramInfo,
-    ) -> Result<(ProgramInfo, Vec<[u8; 4]>), LabelNotFound> {
+    ) -> Result<(ProgramInfo, Vec<[u8; 4]>), AssemblyError> {
+        match self.assemble(&mut program_info) {
+            Ok(instructions) => Ok((program_info, instructions)),
+            Err(error_type) => Err(AssemblyError {
+                error_type,
+                program_info,
+            }),
+        }
+    }
+
+    fn assemble(self, program_info: &mut ProgramInfo) -> Result<Vec<[u8; 4]>, AssemblyErrorType> {
         enum AB<A, B> {
             A(A),
             B(B),
@@ -889,13 +1120,12 @@ impl<'a> InstructionList<'a> {
             })
             .collect::<Vec<_>>();
 
-        let mut labels = LabelSet::new(&mut program_info);
+        let mut labels = LabelSet::new(program_info);
 
-        instructions
-            .iter()
-            .fold(0, |pc, instruction| match instruction {
+        instructions.iter().try_fold(0, |pc, instruction| {
+            Ok(match instruction {
                 Labelled::Label(label) => {
-                    labels.insert(*label, pc);
+                    labels.insert(*label, pc)?;
                     pc
                 }
                 Labelled::Instruction(_)
@@ -903,7 +1133,8 @@ impl<'a> InstructionList<'a> {
                 | Labelled::Execute(_)
                 | Labelled::TryMeElse(_)
                 | Labelled::RetryMeElse(_) => pc + 1,
-            });
+            })
+        })?;
 
         fn assert_single<I: Iterator>(mut i: I) -> I::Item {
             let v = i.next().unwrap();
@@ -939,7 +1170,7 @@ impl<'a> InstructionList<'a> {
             .filter_map(Result::transpose)
             .collect::<Result<_, _>>()?;
 
-        Ok((program_info, instructions))
+        Ok(instructions)
     }
 }
 
@@ -1049,7 +1280,7 @@ impl<'a, 'i> TokenHandler<ProgramMode> for Assembler<'a, 'i, ProgramMode> {
         }
     }
 
-    fn token_sa(&mut self, name: &str, n: u8, ai: Ai) {
+    fn token_sa(&mut self, name: &Name, n: u8, ai: Ai) {
         self.known_variables.insert(ai);
         let f = self.program_info.functors.get(name.into());
         self.instructions
@@ -1061,7 +1292,7 @@ impl<'a, 'i> TokenHandler<ProgramMode> for Assembler<'a, 'i, ProgramMode> {
         self.instructions.push(Instruction::GetList { ai })
     }
 
-    fn token_ca(&mut self, name: &str, ai: Ai) {
+    fn token_ca(&mut self, name: &Name, ai: Ai) {
         self.known_variables.insert(ai);
         let c = self.program_info.functors.get(name.into());
         self.instructions.push(Instruction::GetConstant { c, ai })
@@ -1091,7 +1322,7 @@ impl<'a, 'i> TokenHandler<ProgramMode> for Assembler<'a, 'i, ProgramMode> {
         }
     }
 
-    fn token_c(&mut self, name: &str) {
+    fn token_c(&mut self, name: &Name) {
         let c = self.program_info.functors.get(name.into());
         self.instructions.push(Instruction::UnifyConstant { c })
     }
@@ -1170,7 +1401,7 @@ impl<'a, 'i> TokenHandler<RuleGoalMode> for Assembler<'a, 'i, RuleGoalMode> {
         }
     }
 
-    fn token_sa(&mut self, name: &str, n: u8, ai: Ai) {
+    fn token_sa(&mut self, name: &Name, n: u8, ai: Ai) {
         self.known_variables.insert(ai);
         let f = self.program_info.functors.get(name.into());
         self.instructions
@@ -1182,7 +1413,7 @@ impl<'a, 'i> TokenHandler<RuleGoalMode> for Assembler<'a, 'i, RuleGoalMode> {
         self.instructions.push(Instruction::PutList { ai })
     }
 
-    fn token_ca(&mut self, name: &str, ai: Ai) {
+    fn token_ca(&mut self, name: &Name, ai: Ai) {
         self.known_variables.insert(ai);
         let c = self.program_info.functors.get(name.into());
         self.instructions.push(Instruction::PutConstant { c, ai })
@@ -1212,7 +1443,7 @@ impl<'a, 'i> TokenHandler<RuleGoalMode> for Assembler<'a, 'i, RuleGoalMode> {
         }
     }
 
-    fn token_c(&mut self, name: &str) {
+    fn token_c(&mut self, name: &Name) {
         let c = self.program_info.functors.get(name.into());
         self.instructions.push(Instruction::SetConstant { c });
     }
@@ -1248,7 +1479,7 @@ impl<'a, 'i> TokenHandler<QueryMode> for Assembler<'a, 'i, QueryMode> {
         self.token_xa(xn, ai)
     }
 
-    fn token_sa(&mut self, name: &str, n: u8, ai: Ai) {
+    fn token_sa(&mut self, name: &Name, n: u8, ai: Ai) {
         self.known_variables.insert(ai);
         let f = self.program_info.functors.get(name.into());
         self.instructions
@@ -1260,7 +1491,7 @@ impl<'a, 'i> TokenHandler<QueryMode> for Assembler<'a, 'i, QueryMode> {
         self.instructions.push(Instruction::PutList { ai })
     }
 
-    fn token_ca(&mut self, name: &str, ai: Ai) {
+    fn token_ca(&mut self, name: &Name, ai: Ai) {
         self.known_variables.insert(ai);
         let c = self.program_info.functors.get(name.into());
         self.instructions.push(Instruction::PutConstant { c, ai })
@@ -1291,7 +1522,7 @@ impl<'a, 'i> TokenHandler<QueryMode> for Assembler<'a, 'i, QueryMode> {
         self.token_x(xn)
     }
 
-    fn token_c(&mut self, name: &str) {
+    fn token_c(&mut self, name: &Name) {
         let c = self.program_info.functors.get(name.into());
         self.instructions.push(Instruction::SetConstant { c });
     }
@@ -1377,7 +1608,7 @@ where
 
 enum GoalAllocation<'a> {
     Goal {
-        name: CallName<&'a str>,
+        name: CallName<&'a Name>,
         allocations: Vec<ArgumentAllocation<'a, RuleGoalMode>>,
     },
     NeckCut,
@@ -1603,7 +1834,7 @@ where
 
     fn tokenize_query_allocations(
         mut self,
-        name: CallName<&'i str>,
+        name: CallName<&'i Name>,
         allocations: &Vec<ArgumentAllocation<'a, Mode>>,
     ) {
         for allocation in allocations {
@@ -1673,20 +1904,81 @@ fn compile_program_definition<'i>(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CompileProgramError {
-    #[error(transparent)]
-    ParseProgramError(#[from] parser::ParseErrorReport),
-    #[error(transparent)]
-    LabelNotFound(#[from] LabelNotFound),
-}
+#[error("Failed to compile program")]
+pub struct CompileProgramError;
 
 pub fn compile_program(
     system_calls: Vec<(String, u8)>,
-    program: PathBuf,
+    path: PathBuf,
 ) -> Result<(ProgramInfo, Vec<[u8; 4]>), CompileProgramError> {
-    let program = parser::parse_program(program)?;
+    let path = Rc::<Path>::from(path);
 
-    let mut program_info = ProgramInfo::new();
+    let program_source = std::fs::read_to_string(&path).map_err(|error| {
+        eprintln!("Failed to open {}: {}", path.display(), error);
+
+        CompileProgramError
+    })?;
+
+    let mut system_call_source = String::new();
+
+    let system_calls = system_calls
+        .into_iter()
+        .map(|(system_call_name, arity)| {
+            use std::fmt::Write;
+
+            struct SystemCallArguments(Arity);
+
+            impl fmt::Display for SystemCallArguments {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    let Self(arity) = *self;
+
+                    if arity == 0 {
+                        Ok(())
+                    } else {
+                        write!(f, "(_")?;
+
+                        for _ in 1..arity {
+                            write!(f, ",_")?;
+                        }
+
+                        write!(f, ")")
+                    }
+                }
+            }
+
+            let start = system_call_source.chars().count();
+
+            write!(&mut system_call_source, "{system_call_name}").unwrap();
+
+            let end = system_call_source.chars().count();
+
+            writeln!(
+                &mut system_call_source,
+                "{} :- <system call>",
+                SystemCallArguments(arity)
+            )
+            .unwrap();
+
+            (
+                Name::new(
+                    ArcStr::from(system_call_name),
+                    (SourceId::SystemCall, start..end),
+                ),
+                arity,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut program_info = ProgramInfo::new(&system_call_source, path.clone(), &program_source);
+
+    let program = parser::parse_program(path, &program_source).map_err(|errors| {
+        for error in errors {
+            parser::print_parse_error_report(error, &program_info);
+        }
+
+        CompileProgramError
+    })?;
+
     let mut instructions = InstructionList::with_system_calls(&system_calls);
 
     for disjunction in &program.definitions {
@@ -1734,24 +2026,33 @@ pub fn compile_program(
         }
     }
 
-    Ok(instructions
+    instructions
         .last_call_optimisation()
-        .assemble(program_info)?)
+        .assemble_with_program_info(program_info)
+        .map_err(|label_not_found| {
+            label_not_found.print_report();
+
+            CompileProgramError
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CompileQueryError {
-    #[error(transparent)]
-    ParseQueryError(#[from] parser::ParseErrorReport),
-    #[error(transparent)]
-    LabelNotFound(#[from] LabelNotFound),
-}
+#[error("Failed to compile query")]
+pub struct CompileQueryError;
 
 pub fn compile_query(
-    query: String,
-    mut program_info: ProgramInfo,
+    query_source: &str,
+    program_info: &ProgramInfo,
 ) -> Result<(ProgramInfo, Query, Vec<[u8; 4]>), CompileQueryError> {
-    let query = parser::parse_query(query)?;
+    let mut program_info = program_info.with_query_source(query_source);
+
+    let query = parser::parse_query(query_source).map_err(|errors| {
+        for error in errors {
+            parser::print_parse_error_report(error, &program_info);
+        }
+
+        CompileQueryError
+    })?;
 
     let allocations = RegisterAllocationState::query().allocate_argument_registers(&query.terms);
 
@@ -1759,7 +2060,13 @@ pub fn compile_query(
     AllocationTokenisationState::new(&mut program_info, &mut instructions)
         .tokenize_query_allocations(query.name.as_ref(), &allocations);
 
-    let (program_info, words) = instructions.assemble(program_info)?;
+    let (program_info, words) = instructions
+        .assemble_with_program_info(program_info)
+        .map_err(|assembly_error| {
+            assembly_error.print_report();
+
+            CompileQueryError
+        })?;
 
     Ok((program_info, query, words))
 }

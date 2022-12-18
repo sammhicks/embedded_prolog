@@ -1,7 +1,9 @@
-use std::{collections::HashMap, fmt, hash::Hash};
+use std::{borrow::Borrow, collections::HashMap, fmt, hash::Hash, ops::Range, path::Path, rc::Rc};
 
 use arcstr::ArcStr;
 use num_bigint::BigInt;
+
+use super::SortExt;
 
 struct CountingSet<T>(HashMap<T, usize>);
 
@@ -32,27 +34,142 @@ impl<T: Eq + Hash> Extend<T> for CountingSet<T> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SourceId {
+    SystemCall,
+    Program(Rc<Path>),
+    Query,
+}
+
+impl fmt::Display for SourceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SourceId::SystemCall => write!(f, "<system call>"),
+            SourceId::Program(path) => write!(f, "{}", path.display()),
+            SourceId::Query => write!(f, "<query>"),
+        }
+    }
+}
+
+impl SourceId {
+    #[allow(clippy::type_complexity)]
+    pub fn stream<'a>(
+        self,
+        source: &'a str,
+    ) -> chumsky::Stream<
+        'a,
+        char,
+        (Self, Range<usize>),
+        Box<dyn Iterator<Item = (char, (Self, Range<usize>))> + 'a>,
+    > {
+        let len = source.len();
+
+        chumsky::Stream::from_iter(
+            (self.clone(), len..len),
+            Box::new(
+                source
+                    .chars()
+                    .enumerate()
+                    .map(move |(i, c)| (c, (self.clone(), i..i + 1))),
+            ),
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct Name {
+    value: ArcStr,
+    span: (SourceId, Range<usize>),
+}
+
+impl Name {
+    pub fn new<S: Borrow<str>>(value: S, span: (SourceId, Range<usize>)) -> Self {
+        Self {
+            value: value.borrow().into(),
+            span,
+        }
+    }
+
+    pub fn span(&self) -> &(SourceId, Range<usize>) {
+        &self.span
+    }
+}
+
+impl From<Name> for ArcStr {
+    fn from(name: Name) -> Self {
+        name.value
+    }
+}
+
+impl<'a> From<&'a Name> for ArcStr {
+    fn from(name: &'a Name) -> Self {
+        name.value.clone()
+    }
+}
+
+impl AsRef<str> for Name {
+    fn as_ref(&self) -> &str {
+        &self.value
+    }
+}
+
+impl fmt::Debug for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl PartialEq for Name {
+    fn eq(&self, other: &Self) -> bool {
+        self.value.eq(&other.value)
+    }
+}
+
+impl Eq for Name {}
+
+impl PartialOrd for Name {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Name {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.value.cmp(&other.value)
+    }
+}
+
+impl Hash for Name {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.value.hash(state)
+    }
+}
+
 pub const EMPTY_LIST: ArcStr = arcstr::literal!("[]");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VariableName<'a> {
-    Named(&'a str),
+    Named(&'a Name),
     Cut,
 }
 
 #[derive(Debug)]
 pub enum Term {
-    Variable { name: ArcStr },
-    Structure { name: ArcStr, terms: TermList },
+    Variable { name: Name },
+    Structure { name: Name, terms: TermList },
     List { head: Box<Term>, tail: Box<Term> },
-    Constant { name: ArcStr },
+    Constant { name: Name },
     Integer { i: BigInt },
     Void,
 }
 
 impl Term {
-    pub const EMPTY_LIST: Term = Term::Constant { name: EMPTY_LIST };
-
     pub fn list(head: Term, tail: Term) -> Term {
         Term::List {
             head: Box::new(head),
@@ -63,7 +180,7 @@ impl Term {
     pub fn variables<'a, V: Extend<VariableName<'a>>>(&'a self, mut variables: V) -> V {
         match self {
             Self::Variable { name } => {
-                variables.extend(std::iter::once(VariableName::Named(name.as_str())));
+                variables.extend(std::iter::once(VariableName::Named(name)));
                 variables
             }
             Self::Structure { terms, .. } => terms.variables(variables),
@@ -72,11 +189,10 @@ impl Term {
         }
     }
 
-    pub fn make_variables_void(&mut self, variables: &[String]) {
+    pub fn make_variables_void(&mut self, variables: &[Name]) {
         match self {
             Term::Variable { name } => {
-                if variables.iter().any(|variable| variable.as_str() == name) {
-                    println!("{name} is now void");
+                if variables.iter().any(|variable| variable == name) {
                     *self = Term::Void
                 }
             }
@@ -126,7 +242,7 @@ impl TermList {
             .fold(variables, |variables, term| term.variables(variables))
     }
 
-    pub fn make_variables_void(&mut self, variables: &[String]) {
+    pub fn make_variables_void(&mut self, variables: &[Name]) {
         for term in self.0.iter_mut() {
             term.make_variables_void(variables);
         }
@@ -150,8 +266,8 @@ pub enum CallName<Name> {
     Is,
 }
 
-impl<'a> CallName<&'a str> {
-    pub fn map_name<O: 'a, F: FnOnce(&'a str) -> O>(self, f: F) -> CallName<O> {
+impl<'a> CallName<&'a Name> {
+    pub fn map_name<O: 'a, F: FnOnce(&'a Name) -> O>(self, f: F) -> CallName<O> {
         match self {
             CallName::Named(name) => CallName::Named(f(name)),
             CallName::True => CallName::True,
@@ -161,10 +277,10 @@ impl<'a> CallName<&'a str> {
     }
 }
 
-impl<Name: AsRef<str>> CallName<Name> {
-    pub fn as_ref(&self) -> CallName<&str> {
+impl CallName<Name> {
+    pub fn as_ref(&self) -> CallName<&Name> {
         match self {
-            CallName::Named(name) => CallName::Named(name.as_ref()),
+            CallName::Named(name) => CallName::Named(name),
             CallName::True => CallName::True,
             CallName::Fail => CallName::Fail,
             CallName::Is => CallName::Is,
@@ -184,16 +300,13 @@ impl<T: fmt::Display> fmt::Display for CallName<T> {
 }
 
 #[derive(Debug)]
-pub enum Goal<Name: AsRef<str>> {
-    Named {
-        name: CallName<Name>,
-        terms: TermList,
-    },
+pub enum Goal<N: AsRef<str>> {
+    Named { name: CallName<N>, terms: TermList },
     NeckCut,
     Cut,
 }
 
-impl<Name: AsRef<str>> Goal<Name> {
+impl<N: AsRef<str>> Goal<N> {
     pub fn variables<'a, V: Extend<VariableName<'a>>>(&'a self, mut variables: V) -> V {
         match self {
             Goal::Named { terms, .. } => terms.variables(variables),
@@ -205,7 +318,7 @@ impl<Name: AsRef<str>> Goal<Name> {
         }
     }
 
-    pub fn make_variables_void(&mut self, variables: &[String]) {
+    pub fn make_variables_void(&mut self, variables: &[Name]) {
         match self {
             Goal::Named { terms, .. } => terms.make_variables_void(variables),
             Goal::NeckCut | Goal::Cut => (),
@@ -214,7 +327,7 @@ impl<Name: AsRef<str>> Goal<Name> {
 }
 
 #[derive(Default)]
-pub struct GoalList(Vec<Goal<ArcStr>>);
+pub struct GoalList(Vec<Goal<Name>>);
 
 impl fmt::Debug for GoalList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -223,15 +336,15 @@ impl fmt::Debug for GoalList {
 }
 
 impl std::ops::Deref for GoalList {
-    type Target = [Goal<ArcStr>];
+    type Target = [Goal<Name>];
 
     fn deref(&self) -> &Self::Target {
         self.0.as_slice()
     }
 }
 
-impl From<Vec<Goal<ArcStr>>> for GoalList {
-    fn from(mut goals: Vec<Goal<ArcStr>>) -> Self {
+impl From<Vec<Goal<Name>>> for GoalList {
+    fn from(mut goals: Vec<Goal<Name>>) -> Self {
         if let Some(first @ Goal::Cut) = goals.first_mut() {
             *first = Goal::NeckCut
         }
@@ -241,8 +354,8 @@ impl From<Vec<Goal<ArcStr>>> for GoalList {
 }
 
 impl IntoIterator for GoalList {
-    type Item = Goal<ArcStr>;
-    type IntoIter = <Vec<Goal<ArcStr>> as IntoIterator>::IntoIter;
+    type Item = Goal<Name>;
+    type IntoIter = <Vec<Goal<Name>> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -264,7 +377,7 @@ impl GoalList {
             .fold(variables, |variables, goal| goal.variables(variables))
     }
 
-    fn make_variables_void(&mut self, variables: &[String]) {
+    fn make_variables_void(&mut self, variables: &[Name]) {
         for goal in self.0.iter_mut() {
             goal.make_variables_void(variables);
         }
@@ -278,16 +391,42 @@ pub struct Definition {
 }
 
 impl Definition {
-    pub fn with_singletons_removed(mut self) -> Self {
+    pub fn with_singletons_removed(mut self, source_id: SourceId, source: &str) -> Self {
+        use chumsky::Span;
+
         let variables = self.head.variables(self.body.variables(CountingSet::new()));
 
         let variables = variables
             .get_with_count_one()
             .filter_map(|name| match *name {
-                VariableName::Named(name) => Some(String::from(name)),
+                VariableName::Named(name) => Some(name.clone()),
                 VariableName::Cut => None,
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .sorted_by_key(|variable| variable.span().start());
+
+        if !variables.is_empty() {
+            let mut colors = ariadne::ColorGenerator::new();
+
+            for variable in &variables {
+                let msg = format!("{} is a Singleton", variable.as_ref());
+
+                ariadne::Report::build(
+                    ariadne::ReportKind::Warning,
+                    source_id.clone(),
+                    variable.span().start(),
+                )
+                .with_message(&msg)
+                .with_label(
+                    ariadne::Label::new(variable.span().clone())
+                        .with_color(colors.next())
+                        .with_message(msg),
+                )
+                .finish()
+                .print((source_id.clone(), ariadne::Source::from(source)))
+                .unwrap();
+            }
+        }
 
         self.head.make_variables_void(&variables);
         self.body.make_variables_void(&variables);
@@ -299,12 +438,12 @@ impl Definition {
 #[derive(Debug)]
 pub enum Disjunction {
     Single {
-        name: ArcStr,
+        name: Name,
         arity: u8,
         definition: Definition,
     },
     Multiple {
-        name: ArcStr,
+        name: Name,
         arity: u8,
         first_definition: Definition,
         middle_definitions: Vec<Definition>,
@@ -319,6 +458,6 @@ pub struct Program {
 
 #[derive(Debug)]
 pub struct Query {
-    pub name: CallName<ArcStr>,
+    pub name: CallName<Name>,
     pub terms: TermList,
 }

@@ -697,6 +697,7 @@ dependencies = [
  "num-bigint",
  "serialport",
  "sha2",
+ "strsim",
  "thiserror",
 ]
 
