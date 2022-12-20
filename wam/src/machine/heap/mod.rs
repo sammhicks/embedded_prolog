@@ -27,9 +27,12 @@ impl From<OutOfMemory> for UnificationError {
     }
 }
 
-impl From<MemoryError> for UnificationError {
-    fn from(inner: MemoryError) -> Self {
-        Self::MemoryError(inner)
+impl<E> From<E> for UnificationError
+where
+    MemoryError: From<E>,
+{
+    fn from(inner: E) -> Self {
+        Self::MemoryError(inner.into())
     }
 }
 
@@ -314,6 +317,7 @@ struct RegistryEntry {
     value_type: ValueType,
     tuple_address: TupleAddress,
     marked_state: MarkedState,
+    is_unified_with: Option<Address>,
 }
 
 impl RegistryEntry {
@@ -451,6 +455,48 @@ impl<'m> Registry<'m> {
             .get_mut(Self::index_of_address(address))
             .and_then(Option::as_mut)
             .ok_or(NoRegistryEntryAt { address })
+    }
+
+    fn get_unified_with(&mut self, address: Address) -> Result<Address, NoRegistryEntryAt> {
+        match self.get(address)?.is_unified_with {
+            None => Ok(address),
+            Some(unified_with) if unified_with == address => Ok(address),
+            Some(unified_with) => {
+                let unified_with = self.get_unified_with(unified_with)?;
+                self.get_mut(address)?.is_unified_with = Some(unified_with);
+
+                Ok(unified_with)
+            }
+        }
+    }
+
+    fn is_already_unified_with(
+        &mut self,
+        a1: Address,
+        a2: Address,
+    ) -> Result<bool, NoRegistryEntryAt> {
+        let d1 = self.get_unified_with(a1)?;
+        let d2 = self.get_unified_with(a2)?;
+
+        Ok(match d1.into_word().cmp(&d2.into_word()) {
+            core::cmp::Ordering::Less => {
+                self.get_mut(a2)?.is_unified_with = Some(d1);
+                self.get_mut(d2)?.is_unified_with = Some(d1);
+                false
+            }
+            core::cmp::Ordering::Equal => true,
+            core::cmp::Ordering::Greater => {
+                self.get_mut(a1)?.is_unified_with = Some(d2);
+                self.get_mut(d1)?.is_unified_with = Some(d2);
+                false
+            }
+        })
+    }
+
+    fn clear_unification(&mut self) {
+        for entry in self.0.iter_mut().filter_map(Option::as_mut) {
+            entry.is_unified_with = None;
+        }
     }
 }
 
@@ -743,6 +789,7 @@ impl<'m> TupleMemory<'m> {
         )
     }
 
+    // The caller must ensure that all ranges are valid
     unsafe fn get_integer_input_input(
         &self,
         (s1, w1): (IntegerSign, IntegerWordsSlice),
@@ -1815,6 +1862,7 @@ impl<'m> Heap<'m> {
             value_type: T::VALUE_TYPE,
             tuple_address,
             marked_state: MarkedState::NotMarked,
+            is_unified_with: None,
         });
 
         self.mark_moved_value(Some(address))?;
@@ -2263,6 +2311,12 @@ impl<'m> Heap<'m> {
     }
 
     pub fn unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationError> {
+        let result = self.do_unify(a1, a2);
+        self.registry.clear_unification();
+        result
+    }
+
+    fn do_unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationError> {
         log_trace!("Unifying {} and {}", a1, a2);
         let (a1, v1, d1, _) = self.get_value(a1)?;
         let (a2, v2, d2, _) = self.get_value(a2)?;
@@ -2316,13 +2370,15 @@ impl<'m> Heap<'m> {
                     (a1, ReferenceOrValue::Value(Value::Structure(f1, n1))),
                     (a2, ReferenceOrValue::Value(Value::Structure(f2, n2))),
                 ) => {
-                    if f1 == f2 && n1 == n2 {
+                    if self.registry.is_already_unified_with(a1, a2)? {
+                        Ok(())
+                    } else if f1 == f2 && n1 == n2 {
                         let mut terms_1 = StructureIterationState::structure_reader(a1);
                         let mut terms_2 = StructureIterationState::structure_reader(a2);
                         for _ in 0..n1.0 {
                             let a1 = terms_1.read_next(self)?;
                             let a2 = terms_2.read_next(self)?;
-                            self.unify(a1, a2)?
+                            self.do_unify(a1, a2)?
                         }
 
                         Ok(())
@@ -2334,15 +2390,19 @@ impl<'m> Heap<'m> {
                     (a1, ReferenceOrValue::Value(Value::List)),
                     (a2, ReferenceOrValue::Value(Value::List)),
                 ) => {
-                    let mut terms_1 = StructureIterationState::structure_reader(a1);
-                    let mut terms_2 = StructureIterationState::structure_reader(a2);
-                    for _ in 0..2 {
-                        let a1 = terms_1.read_next(self)?;
-                        let a2 = terms_2.read_next(self)?;
-                        self.unify(a1, a2)?
-                    }
+                    if self.registry.is_already_unified_with(a1, a2)? {
+                        Ok(())
+                    } else {
+                        let mut terms_1 = StructureIterationState::structure_reader(a1);
+                        let mut terms_2 = StructureIterationState::structure_reader(a2);
+                        for _ in 0..2 {
+                            let a1 = terms_1.read_next(self)?;
+                            let a2 = terms_2.read_next(self)?;
+                            self.do_unify(a1, a2)?
+                        }
 
-                    Ok(())
+                        Ok(())
+                    }
                 }
                 (
                     (_, ReferenceOrValue::Value(Value::Constant(c1))),
@@ -2966,6 +3026,36 @@ impl<'m> Heap<'m> {
             Err(ExpressionEvaluationOrOutOfMemory::ExpressionEvaluationError(err)) => Err(err),
             Err(ExpressionEvaluationOrOutOfMemory::OutOfMemory(err)) => Ok(Err(err)),
         }
+    }
+
+    pub fn compare(
+        &mut self,
+        a1: Address,
+        a2: Address,
+    ) -> Result<Result<core::cmp::Ordering, OutOfMemory>, ExpressionEvaluationError> {
+        let (_, s1, w1) = match self.do_evaluate(Some(a1)) {
+            Ok(a1) => a1,
+            Err(ExpressionEvaluationOrOutOfMemory::ExpressionEvaluationError(err)) => {
+                return Err(err)
+            }
+            Err(ExpressionEvaluationOrOutOfMemory::OutOfMemory(err)) => return Ok(Err(err)),
+        };
+
+        let (_, s2, w2) = match self.do_evaluate(Some(a2)) {
+            Ok(a1) => a1,
+            Err(ExpressionEvaluationOrOutOfMemory::ExpressionEvaluationError(err)) => {
+                return Err(err)
+            }
+            Err(ExpressionEvaluationOrOutOfMemory::OutOfMemory(err)) => return Ok(Err(err)),
+        };
+
+        // Safety: The ranges are returned from do_evaluate so are valid
+        let (w1, w2) = unsafe {
+            self.tuple_memory
+                .get_integer_input_input((s1, w1), (s2, w2))
+        };
+
+        Ok(Ok(w1.cmp(&w2)))
     }
 
     pub fn write_system_call_integer(

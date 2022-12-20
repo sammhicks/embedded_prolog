@@ -2,9 +2,12 @@ use std::{ops::Range, path::Path, rc::Rc};
 
 use chumsky::{prelude::*, text::whitespace};
 
-use super::ast::{
-    CallName, Definition, Disjunction, Goal, GoalList, Name, Program, Query, SourceId, Term,
-    TermList,
+use super::{
+    ast::{
+        CallName, Definition, Disjunction, Goal, GoalList, Name, Program, Query, SourceId, Term,
+        TermList,
+    },
+    instructions::Comparison,
 };
 
 pub type ParseError = Simple<char, (SourceId, Range<usize>)>;
@@ -123,7 +126,8 @@ fn term() -> impl Parser<char, Term, Error = ParseError> {
             )
             .padded()
             .delimited_by(just('['), just(']'))
-            .foldr(Term::list);
+            .foldr(Term::list)
+            .labelled("list");
 
         let integer = just('-')
             .or_not()
@@ -194,15 +198,51 @@ fn is() -> impl Parser<char, TermList, Error = ParseError> {
         .map(|(lhs, rhs)| TermList::from([lhs, rhs]))
 }
 
+fn comparison() -> impl Parser<char, (Comparison, TermList), Error = ParseError> {
+    let term = term().boxed();
+
+    let operator = choice((
+        just(r"=<").to(Comparison::LessThanOrEqualTo),
+        just(r">=").to(Comparison::GreaterThanOrEqualTo),
+        just(r"=\=").to(Comparison::NotEqualTo),
+        just(r"=:=").to(Comparison::EqualTo),
+        just(r">").to(Comparison::GreaterThan),
+        just(r"<").to(Comparison::LessThan),
+    ));
+
+    term.clone()
+        .then(operator.padded())
+        .then(term)
+        .map(|((lhs, operator), rhs)| (operator, TermList::from([lhs, rhs])))
+}
+
+fn unify() -> impl Parser<char, TermList, Error = ParseError> {
+    let term = term().boxed();
+
+    term.clone()
+        .then_ignore(just('=').padded())
+        .then(term)
+        .map(|(lhs, rhs)| TermList::from([lhs, rhs]))
+}
+
 pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Vec<ParseError>> {
     let source_id = SourceId::Program(path);
 
     let goal = true_or_fail_or_named_call()
         .or(just('!').map(|_| Goal::Cut))
+        .or(comparison().map(|(operator, terms)| Goal::Named {
+            name: CallName::Comparison(operator),
+            terms,
+        }))
         .or(is().map(|terms| Goal::Named {
             name: CallName::Is,
             terms,
-        }));
+        }))
+        .or(unify().map(|terms| Goal::Named {
+            name: CallName::Unify,
+            terms,
+        }))
+        .labelled("goal");
 
     let rule = make_structure(term())
         .then_ignore(just(":-").padded())
@@ -213,7 +253,8 @@ pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Ve
                 .map(GoalList::from),
         )
         .then_ignore(just('.'))
-        .map(|((name, head), body)| (name, Definition { head, body }));
+        .map(|((name, head), body)| (name, Definition { head, body }))
+        .labelled("rule");
 
     let fact = make_structure(term())
         .then_ignore(just('.'))
@@ -225,13 +266,15 @@ pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Ve
                     body: GoalList::new(),
                 },
             )
-        });
+        })
+        .labelled("fact");
 
-    let definition = rule.or(fact).padded();
+    let definition = rule.or(fact).padded().labelled("definition");
 
     definition
         .repeated()
         .then_ignore(end())
+        .labelled("program")
         .map(|definitions| {
             let mut definitions = definitions
                 .into_iter()
@@ -278,8 +321,16 @@ pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Ve
 
 pub fn parse_query(query: &str) -> Result<Query, Vec<ParseError>> {
     true_or_fail_or_named_call()
+        .or(comparison().map(|(operator, terms)| Query {
+            name: CallName::Comparison(operator),
+            terms,
+        }))
         .or(is().map(|terms| Query {
             name: CallName::Is,
+            terms,
+        }))
+        .or(unify().map(|terms| Query {
+            name: CallName::Unify,
             terms,
         }))
         .padded()

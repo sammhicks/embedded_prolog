@@ -1,6 +1,6 @@
 use std::{
     borrow::Borrow,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     io::{Read, Write},
     net::TcpStream,
@@ -9,12 +9,13 @@ use std::{
 };
 
 use anyhow::Context;
+use arcstr::ArcStr;
 use clap::Parser;
-use compiler::{CallName, Functor, ProgramInfo, Query};
+use compiler::{Functor, ProgramInfo, Query, Term};
 use crossterm::{
     event::{Event, KeyCode, KeyEvent, KeyEventKind},
     style::{style, Print, Stylize},
-    ExecutableCommand,
+    ExecutableCommand, QueueableCommand,
 };
 use num_bigint::BigInt;
 use serialport::SerialPortType;
@@ -181,6 +182,7 @@ impl Precedence {
 
 struct DisplayValue<'a> {
     answer: &'a Answer<'a>,
+    parent: Option<&'a Address>,
     address: &'a Address,
     precedence: Option<Precedence>,
 }
@@ -189,13 +191,27 @@ impl<'a> fmt::Display for DisplayValue<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let answer = self.answer;
 
+        if let Some(parent) = self.parent.copied() {
+            if answer.loops.contains(&LoopLink {
+                parent,
+                child: *self.address,
+            }) {
+                return DisplayReference {
+                    answer,
+                    reference: self.address,
+                }
+                .fmt(f);
+            }
+        }
+
         match self.answer.values.get(self.address) {
             Some(Value::Reference(reference)) => {
                 if reference == self.address {
-                    write!(f, "_{reference}")
+                    DisplayReference { answer, reference }.fmt(f)
                 } else {
                     DisplayValue {
                         answer,
+                        parent: Some(self.address),
                         address: reference,
                         precedence: self.precedence,
                     }
@@ -208,6 +224,7 @@ impl<'a> fmt::Display for DisplayValue<'a> {
                     "{}",
                     DisplayStructure {
                         answer,
+                        address: self.address,
                         name,
                         terms,
                         precedence: self.precedence,
@@ -220,10 +237,12 @@ impl<'a> fmt::Display for DisplayValue<'a> {
                 DisplayValue {
                     answer,
                     address: head,
+                    parent: Some(self.address),
                     precedence: None,
                 },
                 DisplayListTail {
                     answer,
+                    parent: Some(self.address),
                     address: tail,
                 }
             ),
@@ -243,8 +262,28 @@ impl<'a> fmt::Display for DisplayValue<'a> {
     }
 }
 
+struct DisplayReference<'a> {
+    answer: &'a Answer<'a>,
+    reference: &'a Address,
+}
+
+impl<'a> fmt::Display for DisplayReference<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self
+            .answer
+            .variables
+            .iter()
+            .find_map(|(name, address)| (address == self.reference).then_some(name))
+        {
+            Some(name) => name.fmt(f),
+            None => write!(f, "_{}", self.reference),
+        }
+    }
+}
+
 struct DisplayStructure<'a> {
     answer: &'a Answer<'a>,
+    address: &'a Address,
     name: &'a Functor,
     terms: &'a [Address],
     precedence: Option<Precedence>,
@@ -261,6 +300,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
                 self.name,
                 DisplayCommaSeparated(self.terms.iter().map(|address| DisplayValue {
                     answer,
+                    parent: Some(self.address),
                     address,
                     precedence: None
                 }))
@@ -268,6 +308,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
             Some(operator) => match (operator, self.terms) {
                 (":", [lhs, rhs]) => DisplayInfix {
                     answer,
+                    address: self.address,
                     operator,
                     precedence: Precedence(6),
                     parent_precedence: self.precedence,
@@ -277,6 +318,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
                 .fmt(f),
                 ("+" | "-", [lhs, rhs]) => DisplayInfix {
                     answer,
+                    address: self.address,
                     operator,
                     precedence: Precedence(5),
                     parent_precedence: self.precedence,
@@ -286,6 +328,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
                 .fmt(f),
                 ("*" | "//" | "div" | "mod", [lhs, rhs]) => DisplayInfix {
                     answer,
+                    address: self.address,
                     operator,
                     precedence: Precedence(4),
                     parent_precedence: self.precedence,
@@ -295,6 +338,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
                 .fmt(f),
                 ("+" | "-", [term]) => DisplayPrefix {
                     answer,
+                    address: self.address,
                     operator,
                     precedence: Precedence(2),
                     parent_precedence: self.precedence,
@@ -306,6 +350,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
                     "{operator}({})",
                     DisplayCommaSeparated(self.terms.iter().map(|address| DisplayValue {
                         answer,
+                        parent: Some(self.address),
                         address,
                         precedence: None
                     }))
@@ -317,6 +362,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
 
 struct DisplayPrefix<'a> {
     answer: &'a Answer<'a>,
+    address: &'a Address,
     operator: &'a str,
     precedence: Precedence,
     parent_precedence: Option<Precedence>,
@@ -327,6 +373,7 @@ impl<'a> fmt::Display for DisplayPrefix<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             answer,
+            address,
             operator,
             precedence,
             parent_precedence,
@@ -335,6 +382,7 @@ impl<'a> fmt::Display for DisplayPrefix<'a> {
 
         let term = DisplayValue {
             answer,
+            parent: Some(address),
             address: term,
             precedence: Some(precedence),
         };
@@ -349,6 +397,7 @@ impl<'a> fmt::Display for DisplayPrefix<'a> {
 
 struct DisplayInfix<'a> {
     answer: &'a Answer<'a>,
+    address: &'a Address,
     operator: &'a str,
     precedence: Precedence,
     parent_precedence: Option<Precedence>,
@@ -360,6 +409,7 @@ impl<'a> fmt::Display for DisplayInfix<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             answer,
+            address,
             operator,
             precedence,
             parent_precedence,
@@ -369,11 +419,13 @@ impl<'a> fmt::Display for DisplayInfix<'a> {
 
         let lhs = DisplayValue {
             answer,
+            parent: Some(address),
             address: lhs,
             precedence: Some(precedence),
         };
         let rhs = DisplayValue {
             answer,
+            parent: Some(address),
             address: rhs,
             precedence: Some(precedence.decrement()),
         };
@@ -388,6 +440,7 @@ impl<'a> fmt::Display for DisplayInfix<'a> {
 
 struct DisplayListTail<'a> {
     answer: &'a Answer<'a>,
+    parent: Option<&'a Address>,
     address: &'a Address,
 }
 
@@ -395,13 +448,30 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let answer = self.answer;
 
+        if let Some(parent) = self.parent.copied() {
+            if answer.loops.contains(&LoopLink {
+                parent,
+                child: *self.address,
+            }) {
+                return write!(
+                    f,
+                    "|{}",
+                    DisplayReference {
+                        answer,
+                        reference: self.address,
+                    }
+                );
+            }
+        }
+
         match self.answer.values.get(self.address) {
             Some(Value::Reference(reference)) => {
                 if reference == self.address {
-                    write!(f, "|_{reference}")
+                    write!(f, "|{}", DisplayReference { answer, reference })
                 } else {
                     DisplayValue {
                         answer,
+                        parent: Some(self.address),
                         address: reference,
                         precedence: None,
                     }
@@ -413,6 +483,7 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
                 "|{}",
                 DisplayStructure {
                     answer,
+                    address: self.address,
                     name,
                     terms,
                     precedence: None,
@@ -423,11 +494,13 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
                 ",{}{}",
                 DisplayValue {
                     answer,
+                    parent: Some(self.address),
                     address: head,
                     precedence: None,
                 },
                 DisplayListTail {
                     answer,
+                    parent: Some(self.address),
                     address: tail
                 }
             ),
@@ -447,40 +520,162 @@ impl<'a> fmt::Display for DisplayListTail<'a> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct LoopLink {
+    parent: Address,
+    child: Address,
+}
+
+struct LoopScannerState<'a> {
+    values: &'a BTreeMap<Address, Value>,
+    loops: HashSet<LoopLink>,
+    descendants: HashMap<Address, HashSet<Address>>,
+}
+
+impl<'a> LoopScannerState<'a> {
+    fn check_node_for_loops(self, parent: Address) -> Self {
+        match self.values.get(&parent).unwrap() {
+            Value::Reference(child) => self.check_link_for_loops((parent, *child)),
+            Value::Structure(_, children) => children
+                .as_ref()
+                .iter()
+                .map(move |child| (parent, *child))
+                .fold(self, Self::check_link_for_loops),
+            Value::List(lhs, rhs) => self
+                .check_link_for_loops((parent, *lhs))
+                .check_link_for_loops((parent, *rhs)),
+            Value::Constant(_) | Value::Integer(_) | Value::Error(_) => self,
+        }
+    }
+
+    fn check_link_for_loops(mut self, (parent, child): (Address, Address)) -> Self {
+        self.descendants.entry(parent).or_default().insert(child);
+
+        for entry in self.descendants.values_mut() {
+            if entry.contains(&parent) {
+                entry.insert(child);
+            }
+        }
+
+        if let Some(entry) = self.descendants.get(&child) {
+            if entry.contains(&parent) {
+                self.loops.insert(LoopLink { parent, child });
+                return self;
+            }
+        }
+
+        self.check_node_for_loops(child)
+    }
+}
+
+struct VariableBindingsState<'a> {
+    values: &'a BTreeMap<Address, Value>,
+    variable_bindings: BTreeMap<ArcStr, Address>,
+}
+
+impl<'a> VariableBindingsState<'a> {
+    fn get_value(&self, address: &Address) -> &'a Value {
+        match self
+            .values
+            .get(address)
+            .unwrap_or_else(|| panic!("No value for address {address}"))
+        {
+            value @ Value::Reference(reference) => {
+                if address == reference {
+                    value
+                } else {
+                    self.get_value(reference)
+                }
+            }
+            value => value,
+        }
+    }
+
+    fn calculate_bindings(mut self, (term, address): (&'a Term, &Address)) -> Self {
+        let value = self.get_value(address);
+        match (term, value) {
+            (Term::Variable { name }, _) => {
+                self.variable_bindings.insert(name.as_string(), *address);
+                self
+            }
+            (Term::Structure { terms, .. }, Value::Structure(_, term_addresses)) => terms
+                .iter()
+                .zip(term_addresses.as_ref())
+                .fold(self, Self::calculate_bindings),
+            (Term::List { head, tail }, Value::List(head_address, tail_address)) => self
+                .calculate_bindings((head, head_address))
+                .calculate_bindings((tail, tail_address)),
+            (Term::Constant { .. }, Value::Constant(..))
+            | (Term::Integer { .. }, Value::Integer(..))
+            | (Term::Void, _) => self,
+            _ => panic!("Failed to unify {term:?} with {value:?}"),
+        }
+    }
+
+    fn generate_loop_variables(mut self, loops: &HashSet<LoopLink>) -> Self {
+        let loop_variables = loops
+            .iter()
+            .filter_map(|LoopLink { child, .. }| {
+                (!self
+                    .variable_bindings
+                    .iter()
+                    .any(|(_, variable)| variable == child))
+                .then_some(*child)
+            })
+            .collect::<BTreeSet<_>>();
+
+        self.variable_bindings
+            .extend((1..).map(|n| arcstr::format!("_S{n}")).zip(loop_variables));
+
+        self
+    }
+}
+
 struct Answer<'a> {
     program_info: &'a ProgramInfo,
-    query: &'a Query,
-    registers: Vec<Address>,
     values: BTreeMap<Address, Value>,
+    variables: BTreeMap<ArcStr, Address>,
+    loops: HashSet<LoopLink>,
 }
 
 impl<'a> fmt::Display for Answer<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.query.name.as_ref(), self.registers.as_slice()) {
-            (CallName::Is, [lhs, rhs]) => write!(
-                f,
-                "{} is {}",
-                DisplayValue {
-                    answer: self,
-                    address: lhs,
-                    precedence: None
-                },
-                DisplayValue {
-                    answer: self,
-                    address: rhs,
-                    precedence: None
-                }
-            ),
-            _ => write!(
-                f,
-                "{}({})",
-                self.query.name,
-                DisplayCommaSeparated(self.registers.iter().map(|address| DisplayValue {
-                    answer: self,
-                    address,
-                    precedence: None,
-                }))
-            ),
+        let printed_answers_count =
+            self.variables
+                .iter()
+                .try_fold(0, |printed_answers_count, (name, address)| {
+                    if let Some(Value::Reference(reference)) = self.values.get(address) {
+                        if Some(name)
+                            == self
+                                .variables
+                                .iter()
+                                .find_map(|(name, address)| (reference == address).then_some(name))
+                        {
+                            return Ok(printed_answers_count);
+                        }
+                    }
+
+                    if printed_answers_count > 0 {
+                        writeln!(f, ",")?;
+                    }
+
+                    write!(
+                        f,
+                        "{name} = {}",
+                        DisplayValue {
+                            answer: self,
+                            parent: None,
+                            address,
+                            precedence: None
+                        }
+                    )
+                    .map(|()| printed_answers_count + 1)
+                })?;
+
+        match printed_answers_count {
+            0 => "true".bold().fmt(f),
+            1 => Ok(()),
+            _ => " ".fmt(f),
         }
     }
 }
@@ -738,11 +933,38 @@ trait ReadWriteExt: Sized + Read + Write {
             }
         }
 
+        let loops = answer_registers
+            .iter()
+            .copied()
+            .fold(
+                LoopScannerState {
+                    values: &known_values,
+                    descendants: HashMap::new(),
+                    loops: HashSet::new(),
+                },
+                LoopScannerState::check_node_for_loops,
+            )
+            .loops;
+
+        let variables = query
+            .terms
+            .iter()
+            .zip(answer_registers.as_slice())
+            .fold(
+                VariableBindingsState {
+                    values: &known_values,
+                    variable_bindings: BTreeMap::new(),
+                },
+                VariableBindingsState::calculate_bindings,
+            )
+            .generate_loop_variables(&loops)
+            .variable_bindings;
+
         Ok(Answer {
             program_info,
-            query,
-            registers: answer_registers,
             values: known_values,
+            variables,
+            loops,
         })
     }
 }
@@ -772,6 +994,24 @@ struct EndOfLine;
 impl fmt::Display for EndOfLine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f)
+    }
+}
+
+struct PrintLn<T>(T);
+
+impl<T: fmt::Display> crossterm::Command for PrintLn<T> {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        Print(&self.0).write_ansi(f)?;
+        Print(EndOfLine).write_ansi(f)
+    }
+
+    fn execute_winapi(&self) -> crossterm::Result<()> {
+        Print(&self.0).execute_winapi()?;
+        Print(EndOfLine).execute_winapi()
+    }
+
+    fn is_ansi_code_supported(&self) -> bool {
+        Print(&self.0).is_ansi_code_supported()
     }
 }
 
@@ -825,9 +1065,7 @@ fn main() -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
 
     let mut port = if connect_to_simulator {
-        stdout
-            .execute(Print("Connecting to device"))?
-            .execute(Print(EndOfLine))?;
+        stdout.execute(PrintLn("Connecting to device"))?;
         Port::TcpStream(TcpStream::connect("localhost:8080").context("Failed to connect")?)
     } else {
         Port::Serial(
@@ -887,7 +1125,7 @@ fn main() -> anyhow::Result<()> {
             match compiler::compile_query(query, &program_info) {
                 Ok(result) => break result,
                 Err(err) => {
-                    stdout.execute(Print(err))?.execute(Print(EndOfLine))?;
+                    stdout.execute(PrintLn(err))?;
                     continue;
                 }
             }
@@ -899,7 +1137,11 @@ fn main() -> anyhow::Result<()> {
 
         'outer: loop {
             break match port.read_one()? {
-                b'A' => stdout.execute(Print(port.get_answer(&program_info, &query)?))?,
+                b'A' => {
+                    let answer = port.get_answer(&program_info, &query)?;
+
+                    stdout.queue(Print(answer))?
+                }
                 b'C' => {
                     stdout.execute(Print(port.get_answer(&program_info, &query)?))?;
 
@@ -913,7 +1155,7 @@ fn main() -> anyhow::Result<()> {
                             match code {
                                 KeyCode::Esc | KeyCode::Enter => break 'outer &mut stdout,
                                 KeyCode::Char(' ') => {
-                                    stdout.execute(Print(EndOfLine))?;
+                                    stdout.execute(PrintLn(";"))?;
                                     break;
                                 }
                                 code => {
@@ -930,13 +1172,13 @@ fn main() -> anyhow::Result<()> {
                     port.write_one(b'C')?;
                     continue;
                 }
-                b'F' => stdout.execute(Print("fail".bold()))?,
-                b'E' => stdout.execute(Print(
+                b'F' => stdout.queue(Print("fail".bold()))?,
+                b'E' => stdout.queue(Print(
                     style(format_args!("error: {}", port.read_error_message()?)).red(),
                 ))?,
-                code => stdout.execute(Print(format_args!("Bad code {code}")))?,
+                code => stdout.queue(Print(format_args!("Bad code {code}")))?,
             };
         }
-        .execute(Print(EndOfLine))?;
+        .execute(PrintLn('.'))?;
     }
 }

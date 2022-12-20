@@ -107,6 +107,30 @@ impl<'a> From<&'a BigInt> for LongInteger {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Comparison {
+    GreaterThan,
+    LessThan,
+    LessThanOrEqualTo,
+    GreaterThanOrEqualTo,
+    NotEqualTo,
+    EqualTo,
+}
+
+impl fmt::Display for Comparison {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Comparison::GreaterThan => r">",
+            Comparison::LessThan => r"<",
+            Comparison::LessThanOrEqualTo => r"=<",
+            Comparison::GreaterThanOrEqualTo => r">=",
+            Comparison::NotEqualTo => r"=\=",
+            Comparison::EqualTo => r"=:=",
+        }
+        .fmt(f)
+    }
+}
+
 #[derive(Debug)]
 pub enum Instruction {
     PutVariableXn { xn: Xn, ai: Ai },
@@ -156,9 +180,11 @@ pub enum Instruction {
     NeckCut,
     GetLevel { yn: Yn },
     Cut { yn: Yn },
+    Comparison(Comparison),
     Is,
     True,
     Fail,
+    Unify,
     SystemCall { i: SystemCallIndex },
 }
 
@@ -216,9 +242,11 @@ impl fmt::Display for Instruction {
             Instruction::NeckCut => write!(f, "neck_cut"),
             Instruction::GetLevel { yn } => write!(f, "get_level({yn})"),
             Instruction::Cut { yn } => write!(f, "cut({yn})"),
+            Instruction::Comparison(comparison) => write!(f, "{comparison}"),
             Instruction::Is => write!(f, "is"),
             Instruction::True => write!(f, "true"),
             Instruction::Fail => write!(f, "fail"),
+            Instruction::Unify => write!(f, "unify"),
             Instruction::SystemCall { i } => write!(f, "system_call({i})"),
         }
     }
@@ -409,9 +437,18 @@ impl Instruction {
             Instruction::NeckCut => just(0x53),
             Instruction::GetLevel { yn } => half_word_instruction(0x54, yn),
             Instruction::Cut { yn } => half_word_instruction(0x55, yn),
+            Instruction::Comparison(comparison) => just(match comparison {
+                Comparison::GreaterThan => 0x60,
+                Comparison::LessThan => 0x61,
+                Comparison::LessThanOrEqualTo => 0x62,
+                Comparison::GreaterThanOrEqualTo => 0x63,
+                Comparison::NotEqualTo => 0x64,
+                Comparison::EqualTo => 0x65,
+            }),
             Instruction::Is => just(0x66),
             Instruction::True => just(0x70),
             Instruction::Fail => just(0x71),
+            Instruction::Unify => just(0x72),
             Instruction::SystemCall { i } => half_word_instruction(0x80, i),
         }
     }

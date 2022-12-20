@@ -108,6 +108,16 @@ impl<'m> From<ProgramCounterOutOfRange> for Error<'m> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Comparison {
+    GreaterThan,
+    LessThan,
+    LessThanOrEqualTo,
+    GreaterThanOrEqualTo,
+    NotEqualTo,
+    EqualTo,
+}
+
 #[derive(Debug)]
 enum Instruction<'memory> {
     PutVariableXn { ai: Ai, xn: Xn },
@@ -157,9 +167,11 @@ enum Instruction<'memory> {
     NeckCut,
     GetLevel { yn: Yn },
     Cut { yn: Yn },
+    Comparison(Comparison),
     Is,
     True,
     Fail,
+    Unify,
     SystemCall { i: system_call::SystemCallIndex },
 }
 
@@ -430,9 +442,28 @@ impl<'memory> Instruction<'memory> {
             [0x53, 0, 0, 0] => (pc.offset(1), Instruction::NeckCut),
             [0x54, 0, 0, yn] => (pc.offset(1), Instruction::GetLevel { yn: Yn { yn } }),
             [0x55, 0, 0, yn] => (pc.offset(1), Instruction::Cut { yn: Yn { yn } }),
+            [0x60, 0, 0, 0] => (
+                pc.offset(1),
+                Instruction::Comparison(Comparison::GreaterThan),
+            ),
+            [0x61, 0, 0, 0] => (pc.offset(1), Instruction::Comparison(Comparison::LessThan)),
+            [0x62, 0, 0, 0] => (
+                pc.offset(1),
+                Instruction::Comparison(Comparison::LessThanOrEqualTo),
+            ),
+            [0x63, 0, 0, 0] => (
+                pc.offset(1),
+                Instruction::Comparison(Comparison::GreaterThanOrEqualTo),
+            ),
+            [0x64, 0, 0, 0] => (
+                pc.offset(1),
+                Instruction::Comparison(Comparison::NotEqualTo),
+            ),
+            [0x65, 0, 0, 0] => (pc.offset(1), Instruction::Comparison(Comparison::EqualTo)),
             [0x66, 0, 0, 0] => (pc.offset(1), Instruction::Is),
             [0x70, 0, 0, 0] => (pc.offset(1), Instruction::True),
             [0x71, 0, 0, 0] => (pc.offset(1), Instruction::Fail),
+            [0x72, 0, 0, 0] => (pc.offset(1), Instruction::Unify),
             [0x80, 0, 0, n] => (
                 pc.offset(1),
                 Instruction::SystemCall {
@@ -1060,6 +1091,25 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 self.memory.cut(yn)?;
                 Ok(())
             }
+            Instruction::Comparison(operation) => {
+                let [a1, a2] = self.special_functor()?;
+                let comparison = self.memory.compare(a1, a2)??;
+
+                let success = match operation {
+                    Comparison::GreaterThan => comparison.is_gt(),
+                    Comparison::LessThan => comparison.is_lt(),
+                    Comparison::LessThanOrEqualTo => comparison.is_le(),
+                    Comparison::GreaterThanOrEqualTo => comparison.is_ge(),
+                    Comparison::NotEqualTo => comparison.is_ne(),
+                    Comparison::EqualTo => comparison.is_eq(),
+                };
+
+                if success {
+                    Ok(())
+                } else {
+                    self.backtrack()
+                }
+            }
             Instruction::Is => {
                 let [a1, a2] = self.special_functor()?;
                 let a2 = self.memory.evaluate(a2)??;
@@ -1070,6 +1120,10 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 Ok(())
             }
             Instruction::Fail => self.backtrack(),
+            Instruction::Unify => {
+                let [a1, a2] = self.special_functor()?;
+                self.unify(a1, a2)
+            }
             Instruction::SystemCall { i } => {
                 match self.system_calls.execute(
                     system_call::Machine {

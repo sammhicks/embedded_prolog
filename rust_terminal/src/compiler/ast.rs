@@ -90,6 +90,10 @@ impl Name {
         }
     }
 
+    pub fn as_string(&self) -> ArcStr {
+        self.value.clone()
+    }
+
     pub fn span(&self) -> &(SourceId, Range<usize>) {
         &self.span
     }
@@ -267,29 +271,35 @@ impl<'a> IntoIterator for &'a TermList {
 #[derive(Debug, Clone, Copy)]
 pub enum CallName<Name> {
     Named(Name),
+    Comparison(super::instructions::Comparison),
+    Is,
     True,
     Fail,
-    Is,
+    Unify,
 }
 
 impl<'a> CallName<&'a Name> {
     pub fn map_name<O: 'a, F: FnOnce(&'a Name) -> O>(self, f: F) -> CallName<O> {
         match self {
-            CallName::Named(name) => CallName::Named(f(name)),
-            CallName::True => CallName::True,
-            CallName::Fail => CallName::Fail,
-            CallName::Is => CallName::Is,
+            Self::Named(name) => CallName::Named(f(name)),
+            Self::Comparison(comparison) => CallName::Comparison(comparison),
+            Self::Is => CallName::Is,
+            Self::True => CallName::True,
+            Self::Fail => CallName::Fail,
+            Self::Unify => CallName::Unify,
         }
     }
 }
 
 impl CallName<Name> {
     pub fn as_ref(&self) -> CallName<&Name> {
-        match self {
-            CallName::Named(name) => CallName::Named(name),
-            CallName::True => CallName::True,
-            CallName::Fail => CallName::Fail,
-            CallName::Is => CallName::Is,
+        match *self {
+            Self::Named(ref name) => CallName::Named(name),
+            Self::Comparison(comparison) => CallName::Comparison(comparison),
+            Self::Is => CallName::Is,
+            Self::True => CallName::True,
+            Self::Fail => CallName::Fail,
+            Self::Unify => CallName::Unify,
         }
     }
 }
@@ -298,9 +308,11 @@ impl<T: fmt::Display> fmt::Display for CallName<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Named(name) => name.fmt(f),
-            Self::True => write!(f, "true"),
-            Self::Fail => write!(f, "fail"),
-            Self::Is => write!(f, "is"),
+            Self::Comparison(comparison) => comparison.fmt(f),
+            Self::Is => "is".fmt(f),
+            Self::True => "true".fmt(f),
+            Self::Fail => "fail".fmt(f),
+            Self::Unify => "=".fmt(f),
         }
     }
 }

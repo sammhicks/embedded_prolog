@@ -12,10 +12,10 @@ mod instructions;
 mod parser;
 
 use arcstr::ArcStr;
-use ast::{Definition, Disjunction, Goal, SourceId, Term, TermList, VariableName};
+use ast::{Definition, Disjunction, Goal, Name, SourceId, VariableName};
 use instructions::{Ai, Instruction, LongInteger, ShortInteger, Xn, Yn};
 
-pub use ast::{CallName, Name, Query, EMPTY_LIST};
+pub use ast::{CallName, Query, Term, TermList, EMPTY_LIST};
 pub use instructions::{Arity, Functor};
 use num_bigint::BigInt;
 
@@ -1020,9 +1020,13 @@ impl<'a> InstructionList<'a> {
     fn push_call(&mut self, label: CallName<Label<'a>>) {
         self.0.push(match label {
             CallName::Named(label) => Labelled::Call(label),
+            CallName::Comparison(comparison) => {
+                Labelled::Instruction(Instruction::Comparison(comparison))
+            }
+            CallName::Is => Labelled::Instruction(Instruction::Is),
             CallName::True => Labelled::Instruction(Instruction::True),
             CallName::Fail => Labelled::Instruction(Instruction::Fail),
-            CallName::Is => Labelled::Instruction(Instruction::Is),
+            CallName::Unify => Labelled::Instruction(Instruction::Unify),
         })
     }
 
@@ -1044,6 +1048,7 @@ impl<'a> InstructionList<'a> {
                     | Instruction::Cut { .. }
                     | Instruction::Is
                     | Instruction::True
+                    | Instruction::Unify
                     | Instruction::SystemCall { .. },
                 ), Labelled::Instruction(Instruction::Deallocate), ..],
             ) = self.0.get(i..)
