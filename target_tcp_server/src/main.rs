@@ -94,7 +94,9 @@ fn main() -> Result<(), DisplayError> {
         .run()
         {
             Ok(never) => match never {},
-            Err(wam::IoError) => {}
+            Err(io_error) => {
+                wam::log_error!("{}", io_error)
+            }
         }
     }
 }

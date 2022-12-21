@@ -1,6 +1,6 @@
 use super::{
     load_code, log_debug, log_info, log_trace, machine::SystemCalls, CommandHeader, IoError,
-    LoadedCode, Never, ProcessInputError, SerialConnection, SerialRead, SerialWrite, SUCCESS,
+    LoadedCode, Never, ProcessInputError, SerialConnection, SerialReadWrite, SUCCESS,
 };
 
 enum Action {
@@ -14,8 +14,8 @@ pub struct Device<'a, Serial, Calls> {
     pub system_calls: Calls,
 }
 
-impl<'a, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls> Device<'a, Serial, Calls> {
-    fn handle_submit_program(&mut self) -> Result<Action, ProcessInputError> {
+impl<'a, Serial: SerialReadWrite, Calls: SystemCalls> Device<'a, Serial, Calls> {
+    fn handle_submit_program(&mut self) -> Result<Action, ProcessInputError<Serial>> {
         log_info!("Loading program");
 
         self.serial_connection
@@ -49,7 +49,10 @@ impl<'a, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls> Device<'a
         }
     }
 
-    fn process_command_byte(&mut self, command_byte: u8) -> Result<Action, ProcessInputError> {
+    fn process_command_byte(
+        &mut self,
+        command_byte: u8,
+    ) -> Result<Action, ProcessInputError<Serial>> {
         let Ok(command_header) = CommandHeader::parse(command_byte) else {
             crate::error!(
                 &mut self.serial_connection,
@@ -81,7 +84,7 @@ impl<'a, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls> Device<'a
         }
     }
 
-    pub fn run(mut self) -> Result<Never, IoError> {
+    pub fn run(mut self) -> Result<Never, IoError<Serial>> {
         log_info!("Running");
         let mut command_header = self.serial_connection.read_ascii_char()?;
         loop {
@@ -89,7 +92,7 @@ impl<'a, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls> Device<'a
                 Ok(Action::ProcessNextCommand) => self.serial_connection.read_ascii_char()?,
                 Ok(Action::ProcessCommand(command)) => command as u8,
                 Err(ProcessInputError::Unexpected(b)) => b,
-                Err(ProcessInputError::IoError) => return Err(IoError),
+                Err(ProcessInputError::IoError(io_error)) => return Err(io_error),
             };
 
             command_header = next_command_header;

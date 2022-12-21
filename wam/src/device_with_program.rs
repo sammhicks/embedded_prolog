@@ -34,7 +34,7 @@ pub struct Device<'m, 's, Serial, Calls> {
 impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
     Device<'m, 's, Serial, Calls>
 {
-    fn handle_submit_query(&mut self) -> Result<Action, ProcessInputError> {
+    fn handle_submit_query(&mut self) -> Result<Action, ProcessInputError<Serial>> {
         log_info!("Loading query");
 
         let super::LoadedCode {
@@ -64,7 +64,10 @@ impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
         })
     }
 
-    fn process_command(&mut self, command: HandledCommand) -> Result<Action, ProcessInputError> {
+    fn process_command(
+        &mut self,
+        command: HandledCommand,
+    ) -> Result<Action, ProcessInputError<Serial>> {
         match command {
             HandledCommand::ReportStatus => {
                 log_debug!("Status: Waiting for Query");
@@ -75,7 +78,7 @@ impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
         }
     }
 
-    pub fn run(mut self) -> Result<UnhandledCommand, ProcessInputError> {
+    pub(crate) fn run(mut self) -> Result<UnhandledCommand, ProcessInputError<Serial>> {
         log_info!("Waiting for Query");
         loop {
             let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;

@@ -24,7 +24,7 @@ pub struct Device<'m, 's, Serial, Calls> {
 impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
     Device<'m, 's, Serial, Calls>
 {
-    pub fn run(self) -> Result<UnhandledCommand, ProcessInputError> {
+    pub(crate) fn run(self) -> Result<UnhandledCommand, ProcessInputError<Serial>> {
         let mut machine =
             crate::machine::Machine::new(self.program, self.query, self.memory, self.system_calls);
 

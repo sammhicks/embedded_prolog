@@ -2,7 +2,7 @@
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => (
-        ::log::error!($($arg)*)
+        $crate::log::error!($($arg)*)
     )
 }
 
@@ -16,7 +16,7 @@ macro_rules! log_error {
 #[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => (
-        ::log::warn!($($arg)*)
+        $crate::log::warn!($($arg)*)
     )
 }
 
@@ -30,7 +30,7 @@ macro_rules! log_warn {
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => (
-        ::log::info!($($arg)*)
+        $crate::log::info!($($arg)*)
     )
 }
 
@@ -44,7 +44,7 @@ macro_rules! log_info {
 #[macro_export]
 macro_rules! log_debug {
     ($($arg:tt)*) => (
-        ::log::debug!($($arg)*)
+        $crate::log::debug!($($arg)*)
     )
 }
 
@@ -58,7 +58,7 @@ macro_rules! log_debug {
 #[macro_export]
 macro_rules! log_trace {
     ($($arg:tt)*) => (
-        ::log::trace!($($arg)*)
+        $crate::log::trace!($($arg)*)
     )
 }
 

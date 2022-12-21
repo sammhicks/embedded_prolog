@@ -1,9 +1,14 @@
 #![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 
+use core::fmt;
+
 pub use embedded_hal::serial::{Read as SerialRead, Write as SerialWrite};
 pub use nb;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use sha2::Digest;
+
+#[cfg(feature = "logging")]
+pub use log;
 
 mod device;
 mod device_with_program;
@@ -22,31 +27,92 @@ pub enum Never {}
 
 const SUCCESS: char = 'S';
 
-#[derive(Debug)]
-pub struct IoError;
+pub trait SerialReadWrite: SerialRead<u8> + SerialWrite<u8> {}
 
-impl core::fmt::Display for IoError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("WAM IO Error")
+impl<S: SerialRead<u8> + SerialWrite<u8>> SerialReadWrite for S {}
+
+struct ReadError<R: SerialRead<u8>>(R::Error);
+
+enum WriteError<W: SerialWrite<u8>> {
+    Write(W::Error),
+    Format,
+}
+
+pub enum IoError<S: SerialReadWrite> {
+    Read(<S as SerialRead<u8>>::Error),
+    Write(<S as SerialWrite<u8>>::Error),
+    Format,
+}
+
+impl<S: SerialReadWrite> From<ReadError<S>> for IoError<S> {
+    fn from(ReadError(inner): ReadError<S>) -> Self {
+        Self::Read(inner)
     }
 }
 
-#[derive(Debug)]
-pub enum ProcessInputError {
-    Unexpected(u8),
-    IoError,
+impl<S: SerialReadWrite> From<WriteError<S>> for IoError<S> {
+    fn from(inner: WriteError<S>) -> Self {
+        match inner {
+            WriteError::Write(inner) => Self::Write(inner),
+            WriteError::Format => Self::Format,
+        }
+    }
 }
 
-impl From<IoError> for ProcessInputError {
-    fn from(_: IoError) -> Self {
-        Self::IoError
+impl<S: SerialReadWrite> fmt::Debug for IoError<S>
+where
+    <S as SerialRead<u8>>::Error: fmt::Debug,
+    <S as SerialWrite<u8>>::Error: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IoError::Read(inner) => f.debug_tuple("Read").field(inner).finish(),
+            IoError::Write(inner) => f.debug_tuple("Write").field(inner).finish(),
+            IoError::Format => write!(f, "Format"),
+        }
+    }
+}
+
+impl<S: SerialReadWrite> fmt::Display for IoError<S>
+where
+    <S as SerialRead<u8>>::Error: fmt::Display,
+    <S as SerialWrite<u8>>::Error: fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IoError::Read(inner) => write!(f, "Read Error: {}", inner),
+            IoError::Write(inner) => write!(f, "Write Error: {}", inner),
+            IoError::Format => write!(f, "Formatting Error"),
+        }
+    }
+}
+
+struct UnexpectedInput(u8);
+
+enum ProcessInputError<S: SerialReadWrite> {
+    Unexpected(u8),
+    IoError(IoError<S>),
+}
+
+impl<S: SerialReadWrite> From<UnexpectedInput> for ProcessInputError<S> {
+    fn from(UnexpectedInput(b): UnexpectedInput) -> Self {
+        Self::Unexpected(b)
+    }
+}
+
+impl<E, S: SerialReadWrite> From<E> for ProcessInputError<S>
+where
+    IoError<S>: From<E>,
+{
+    fn from(inner: E) -> Self {
+        Self::IoError(inner.into())
     }
 }
 
 pub struct SerialConnection<T>(pub T);
 
-impl<R: SerialRead<u8>> SerialConnection<R> {
-    fn read_ascii_char(&mut self) -> Result<u8, IoError> {
+impl<R: SerialReadWrite> SerialConnection<R> {
+    fn read_ascii_char(&mut self) -> Result<u8, ReadError<R>> {
         loop {
             match self.0.read() {
                 Ok(b) => {
@@ -54,13 +120,13 @@ impl<R: SerialRead<u8>> SerialConnection<R> {
                         return Ok(b);
                     }
                 }
-                Err(nb::Error::Other(_)) => return Err(IoError),
+                Err(nb::Error::Other(err)) => return Err(ReadError(err)),
                 Err(nb::Error::WouldBlock) => (),
             }
         }
     }
 
-    fn read_hex_u4(&mut self) -> Result<u8, ProcessInputError> {
+    fn read_hex_u4(&mut self) -> Result<u8, ProcessInputError<R>> {
         let b = self.read_ascii_char()?;
         let c = b as char;
         match c.to_digit(16) {
@@ -69,7 +135,7 @@ impl<R: SerialRead<u8>> SerialConnection<R> {
         }
     }
 
-    fn read_be_u8_hex(&mut self) -> Result<u8, ProcessInputError> {
+    fn read_be_u8_hex(&mut self) -> Result<u8, ProcessInputError<R>> {
         let a = self.read_hex_u4()?;
         let b = self.read_hex_u4()?;
         Ok((a << 4) + b)
@@ -77,7 +143,7 @@ impl<R: SerialRead<u8>> SerialConnection<R> {
 
     fn read_be_serializable_hex<S: serializable::Serializable>(
         &mut self,
-    ) -> Result<S, ProcessInputError> {
+    ) -> Result<S, ProcessInputError<R>> {
         let mut buffer = S::Bytes::default();
         for b in buffer.as_mut() {
             *b = self.read_be_u8_hex()?;
@@ -87,15 +153,15 @@ impl<R: SerialRead<u8>> SerialConnection<R> {
 }
 
 impl<W: SerialWrite<u8>> SerialConnection<W> {
-    fn flush(&mut self) -> Result<(), IoError> {
-        nb::block!(self.0.flush()).map_err(|_| IoError)
+    fn flush(&mut self) -> Result<(), WriteError<W>> {
+        nb::block!(self.0.flush()).map_err(WriteError::Write)
     }
 
-    fn write_byte(&mut self, b: u8) -> Result<(), IoError> {
-        nb::block!(self.0.write(b)).map_err(|_| IoError)
+    fn write_byte(&mut self, b: u8) -> Result<(), WriteError<W>> {
+        nb::block!(self.0.write(b)).map_err(WriteError::Write)
     }
 
-    fn write_char(&mut self, c: char) -> Result<(), IoError> {
+    fn write_char(&mut self, c: char) -> Result<(), WriteError<W>> {
         let mut buffer = [0; 4];
         for b in c.encode_utf8(&mut buffer).bytes() {
             self.write_byte(b)?;
@@ -104,18 +170,18 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
         Ok(())
     }
 
-    fn write_single_char(&mut self, c: char) -> Result<(), IoError> {
+    fn write_single_char(&mut self, c: char) -> Result<(), WriteError<W>> {
         self.write_char(c)?;
         self.flush()?;
 
         Ok(())
     }
 
-    fn write_be_u4_hex(&mut self, b: u8) -> Result<(), IoError> {
+    fn write_be_u4_hex(&mut self, b: u8) -> Result<(), WriteError<W>> {
         self.write_char(char::from_digit(b.into(), 16).unwrap())
     }
 
-    fn write_be_u8_hex(&mut self, b: u8) -> Result<(), IoError> {
+    fn write_be_u8_hex(&mut self, b: u8) -> Result<(), WriteError<W>> {
         self.write_be_u4_hex((b >> 4) & 0xF)?;
         self.write_be_u4_hex(b & 0xF)?;
         Ok(())
@@ -124,7 +190,7 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
     fn write_be_serializable_hex<S: serializable::Serializable>(
         &mut self,
         value: S,
-    ) -> Result<(), IoError> {
+    ) -> Result<(), WriteError<W>> {
         for &b in value.into_be_bytes().as_ref() {
             self.write_be_u8_hex(b)?;
         }
@@ -137,7 +203,7 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
         value: machine::ReferenceOrValue,
         data: impl Iterator<Item = u8>,
         subterms: impl Iterator<Item = Option<machine::Address>>,
-    ) -> Result<(), IoError> {
+    ) -> Result<(), WriteError<W>> {
         match value {
             machine::ReferenceOrValue::Reference(reference) => {
                 self.write_char('R')?;
@@ -181,7 +247,7 @@ impl<W: SerialWrite<u8>> SerialConnection<W> {
     fn write_system_calls<Calls: SystemCalls>(
         &mut self,
         system_calls: &Calls,
-    ) -> Result<(), IoError> {
+    ) -> Result<(), WriteError<W>> {
         self.write_be_serializable_hex(system_calls.count())?;
 
         system_calls.for_each_call(|name, arity| {
@@ -208,12 +274,12 @@ fn load_code<
     'rest,
     'memory: 'code + 'rest,
     'memory_ref: 'code + 'rest,
-    S: SerialRead<u8> + SerialWrite<u8>,
+    S: SerialReadWrite,
     SC: core::borrow::BorrowMut<SerialConnection<S>>,
 >(
     memory: &'memory mut [u32],
     serial_connection: &mut SC,
-) -> Result<Option<LoadedCode<'code, 'rest>>, ProcessInputError> {
+) -> Result<Option<LoadedCode<'code, 'rest>>, ProcessInputError<S>> {
     let mut serial_connection = serial_connection.borrow_mut();
 
     let code_length = serial_connection.read_be_serializable_hex::<u32>()? as usize;
@@ -282,7 +348,7 @@ pub enum CommandHeader {
 }
 
 impl CommandHeader {
-    fn parse(value: u8) -> Result<Self, ProcessInputError> {
-        Self::try_from(value).map_err(|_err| ProcessInputError::Unexpected(value))
+    fn parse(value: u8) -> Result<Self, UnexpectedInput> {
+        Self::try_from(value).map_err(|_err| UnexpectedInput(value))
     }
 }
