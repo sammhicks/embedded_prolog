@@ -1,35 +1,105 @@
+use core::fmt;
+
 use super::{
-    load_code, log_debug, log_info, log_trace, machine::SystemCalls, CommandHeader, IoError,
-    LoadedCode, Never, ProcessInputError, SerialConnection, SerialReadWrite, SUCCESS,
+    load_code, log_debug, log_info, log_trace,
+    machine::{SystemCallEncoder, SystemCalls},
+    CodeSubmission, Command, ErrorResponse, GetSystemCallsResponse, IoError, LoadedCode, Never,
+    ReportStatusResponse, SerialConnection, SerialReadWrite, SubmitProgramResponse,
 };
 
-enum Action {
-    ProcessNextCommand,
-    ProcessCommand(CommandHeader),
+#[derive(Debug)]
+enum HandledCommand {
+    ReportStatus,
+    GetSystemCalls,
+    SubmitProgram { code_submission: CodeSubmission },
 }
 
-pub struct Device<'a, Serial, Calls> {
+#[derive(Debug)]
+enum UnhandledCommand {
+    SubmitQuery,
+    LookupMemory,
+    NextSolution,
+}
+
+struct NoProgramError {
+    unhandled_command: UnhandledCommand,
+}
+
+impl fmt::Display for NoProgramError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Cannot handle {:?}: No Program", self.unhandled_command)
+    }
+}
+
+enum Action {
+    Reset,
+    ProcessNextCommand,
+    ProcessCommand(Command),
+}
+
+pub enum Error<S: SerialReadWrite> {
+    Reset,
+    IoError(IoError<S>),
+}
+
+impl<S: SerialReadWrite> From<IoError<S>> for Error<S> {
+    fn from(inner: IoError<S>) -> Self {
+        Self::IoError(inner)
+    }
+}
+
+impl<S: SerialReadWrite> fmt::Debug for Error<S>
+where
+    S::Error: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Reset => "Reset".fmt(f),
+            Error::IoError(inner) => f.debug_tuple("IoError").field(inner).finish(),
+        }
+    }
+}
+
+impl<S: SerialReadWrite> fmt::Display for Error<S>
+where
+    S::Error: fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Reset => "Reset".fmt(f),
+            Error::IoError(inner) => inner.fmt(f),
+        }
+    }
+}
+
+pub struct Device<'a, Serial: SerialReadWrite, Calls> {
     pub memory: &'a mut [u32],
     pub serial_connection: SerialConnection<Serial>,
     pub system_calls: Calls,
 }
 
 impl<'a, Serial: SerialReadWrite, Calls: SystemCalls> Device<'a, Serial, Calls> {
-    fn handle_submit_program(&mut self) -> Result<Action, ProcessInputError<Serial>> {
+    fn handle_submit_program(
+        &mut self,
+        code_submission: CodeSubmission,
+    ) -> Result<Action, IoError<Serial>> {
         log_info!("Loading program");
-
-        self.serial_connection
-            .write_system_calls(&self.system_calls)?;
 
         let LoadedCode {
             code_section: program,
             rest_of_memory: memory,
-        } = match load_code(self.memory, &mut self.serial_connection)? {
-            Some(c) => c,
-            None => return Ok(Action::ProcessNextCommand),
-        };
+        } = match load_code(self.memory, &mut self.serial_connection, code_submission)? {
+            Ok(code) => {
+                self.serial_connection
+                    .encode(SubmitProgramResponse::Success)?;
 
-        self.serial_connection.write_single_char(SUCCESS)?;
+                code
+            }
+            Err(err) => {
+                self.serial_connection.encode(ErrorResponse(err))?;
+                return Ok(Action::ProcessNextCommand);
+            }
+        };
 
         let unhandled_command = crate::device_with_program::Device {
             program,
@@ -42,60 +112,63 @@ impl<'a, Serial: SerialReadWrite, Calls: SystemCalls> Device<'a, Serial, Calls> 
         log_trace!("Finished with program");
 
         match unhandled_command {
-            crate::device_with_program::UnhandledCommand::SubmitProgram => {
-                Ok(Action::ProcessCommand(CommandHeader::SubmitProgram))
+            crate::device_with_program::UnhandledCommand::SubmitProgram { code_submission } => {
+                Ok(Action::ProcessCommand(Command::SubmitProgram {
+                    code_submission,
+                }))
             }
-            crate::device_with_program::UnhandledCommand::Reset => Ok(Action::ProcessNextCommand),
+            crate::device_with_program::UnhandledCommand::Reset => Ok(Action::Reset),
         }
     }
 
-    fn process_command_byte(
-        &mut self,
-        command_byte: u8,
-    ) -> Result<Action, ProcessInputError<Serial>> {
-        let Ok(command_header) = CommandHeader::parse(command_byte) else {
-            crate::error!(
-                &mut self.serial_connection,
-                "Invalid command: {:?}",
-                command_byte as char
-            )?;
-            return Ok(Action::ProcessNextCommand);
+    fn process_command(&mut self, command: Command) -> Result<Action, IoError<Serial>> {
+        log_info!("Processing command {:?}", command);
+
+        let command = match command {
+            Command::ReportStatus => Ok(HandledCommand::ReportStatus),
+            Command::GetSystemCalls => Ok(HandledCommand::GetSystemCalls),
+            Command::SubmitProgram { code_submission } => {
+                Ok(HandledCommand::SubmitProgram { code_submission })
+            }
+            Command::SubmitQuery { .. } => Err(UnhandledCommand::SubmitQuery),
+            Command::LookupMemory { .. } => Err(UnhandledCommand::LookupMemory),
+            Command::NextSolution => Err(UnhandledCommand::NextSolution),
         };
 
-        log_info!("Processing command {:?}", command_header);
-
-        match command_header {
-            CommandHeader::ReportStatus => {
-                log_debug!("Status: Waiting for program");
-                self.serial_connection.write_single_char('P')?;
+        match command {
+            Ok(HandledCommand::ReportStatus) => {
+                let status = ReportStatusResponse::WaitingForProgram;
+                log_debug!("Status: {status}");
+                self.serial_connection.encode(status)?;
                 Ok(Action::ProcessNextCommand)
             }
-            CommandHeader::SubmitProgram => self.handle_submit_program(),
-            CommandHeader::SubmitQuery
-            | CommandHeader::LookupMemory
-            | CommandHeader::NextSolution => {
-                crate::error!(
-                    &mut self.serial_connection,
-                    "Cannot handle {:?}: No program",
-                    command_header
-                )?;
+            Ok(HandledCommand::GetSystemCalls) => {
+                self.serial_connection
+                    .encode(GetSystemCallsResponse::SystemCalls(SystemCallEncoder(
+                        &self.system_calls,
+                    )))?;
                 Ok(Action::ProcessNextCommand)
+            }
+            Ok(HandledCommand::SubmitProgram { code_submission }) => {
+                self.handle_submit_program(code_submission)
+            }
+            Err(unhandled_command) => {
+                self.serial_connection
+                    .encode(ErrorResponse(NoProgramError { unhandled_command }))?;
+                Ok(Action::Reset)
             }
         }
     }
 
-    pub fn run(mut self) -> Result<Never, IoError<Serial>> {
+    pub fn run(mut self) -> Result<Never, Error<Serial>> {
         log_info!("Running");
-        let mut command_header = self.serial_connection.read_ascii_char()?;
+        let mut command = self.serial_connection.decode::<Command>()?;
         loop {
-            let next_command_header = match self.process_command_byte(command_header) {
-                Ok(Action::ProcessNextCommand) => self.serial_connection.read_ascii_char()?,
-                Ok(Action::ProcessCommand(command)) => command as u8,
-                Err(ProcessInputError::Unexpected(b)) => b,
-                Err(ProcessInputError::IoError(io_error)) => return Err(io_error),
+            command = match self.process_command(command)? {
+                Action::Reset => return Err(Error::Reset),
+                Action::ProcessNextCommand => self.serial_connection.decode::<Command>()?,
+                Action::ProcessCommand(command) => command,
             };
-
-            command_header = next_command_header;
         }
     }
 }

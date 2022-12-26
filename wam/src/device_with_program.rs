@@ -1,6 +1,8 @@
 use super::{
-    log_debug, log_info, log_trace, machine::Instructions, machine::SystemCalls, CommandHeader,
-    ProcessInputError, SerialConnection, SerialRead, SerialWrite,
+    log_debug, log_info, log_trace,
+    machine::{Instructions, SystemCallEncoder, SystemCalls},
+    CodeSubmission, Command, GetSystemCallsResponse, IoError, ReportStatusResponse,
+    SerialConnection, SerialReadWrite,
 };
 
 type EscalatedCommand = super::device_with_query::UnhandledCommand;
@@ -8,13 +10,14 @@ type EscalatedCommand = super::device_with_query::UnhandledCommand;
 #[derive(Debug)]
 enum HandledCommand {
     ReportStatus,
-    SubmitQuery,
+    GetSystemCalls,
+    SubmitQuery { code_submission: CodeSubmission },
 }
 
 #[derive(Debug)]
 pub enum UnhandledCommand {
     Reset,
-    SubmitProgram,
+    SubmitProgram { code_submission: CodeSubmission },
 }
 
 #[derive(Debug)]
@@ -24,25 +27,29 @@ enum Action {
     Escalate(UnhandledCommand),
 }
 
-pub struct Device<'m, 's, Serial, Calls> {
+pub struct Device<'m, 's, Serial: SerialReadWrite, Calls> {
     pub program: Instructions<'m>,
     pub memory: &'m mut [u32],
     pub serial_connection: &'s mut SerialConnection<Serial>,
     pub system_calls: &'s mut Calls,
 }
 
-impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
-    Device<'m, 's, Serial, Calls>
-{
-    fn handle_submit_query(&mut self) -> Result<Action, ProcessInputError<Serial>> {
+impl<'m, 's, Serial: SerialReadWrite, Calls: SystemCalls> Device<'m, 's, Serial, Calls> {
+    fn handle_submit_query(
+        &mut self,
+        code_submission: CodeSubmission,
+    ) -> Result<Action, IoError<Serial>> {
         log_info!("Loading query");
 
         let super::LoadedCode {
             code_section: query,
             rest_of_memory: memory,
-        } = match super::load_code(self.memory, &mut self.serial_connection)? {
-            Some(c) => c,
-            None => return Ok(Action::ProcessNextCommand),
+        } = match super::load_code(self.memory, self.serial_connection, code_submission)? {
+            Ok(code) => code,
+            Err(error) => {
+                self.serial_connection.encode(super::ErrorResponse(error))?;
+                return Ok(Action::ProcessNextCommand);
+            }
         };
 
         let unhandled_command = super::device_with_query::Device {
@@ -59,38 +66,54 @@ impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
         Ok(match unhandled_command {
             EscalatedCommand::Reset => Action::Escalate(UnhandledCommand::Reset),
             EscalatedCommand::ProcessNextCommand => Action::ProcessNextCommand,
-            EscalatedCommand::SubmitProgram => Action::Escalate(UnhandledCommand::SubmitProgram),
-            EscalatedCommand::SubmitQuery => Action::ProcessCommand(HandledCommand::SubmitQuery),
+            EscalatedCommand::SubmitProgram { code_submission } => {
+                Action::Escalate(UnhandledCommand::SubmitProgram { code_submission })
+            }
+            EscalatedCommand::SubmitQuery { code_submission } => {
+                Action::ProcessCommand(HandledCommand::SubmitQuery { code_submission })
+            }
         })
     }
 
-    fn process_command(
-        &mut self,
-        command: HandledCommand,
-    ) -> Result<Action, ProcessInputError<Serial>> {
+    fn process_command(&mut self, command: HandledCommand) -> Result<Action, IoError<Serial>> {
         match command {
             HandledCommand::ReportStatus => {
-                log_debug!("Status: Waiting for Query");
-                self.serial_connection.write_single_char('Q')?;
+                let status = ReportStatusResponse::WaitingForQuery;
+                log_debug!("Status: {status}");
+                self.serial_connection.encode(status)?;
                 Ok(Action::ProcessNextCommand)
             }
-            HandledCommand::SubmitQuery => self.handle_submit_query(),
+            HandledCommand::GetSystemCalls => {
+                self.serial_connection
+                    .encode(GetSystemCallsResponse::SystemCalls(SystemCallEncoder(
+                        self.system_calls,
+                    )))?;
+                Ok(Action::ProcessNextCommand)
+            }
+            HandledCommand::SubmitQuery { code_submission } => {
+                self.handle_submit_query(code_submission)
+            }
         }
     }
 
-    pub(crate) fn run(mut self) -> Result<UnhandledCommand, ProcessInputError<Serial>> {
+    pub(crate) fn run(mut self) -> Result<UnhandledCommand, IoError<Serial>> {
         log_info!("Waiting for Query");
         loop {
-            let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;
+            let command = self.serial_connection.decode::<super::Command>()?;
 
             log_info!("Processing command {:?}", command);
 
             let mut command = match command {
-                CommandHeader::ReportStatus => HandledCommand::ReportStatus,
-                CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
-                CommandHeader::SubmitQuery => HandledCommand::SubmitQuery,
-                CommandHeader::LookupMemory | CommandHeader::NextSolution => {
-                    return Err(ProcessInputError::Unexpected(command as u8))
+                Command::ReportStatus => HandledCommand::ReportStatus,
+                Command::GetSystemCalls => HandledCommand::GetSystemCalls,
+                Command::SubmitProgram { code_submission } => {
+                    return Ok(UnhandledCommand::SubmitProgram { code_submission })
+                }
+                Command::SubmitQuery { code_submission } => {
+                    HandledCommand::SubmitQuery { code_submission }
+                }
+                Command::LookupMemory { .. } | Command::NextSolution => {
+                    return Ok(UnhandledCommand::Reset)
                 }
             };
 

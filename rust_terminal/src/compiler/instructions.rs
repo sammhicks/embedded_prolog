@@ -56,17 +56,20 @@ pub type Arity = u8;
 pub type ProgramCounter = u16;
 pub type SystemCallIndex = u8;
 
-#[derive(Debug)]
+#[derive(Debug, minicbor::Decode)]
 #[repr(u8)]
+#[cbor(index_only)]
 pub enum IntegerSign {
+    #[n(0)]
     Positive = 0,
+    #[n(1)]
     Negative = 1,
 }
 
 #[derive(Debug)]
 pub struct LongInteger {
     pub sign: IntegerSign,
-    pub be_words: Vec<IntegerWord>,
+    pub le_words: Vec<IntegerWord>,
 }
 
 impl fmt::Display for LongInteger {
@@ -78,7 +81,7 @@ impl fmt::Display for LongInteger {
                 IntegerSign::Positive => "",
                 IntegerSign::Negative => "-",
             },
-            crate::DisplayCommaSeparated(self.be_words.iter())
+            crate::DisplayCommaSeparated(self.le_words.iter())
         )
     }
 }
@@ -91,9 +94,8 @@ impl<'a> From<&'a BigInt> for LongInteger {
             num_bigint::Sign::Minus => IntegerSign::Negative,
         };
 
-        let be_words = bytes
+        let le_words = bytes
             .chunks(std::mem::size_of::<IntegerWord>())
-            .rev()
             .map(|bytes| {
                 let mut buffer = [0; std::mem::size_of::<IntegerWord>()];
 
@@ -103,7 +105,7 @@ impl<'a> From<&'a BigInt> for LongInteger {
             })
             .collect();
 
-        Self { sign, be_words }
+        Self { sign, le_words }
     }
 }
 
@@ -357,14 +359,14 @@ impl Instruction {
             ai: Option<Ai>,
             LongInteger {
                 sign,
-                be_words: words,
+                le_words: words,
             }: LongInteger,
         ) -> ABC<A, B, impl Iterator<Item = WordBytes>> {
             let ai = ai.map_or(0, |Ai { ai }| ai);
 
             ABC::C(
                 std::iter::once([opcode, ai, sign as u8, words.len() as u8])
-                    .chain(words.into_iter().map(Word::to_be_bytes)),
+                    .chain(words.into_iter().map(Word::to_le_bytes)),
             )
         }
 

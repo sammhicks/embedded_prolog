@@ -1,9 +1,6 @@
 use core::fmt;
 
-use crate::{
-    log_debug, log_trace, log_warn,
-    serializable::{Serializable, SerializableWrapper},
-};
+use crate::{log_debug, log_trace, log_warn, Hex};
 
 mod basic_types;
 mod heap;
@@ -17,8 +14,12 @@ use heap::{
     structure_iteration::{ReadWriteMode, State as StructureIterationState},
     Heap,
 };
-pub use heap::{Address, ReferenceOrValue, Value};
-pub use system_call::{system_call_handler, system_calls, SystemCalls};
+pub use heap::{Address, ReferenceOrValueHead, Solution, ValueHead};
+pub use system_call::{system_call_handler, system_calls, SystemCallEncoder, SystemCalls};
+
+pub type Value<'a> = heap::Value<heap::TermsList<'a>, heap::IntegerLeBytes<'a>>;
+pub type ReferenceOrValue<'a> =
+    heap::ReferenceOrValue<heap::TermsList<'a>, heap::IntegerLeBytes<'a>>;
 
 struct ProgramCounterOutOfRange {
     pc: ProgramCounter,
@@ -28,11 +29,11 @@ struct ProgramCounterOutOfRange {
 
 #[derive(Clone, Copy)]
 pub struct Instructions<'m> {
-    memory: &'m [u32],
+    memory: &'m [[u8; 4]],
 }
 
 impl<'m> Instructions<'m> {
-    pub fn new(memory: &'m [u32]) -> Self {
+    pub fn new(memory: &'m [[u8; 4]]) -> Self {
         Self { memory }
     }
 
@@ -40,7 +41,7 @@ impl<'m> Instructions<'m> {
         &self,
         pc: ProgramCounter,
         offset: u16,
-    ) -> Result<(u32, &'m [u32]), ProgramCounterOutOfRange> {
+    ) -> Result<([u8; 4], &'m [[u8; 4]]), ProgramCounterOutOfRange> {
         let first_word = pc.into_usize();
         let last_word = pc.offset(offset).into_usize();
         self.memory
@@ -55,15 +56,15 @@ impl<'m> Instructions<'m> {
     }
 }
 
-struct BadMemoryWord(u32);
+struct BadMemoryWord([u8; 4]);
 
 impl fmt::Debug for BadMemoryWord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:08X}", self.0)
+        write!(f, "{}", Hex(self.0))
     }
 }
 
-pub struct BadMemoryRange<'m>(&'m [u32]);
+pub struct BadMemoryRange<'m>(&'m [[u8; 4]]);
 
 impl fmt::Debug for BadMemoryRange<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,6 +75,8 @@ impl fmt::Debug for BadMemoryRange<'_> {
         list.finish()
     }
 }
+
+struct UnificationFailure;
 
 #[derive(Debug)]
 pub enum Error<'m> {
@@ -90,6 +93,12 @@ pub enum Error<'m> {
     ExpressionEvaluation(heap::ExpressionEvaluationError),
     SystemCallIndexOutOfRange(system_call::SystemCallIndexOutOfRange),
     OutOfMemory(heap::OutOfMemory),
+}
+
+impl<'m> fmt::Display for Error<'m> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
 }
 
 impl<'m> From<ProgramCounterOutOfRange> for Error<'m> {
@@ -181,18 +190,18 @@ impl<'memory> Instruction<'memory> {
         pc: ProgramCounter,
     ) -> Result<Functor, Error> {
         let (word, range) = instructions.get(pc, 1)?;
-        let [0,0,f1, f0] = word.to_be_bytes() else {
+        let [0,0,f1, f0] = word else {
             return Err(Error::BadInstruction(pc, BadMemoryRange(range)));
         };
 
-        Ok(Functor(u16::from_be_bytes([f1, f0])))
+        Ok(Functor(u16::from_le_bytes([f0, f1])))
     }
 
     fn decode_long_integer_words(
         instructions: Instructions,
         pc: ProgramCounter,
         n: u8,
-    ) -> Result<&[u32], Error> {
+    ) -> Result<&[[u8; 4]], Error> {
         Ok(instructions
             .get(pc, u16::from(n))?
             .1
@@ -206,7 +215,8 @@ impl<'memory> Instruction<'memory> {
         pc: ProgramCounter,
     ) -> Result<(ProgramCounter, Self), Error> {
         let (word, range) = instructions.get(pc, 0)?;
-        Ok(match word.to_be_bytes() {
+        log_trace!("{}", Hex(word));
+        Ok(match word {
             [0x00, ai, 0, xn] => (
                 pc.offset(1),
                 Instruction::PutVariableXn {
@@ -256,14 +266,14 @@ impl<'memory> Instruction<'memory> {
                 pc.offset(1),
                 Instruction::PutConstant {
                     ai: Ai { ai },
-                    c: Constant::from_be_bytes([c1, c0]),
+                    c: Constant::from_le_bytes([c0, c1]),
                 },
             ),
             [0x08, ai, i1, i0] => (
                 pc.offset(1),
                 Instruction::PutShortInteger {
                     ai: Ai { ai },
-                    i: ShortInteger::from_be_bytes([i1, i0]),
+                    i: ShortInteger::from_le_bytes([i0, i1]),
                 },
             ),
             [0x09, ai, s, n] => (
@@ -333,14 +343,14 @@ impl<'memory> Instruction<'memory> {
                 pc.offset(1),
                 Instruction::GetConstant {
                     ai: Ai { ai },
-                    c: Constant::from_be_bytes([c1, c0]),
+                    c: Constant::from_le_bytes([c0, c1]),
                 },
             ),
             [0x18, ai, i1, i0] => (
                 pc.offset(1),
                 Instruction::GetShortInteger {
                     ai: Ai { ai },
-                    i: ShortInteger::from_be_bytes([i1, i0]),
+                    i: ShortInteger::from_le_bytes([i0, i1]),
                 },
             ),
             [0x19, ai, s, n] => (
@@ -361,13 +371,13 @@ impl<'memory> Instruction<'memory> {
             [0x27, 0, c1, c0] => (
                 pc.offset(1),
                 Instruction::SetConstant {
-                    c: Constant::from_be_bytes([c1, c0]),
+                    c: Constant::from_le_bytes([c0, c1]),
                 },
             ),
             [0x28, 0, i1, i0] => (
                 pc.offset(1),
                 Instruction::SetShortInteger {
-                    i: ShortInteger::from_be_bytes([i1, i0]),
+                    i: ShortInteger::from_le_bytes([i0, i1]),
                 },
             ),
             [0x29, 0, s, n] => (
@@ -388,13 +398,13 @@ impl<'memory> Instruction<'memory> {
             [0x37, 0, c1, c0] => (
                 pc.offset(1),
                 Instruction::UnifyConstant {
-                    c: Constant::from_be_bytes([c1, c0]),
+                    c: Constant::from_le_bytes([c0, c1]),
                 },
             ),
             [0x38, 0, i1, i0] => (
                 pc.offset(1),
                 Instruction::UnifyShortInteger {
-                    i: ShortInteger::from_be_bytes([i1, i0]),
+                    i: ShortInteger::from_le_bytes([i0, i1]),
                 },
             ),
             [0x39, 0, s, n] => (
@@ -414,14 +424,14 @@ impl<'memory> Instruction<'memory> {
             [0x43, n, p1, p0] => (
                 pc.offset(1),
                 Instruction::Call {
-                    p: ProgramCounter::from_be_bytes([p1, p0]),
+                    p: ProgramCounter::from_le_bytes([p0, p1]),
                     n: Arity(n),
                 },
             ),
             [0x44, n, p1, p0] => (
                 pc.offset(1),
                 Instruction::Execute {
-                    p: ProgramCounter::from_be_bytes([p1, p0]),
+                    p: ProgramCounter::from_le_bytes([p0, p1]),
                     n: Arity(n),
                 },
             ),
@@ -429,13 +439,13 @@ impl<'memory> Instruction<'memory> {
             [0x50, 0, p1, p0] => (
                 pc.offset(1),
                 Instruction::TryMeElse {
-                    p: ProgramCounter::from_be_bytes([p1, p0]),
+                    p: ProgramCounter::from_le_bytes([p0, p1]),
                 },
             ),
             [0x51, 0, p1, p0] => (
                 pc.offset(1),
                 Instruction::RetryMeElse {
-                    p: ProgramCounter::from_be_bytes([p1, p0]),
+                    p: ProgramCounter::from_le_bytes([p0, p1]),
                 },
             ),
             [0x52, 0, 0, 0] => (pc.offset(1), Instruction::TrustMe),
@@ -526,9 +536,7 @@ impl RegisterBlock {
     }
 
     fn clear_above(&mut self, n: Arity) {
-        for register in self.0.iter_mut().skip(n.0.into()) {
-            *register = None;
-        }
+        self.0[usize::from(n.0)..].fill(None);
     }
 
     fn all(&self) -> &[Option<Address>] {
@@ -616,12 +624,6 @@ impl<'m> From<heap::structure_iteration::Error> for ExecutionFailure<'m> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum ExecutionSuccess {
-    SingleAnswer,
-    MultipleAnswers,
-}
-
 pub struct Machine<'m, Calls: system_call::SystemCalls> {
     currently_executing: CurrentlyExecuting,
     structure_iteration_state: StructureIterationState,
@@ -656,16 +658,16 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
         }
     }
 
-    fn continue_execution(&mut self) -> Result<ExecutionSuccess, ExecutionFailure> {
+    pub fn system_calls(&self) -> &Calls {
+        self.system_calls
+    }
+
+    fn continue_execution(&mut self) -> Result<(), ExecutionFailure> {
         loop {
             let Some(pc) = self.pc else {
                 self.do_full_garbage_collection()?;
 
-                return Ok(if self.memory.query_has_multiple_solutions() {
-                    ExecutionSuccess::MultipleAnswers
-                } else {
-                    ExecutionSuccess::SingleAnswer
-                });
+                return Ok(());
             };
 
             let (new_pc, instruction) = match &self.currently_executing {
@@ -791,67 +793,82 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
             ),
             Instruction::GetStructure { ai, f, n } => {
                 let (address, value) = self.get_register_value(ai)?;
-                match value {
-                    ReferenceOrValue::Reference(variable_address) => {
+                match value.head() {
+                    ReferenceOrValueHead::Reference(variable_address) => {
                         log_trace!("Writing structure {}/{}", f, n);
 
                         let value_address = self.new_structure(f, n)?;
 
-                        self.memory
-                            .bind_variable_to_value(variable_address, value_address)??;
+                        Ok(self
+                            .memory
+                            .bind_variable_to_value(variable_address, value_address)??)
                     }
-                    ReferenceOrValue::Value(Value::Structure(found_f, found_n)) => {
-                        if f == found_f && n == found_n {
-                            log_trace!("Reading structure {}/{}", f, n);
+                    ReferenceOrValueHead::Value(value) => {
+                        if let ValueHead::Structure(found_f, found_n) = value {
+                            if f == found_f && n == found_n {
+                                log_trace!("Reading structure {}/{}", f, n);
 
-                            self.structure_iteration_state.start_reading(address)?;
+                                Ok(self.structure_iteration_state.start_reading(address)?)
+                            } else {
+                                self.backtrack()
+                            }
                         } else {
-                            self.backtrack()?;
+                            self.backtrack()
                         }
                     }
-                    ReferenceOrValue::Value(
-                        Value::List | Value::Constant(_) | Value::Integer { .. },
-                    ) => self.backtrack()?,
                 }
-                Ok(())
             }
             Instruction::GetList { ai } => {
                 let (address, value) = self.get_register_value(ai)?;
-                match value {
-                    ReferenceOrValue::Reference(variable_address) => {
+                match value.head() {
+                    ReferenceOrValueHead::Reference(variable_address) => {
                         log_trace!("Writing list");
 
                         let value_address = self.new_list()?;
 
+                        Ok(self
+                            .memory
+                            .bind_variable_to_value(variable_address, value_address)??)
+                    }
+
+                    ReferenceOrValueHead::Value(value) => {
+                        if let ValueHead::List = value {
+                            log_trace!("Reading list");
+                            Ok(self.structure_iteration_state.start_reading(address)?)
+                        } else {
+                            self.backtrack()
+                        }
+                    }
+                }
+            }
+            Instruction::GetConstant { ai, c } => {
+                let (_, value) = self.get_register_value(ai)?;
+
+                match value.head() {
+                    ReferenceOrValueHead::Reference(variable_address) => {
+                        let value_address = self.new_constant(c)?;
                         self.memory
                             .bind_variable_to_value(variable_address, value_address)??;
+                        Ok(())
                     }
-                    ReferenceOrValue::Value(Value::List) => {
-                        log_trace!("Reading list");
-                        self.structure_iteration_state.start_reading(address)?;
+                    ReferenceOrValueHead::Value(value) => {
+                        if let ValueHead::Constant(c1) = value {
+                            if c == c1 {
+                                Ok(())
+                            } else {
+                                self.backtrack()
+                            }
+                        } else {
+                            self.backtrack()
+                        }
                     }
-                    ReferenceOrValue::Value(
-                        Value::Structure(..) | Value::Constant(_) | Value::Integer { .. },
-                    ) => self.backtrack()?,
                 }
-                Ok(())
             }
-            Instruction::GetConstant { ai, c } => match self.get_register_value(ai)?.1 {
-                ReferenceOrValue::Reference(variable_address) => {
-                    let value_address = self.new_constant(c)?;
-                    self.memory
-                        .bind_variable_to_value(variable_address, value_address)??;
-                    Ok(())
-                }
-                ReferenceOrValue::Value(Value::Constant(rc)) if rc == c => Ok(()),
-                _ => self.backtrack(),
-            },
             Instruction::GetShortInteger { ai, i } => {
                 self.execute_instruction(&Instruction::GetInteger { ai, i: i.as_long() })
             }
-            Instruction::GetInteger { ai, i } => {
-                let (_, value, data) = self.get_register_value_with_data(ai)?;
-                let words_match = i.words_match(data);
+            Instruction::GetInteger { ai, i } => ({
+                let (_, value) = self.get_register_value(ai)?;
                 match value {
                     ReferenceOrValue::Reference(variable_address) => {
                         let value_address = self.new_integer(i)?;
@@ -859,14 +876,20 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                             .bind_variable_to_value(variable_address, value_address)??;
                         Ok(())
                     }
-                    ReferenceOrValue::Value(Value::Integer { sign, .. })
-                        if i.sign == sign && words_match =>
-                    {
-                        Ok(())
+                    ReferenceOrValue::Value(value) => {
+                        if let Value::Integer { sign, le_bytes, .. } = value {
+                            if i.equals(sign, le_bytes) {
+                                Ok(())
+                            } else {
+                                Err(UnificationFailure)
+                            }
+                        } else {
+                            Err(UnificationFailure)
+                        }
                     }
-                    _ => self.backtrack(),
                 }
-            }
+            })
+            .or_else(|UnificationFailure| self.backtrack()),
             Instruction::SetVariableXn { xn } => {
                 let address = self.new_variable()?;
                 self.registers.store(xn, address)?;
@@ -909,7 +932,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 Ok(())
             }
             Instruction::SetVoid { n } => {
-                for _ in 0..n.into_inner() {
+                for _ in 0..n.0 {
                     let address = self.new_variable()?;
                     self.structure_iteration_state
                         .write_next(&mut self.memory, address)?;
@@ -934,25 +957,26 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                         let term_address =
                             self.structure_iteration_state.read_next(&self.memory)?;
 
-                        let value = self.memory.get_value(term_address)?.1;
+                        let (_, value) = self.memory.get_value(term_address)?;
 
-                        match value {
-                            ReferenceOrValue::Reference(variable_address) => {
+                        match value.head() {
+                            ReferenceOrValueHead::Reference(variable_address) => {
                                 let value_address = self.new_constant(c)?;
                                 self.memory
                                     .bind_variable_to_value(variable_address, value_address)??;
                                 Ok(())
                             }
-                            ReferenceOrValue::Value(Value::Constant(c1)) => {
-                                if c == c1 {
-                                    Ok(())
+                            ReferenceOrValueHead::Value(value) => {
+                                if let ValueHead::Constant(c1) = value {
+                                    if c == c1 {
+                                        Ok(())
+                                    } else {
+                                        self.backtrack()
+                                    }
                                 } else {
                                     self.backtrack()
                                 }
                             }
-                            ReferenceOrValue::Value(
-                                Value::Structure(..) | Value::List | Value::Integer { .. },
-                            ) => self.backtrack(),
                         }
                     }
                     ReadWriteMode::Write => {
@@ -973,27 +997,35 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                         let term_address =
                             self.structure_iteration_state.read_next(&self.memory)?;
 
-                        let (_, value, data, _) = self.memory.get_value(term_address)?;
-                        let words_match = i.words_match(data);
+                        ({
+                            let (_, value) = self.memory.get_value(term_address)?;
 
-                        match value {
-                            ReferenceOrValue::Reference(variable_address) => {
-                                let value_address = self.new_integer(i)?;
-                                self.memory
-                                    .bind_variable_to_value(variable_address, value_address)??;
-                                Ok(())
-                            }
-                            ReferenceOrValue::Value(Value::Integer { sign, .. }) => {
-                                if i.sign == sign && words_match {
+                            match value {
+                                ReferenceOrValue::Reference(variable_address) => {
+                                    let value_address = self.new_integer(i)?;
+                                    self.memory.bind_variable_to_value(
+                                        variable_address,
+                                        value_address,
+                                    )??;
                                     Ok(())
-                                } else {
-                                    self.backtrack()
                                 }
+                                ReferenceOrValue::Value(Value::Integer {
+                                    sign,
+                                    le_bytes: be_bytes,
+                                    ..
+                                }) => {
+                                    if i.equals(sign, be_bytes) {
+                                        Ok(())
+                                    } else {
+                                        Err(UnificationFailure)
+                                    }
+                                }
+                                ReferenceOrValue::Value(
+                                    Value::Structure(..) | Value::List(..) | Value::Constant(..),
+                                ) => Err(UnificationFailure),
                             }
-                            ReferenceOrValue::Value(
-                                Value::Structure(..) | Value::List | Value::Constant(..),
-                            ) => self.backtrack(),
-                        }
+                        })
+                        .or_else(|UnificationFailure| self.backtrack())
                     }
                     ReadWriteMode::Write => {
                         let address = self.new_integer(i)?;
@@ -1160,17 +1192,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
         &self,
         index: Ai,
     ) -> Result<(Address, ReferenceOrValue), ExecutionFailure<'m>> {
-        self.get_register_value_with_data(index)
-            .map(|(address, value, _)| (address, value))
-    }
-
-    fn get_register_value_with_data(
-        &self,
-        index: Ai,
-    ) -> Result<(Address, ReferenceOrValue, impl Iterator<Item = u8> + '_), ExecutionFailure<'m>>
-    {
-        let (address, value, data, _) = self.memory.get_value(self.registers.load(index)?)?;
-        Ok((address, value, data))
+        Ok(self.memory.get_value(self.registers.load(index)?)?)
     }
 
     fn save_query_registers(&mut self, n: Arity) -> Result<(), ExecutionFailure<'m>> {
@@ -1200,28 +1222,21 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
         Ok(registers)
     }
 
-    pub fn solution_registers(
-        &self,
-    ) -> Result<
-        impl core::iter::ExactSizeIterator + Iterator<Item = Option<Address>> + '_,
-        heap::MemoryError,
-    > {
-        self.memory.solution_registers()
+    pub fn solution(&self) -> Result<Solution, heap::MemoryError> {
+        let solution_terms = self.memory.solution()?;
+
+        Ok(if self.memory.query_has_multiple_solutions() {
+            Solution::MultipleSolutions(solution_terms)
+        } else {
+            Solution::SingleSolution(solution_terms)
+        })
     }
 
     pub fn lookup_memory(
         &self,
-        address: Option<Address>,
-    ) -> Result<
-        (
-            Address,
-            ReferenceOrValue,
-            impl Iterator<Item = u8> + '_,
-            impl Iterator<Item = Option<Address>> + '_,
-        ),
-        heap::MemoryError,
-    > {
-        self.memory.get_maybe_value(address)
+        address: Address,
+    ) -> Result<(Address, ReferenceOrValue), heap::MemoryError> {
+        self.memory.get_value(address)
     }
 
     fn new_variable(&mut self) -> Result<Address, ExecutionFailure<'m>> {
@@ -1315,7 +1330,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
         self.memory.backtrack(&mut self.pc)
     }
 
-    pub fn next_solution(&mut self) -> Result<ExecutionSuccess, ExecutionFailure> {
+    pub fn next_solution(&mut self) -> Result<(), ExecutionFailure> {
         if let CurrentlyExecuting::Program = self.currently_executing {
             self.backtrack()?;
         }

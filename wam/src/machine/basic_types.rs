@@ -1,7 +1,5 @@
 use core::{fmt, num::NonZeroU16};
 
-use crate::serializable::SerializableWrapper;
-
 pub trait NoneRepresents: fmt::Display {
     const NONE_REPRESENTS: &'static str;
 }
@@ -68,8 +66,9 @@ impl From<Ai> for RegisterIndex {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Functor(pub u16);
+#[derive(Clone, Copy, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
+#[cbor(transparent)]
+pub struct Functor(#[n(0)] pub u16);
 
 impl fmt::Debug for Functor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -83,20 +82,9 @@ impl fmt::Display for Functor {
     }
 }
 
-impl SerializableWrapper for Functor {
-    type Inner = u16;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Self(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Arity(pub u8);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, minicbor::Encode, minicbor::Decode)]
+#[cbor(transparent)]
+pub struct Arity(#[n(0)] pub u8);
 
 impl fmt::Debug for Arity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -116,24 +104,13 @@ impl core::ops::SubAssign for Arity {
     }
 }
 
-impl SerializableWrapper for Arity {
-    type Inner = u8;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Self(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.0
-    }
-}
-
 impl Arity {
     pub const ZERO: Self = Self(0);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Constant(pub u16);
+#[derive(Clone, Copy, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
+#[cbor(transparent)]
+pub struct Constant(#[n(0)] pub u16);
 
 impl fmt::Debug for Constant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -147,22 +124,19 @@ impl fmt::Display for Constant {
     }
 }
 
-impl SerializableWrapper for Constant {
-    type Inner = u16;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Self(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.0
+impl Constant {
+    pub fn from_le_bytes(bytes: [u8; 2]) -> Self {
+        Self(u16::from_le_bytes(bytes))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, minicbor::Encode)]
 #[repr(u8)]
+#[cbor(index_only)]
 pub enum IntegerSign {
+    #[n(0)]
     Positive = 0,
+    #[n(1)]
     Negative = 1,
 }
 
@@ -176,7 +150,7 @@ impl IntegerSign {
 #[derive(Clone, Copy)]
 pub struct ShortInteger {
     sign: IntegerSign,
-    value: u32,
+    value: [u8; 4],
 }
 
 impl ShortInteger {
@@ -187,8 +161,12 @@ impl ShortInteger {
             } else {
                 IntegerSign::Positive
             },
-            value: i.unsigned_abs().into(),
+            value: u32::from(i.unsigned_abs()).to_le_bytes(),
         }
+    }
+
+    pub fn from_le_bytes(bytes: [u8; 2]) -> Self {
+        Self::new(i16::from_le_bytes(bytes))
     }
 
     pub fn into_value(self) -> i16 {
@@ -197,7 +175,7 @@ impl ShortInteger {
             IntegerSign::Negative => -1,
         };
 
-        sign * (self.value as i16)
+        sign * (u32::from_le_bytes(self.value) as i16)
     }
 
     pub fn as_long(&self) -> LongInteger {
@@ -220,57 +198,24 @@ impl fmt::Display for ShortInteger {
     }
 }
 
-impl SerializableWrapper for ShortInteger {
-    type Inner = i16;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Self::new(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.into_value()
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct LongInteger<'memory> {
     pub sign: IntegerSign,
-    pub words: &'memory [u32],
-}
-
-fn is_zero(n: u8) -> bool {
-    n == 0
+    pub words: &'memory [[u8; 4]],
 }
 
 impl<'memory> LongInteger<'memory> {
-    fn as_be_bytes(&self) -> impl Iterator<Item = u8> + 'memory {
-        self.words.iter().copied().flat_map(u32::to_be_bytes)
-    }
-
-    pub fn words_match(&self, mut other: impl Iterator<Item = u8>) -> bool {
-        let mut me = self.as_be_bytes();
-
-        loop {
-            match (me.next(), other.next()) {
-                (None, None) => return true,
-                (Some(me), Some(other)) => {
-                    if me != other {
-                        return false;
-                    }
-                }
-                (Some(n), None) => return (n == 0) && me.all(is_zero),
-                (None, Some(n)) => return (n == 0) && other.all(is_zero),
-            }
-        }
+    pub fn equals(&self, sign: IntegerSign, le_bytes: super::heap::IntegerLeBytes) -> bool {
+        (self.sign == sign) && le_bytes.equals(self.words.iter().copied().flatten())
     }
 }
 
-struct DisplayLongIntegerWords<'memory>(&'memory [u32]);
+struct DisplayLongIntegerWords<'memory>(&'memory [[u8; 4]]);
 
 impl<'memory> fmt::Display for DisplayLongIntegerWords<'memory> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for &word in self.0 {
-            write!(f, "{:08X}", word)?;
+        for &byte in self.0.iter().flatten().rev() {
+            write!(f, "{:02X}", byte)?;
         }
 
         Ok(())
@@ -335,24 +280,16 @@ impl ProgramCounter {
         )
     }
 
+    pub fn from_le_bytes(bytes: [u8; 2]) -> Self {
+        Self::from_word(u16::from_le_bytes(bytes))
+    }
+
     pub fn into_word(self) -> u16 {
         self.0.get() - 1
     }
 
     pub fn into_usize(self) -> usize {
         self.into_word().into()
-    }
-}
-
-impl SerializableWrapper for ProgramCounter {
-    type Inner = u16;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Self::from_word(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.into_word()
     }
 }
 

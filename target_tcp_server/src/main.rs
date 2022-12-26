@@ -1,37 +1,38 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 
-fn handle_channel_error(err: std::io::Error) -> wam::nb::Error<std::io::Error> {
-    if let std::io::ErrorKind::WouldBlock = err.kind() {
-        wam::nb::Error::WouldBlock
-    } else {
-        wam::nb::Error::Other(err)
-    }
+struct Channels {
+    stream: std::io::BufReader<std::net::TcpStream>,
+    read_buffer: Vec<u8>,
 }
 
-struct Channels(std::net::TcpStream);
-
-impl wam::SerialRead<u8> for Channels {
+impl wam::SerialReadWrite for Channels {
     type Error = std::io::Error;
 
-    fn read(&mut self) -> wam::nb::Result<u8, Self::Error> {
-        let mut buffer = [0; 1];
-        self.0
-            .read_exact(&mut buffer)
-            .map_err(handle_channel_error)?;
-        Ok(buffer[0])
-    }
-}
+    fn read_one(&mut self) -> Result<u8, Self::Error> {
+        let mut byte = 0;
 
-impl wam::SerialWrite<u8> for Channels {
-    type Error = std::io::Error;
+        self.stream.read_exact(std::slice::from_mut(&mut byte))?;
 
-    fn write(&mut self, word: u8) -> wam::nb::Result<(), Self::Error> {
-        let buffer = [word];
-        self.0.write_all(&buffer).map_err(handle_channel_error)
+        Ok(byte)
     }
 
-    fn flush(&mut self) -> wam::nb::Result<(), Self::Error> {
-        self.0.flush().map_err(handle_channel_error)
+    fn read_until_zero<T, F: FnOnce(&mut [u8]) -> T>(&mut self, f: F) -> Result<T, Self::Error> {
+        self.read_buffer.clear();
+        self.stream.read_until(0, &mut self.read_buffer)?;
+
+        Ok(f(&mut self.read_buffer))
+    }
+
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        self.stream.read_exact(buffer)
+    }
+
+    fn write_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
+        self.stream.get_mut().write_all(buffer)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.stream.get_mut().flush()
     }
 }
 
@@ -88,7 +89,10 @@ fn main() -> Result<(), DisplayError> {
 
         match (wam::Device {
             memory: &mut memory,
-            serial_connection: wam::SerialConnection(Channels(stream)),
+            serial_connection: wam::SerialConnection::new(Channels {
+                stream: std::io::BufReader::new(stream),
+                read_buffer: Vec::new(),
+            }),
             system_calls: system_calls!(hello, get, put, increment),
         })
         .run()

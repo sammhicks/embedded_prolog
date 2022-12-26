@@ -2,9 +2,7 @@
 
 use core::fmt;
 
-pub use embedded_hal::serial::{Read as SerialRead, Write as SerialWrite};
-pub use nb;
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use machine::{Address, ReferenceOrValue};
 use sha2::Digest;
 
 #[cfg(feature = "logging")]
@@ -13,11 +11,8 @@ pub use log;
 mod device;
 mod device_with_program;
 mod device_with_query;
-mod errors;
-mod hex;
 mod logging;
 mod machine;
-mod serializable;
 
 pub use device::Device;
 pub use machine::{system_call_handler, system_calls, SystemCalls};
@@ -25,49 +20,48 @@ pub use machine::{system_call_handler, system_calls, SystemCalls};
 #[derive(Debug)]
 pub enum Never {}
 
-const SUCCESS: char = 'S';
+struct Hex<const N: usize>([u8; N]);
 
-pub trait SerialReadWrite: SerialRead<u8> + SerialWrite<u8> {}
+impl<const N: usize> fmt::Display for Hex<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02X}"))
+    }
+}
 
-impl<S: SerialRead<u8> + SerialWrite<u8>> SerialReadWrite for S {}
+pub trait SerialReadWrite {
+    type Error;
 
-struct ReadError<R: SerialRead<u8>>(R::Error);
+    fn read_one(&mut self) -> Result<u8, Self::Error> {
+        let mut buffer = 0;
+        self.read_exact(core::slice::from_mut(&mut buffer))?;
+        Ok(buffer)
+    }
 
-enum WriteError<W: SerialWrite<u8>> {
-    Write(W::Error),
-    Format,
+    fn read_until_zero<T, F: FnOnce(&mut [u8]) -> T>(&mut self, f: F) -> Result<T, Self::Error>;
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error>;
+
+    fn write_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error>;
+    fn flush(&mut self) -> Result<(), Self::Error>;
 }
 
 pub enum IoError<S: SerialReadWrite> {
-    Read(<S as SerialRead<u8>>::Error),
-    Write(<S as SerialWrite<u8>>::Error),
+    Serial(S::Error),
+    CborEncoding(minicbor::encode::Error<S::Error>),
+    CborDecoding(minicbor::decode::Error),
+    CobsDecoding,
     Format,
-}
-
-impl<S: SerialReadWrite> From<ReadError<S>> for IoError<S> {
-    fn from(ReadError(inner): ReadError<S>) -> Self {
-        Self::Read(inner)
-    }
-}
-
-impl<S: SerialReadWrite> From<WriteError<S>> for IoError<S> {
-    fn from(inner: WriteError<S>) -> Self {
-        match inner {
-            WriteError::Write(inner) => Self::Write(inner),
-            WriteError::Format => Self::Format,
-        }
-    }
 }
 
 impl<S: SerialReadWrite> fmt::Debug for IoError<S>
 where
-    <S as SerialRead<u8>>::Error: fmt::Debug,
-    <S as SerialWrite<u8>>::Error: fmt::Debug,
+    S::Error: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IoError::Read(inner) => f.debug_tuple("Read").field(inner).finish(),
-            IoError::Write(inner) => f.debug_tuple("Write").field(inner).finish(),
+            IoError::Serial(inner) => f.debug_tuple("Serial").field(inner).finish(),
+            IoError::CborEncoding(inner) => f.debug_tuple("Encoding").field(inner).finish(),
+            IoError::CborDecoding(inner) => f.debug_tuple("Decoding").field(inner).finish(),
+            IoError::CobsDecoding => write!(f, "CobsDecoding"),
             IoError::Format => write!(f, "Format"),
         }
     }
@@ -75,192 +69,177 @@ where
 
 impl<S: SerialReadWrite> fmt::Display for IoError<S>
 where
-    <S as SerialRead<u8>>::Error: fmt::Display,
-    <S as SerialWrite<u8>>::Error: fmt::Display,
+    S::Error: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IoError::Read(inner) => write!(f, "Read Error: {}", inner),
-            IoError::Write(inner) => write!(f, "Write Error: {}", inner),
-            IoError::Format => write!(f, "Formatting Error"),
+            IoError::Serial(inner) => inner.fmt(f),
+            IoError::CborEncoding(inner) => inner.fmt(f),
+            IoError::CborDecoding(inner) => inner.fmt(f),
+            IoError::CobsDecoding => "Failed to decode COBS".fmt(f),
+            IoError::Format => "Formatting Error".fmt(f),
         }
     }
 }
 
-struct UnexpectedInput(u8);
-
-enum ProcessInputError<S: SerialReadWrite> {
-    Unexpected(u8),
-    IoError(IoError<S>),
+const fn zero_array<const N: usize>() -> [u8; N] {
+    [0; N]
 }
 
-impl<S: SerialReadWrite> From<UnexpectedInput> for ProcessInputError<S> {
-    fn from(UnexpectedInput(b): UnexpectedInput) -> Self {
-        Self::Unexpected(b)
-    }
+pub struct SerialConnection<S: SerialReadWrite> {
+    connection: S,
+    write_buffer: [u8; 512],
+    write_buffer_usage: usize,
 }
 
-impl<E, S: SerialReadWrite> From<E> for ProcessInputError<S>
-where
-    IoError<S>: From<E>,
-{
-    fn from(inner: E) -> Self {
-        Self::IoError(inner.into())
-    }
-}
-
-pub struct SerialConnection<T>(pub T);
-
-impl<R: SerialReadWrite> SerialConnection<R> {
-    fn read_ascii_char(&mut self) -> Result<u8, ReadError<R>> {
-        loop {
-            match self.0.read() {
-                Ok(b) => {
-                    if !b.is_ascii_whitespace() {
-                        return Ok(b);
-                    }
-                }
-                Err(nb::Error::Other(err)) => return Err(ReadError(err)),
-                Err(nb::Error::WouldBlock) => (),
-            }
+impl<S: SerialReadWrite> SerialConnection<S> {
+    pub fn new(connection: S) -> Self {
+        Self {
+            connection,
+            write_buffer: zero_array(),
+            write_buffer_usage: 0,
         }
     }
 
-    fn read_hex_u4(&mut self) -> Result<u8, ProcessInputError<R>> {
-        let b = self.read_ascii_char()?;
-        let c = b as char;
-        match c.to_digit(16) {
-            Some(digit) => Ok(digit as u8),
-            None => Err(ProcessInputError::Unexpected(b)),
-        }
+    fn read_exact<'b>(&mut self, buffer: &'b mut [u8]) -> Result<&'b mut [u8], IoError<S>> {
+        self.connection
+            .read_exact(buffer)
+            .map_err(IoError::Serial)?;
+
+        Ok(buffer)
     }
 
-    fn read_be_u8_hex(&mut self) -> Result<u8, ProcessInputError<R>> {
-        let a = self.read_hex_u4()?;
-        let b = self.read_hex_u4()?;
-        Ok((a << 4) + b)
+    fn decode<T>(&mut self) -> Result<T, IoError<S>>
+    where
+        for<'b> T: minicbor::Decode<'b, ()>,
+    {
+        self.connection
+            .read_until_zero(|bytes| {
+                let length = cobs::decode_in_place(bytes).map_err(|()| IoError::CobsDecoding)?;
+                minicbor::decode(&bytes[..length]).map_err(IoError::CborDecoding)
+            })
+            .map_err(IoError::Serial)?
     }
 
-    fn read_be_serializable_hex<S: serializable::Serializable>(
-        &mut self,
-    ) -> Result<S, ProcessInputError<R>> {
-        let mut buffer = S::Bytes::default();
-        for b in buffer.as_mut() {
-            *b = self.read_be_u8_hex()?;
-        }
-        Ok(S::from_be_bytes(buffer))
-    }
-}
+    fn encode<T: minicbor::Encode<()>>(&mut self, value: T) -> Result<(), IoError<S>> {
+        self.ensure_not_full().map_err(IoError::Serial)?;
+        self.write_buffer_usage += 1;
 
-impl<W: SerialWrite<u8>> SerialConnection<W> {
-    fn flush(&mut self) -> Result<(), WriteError<W>> {
-        nb::block!(self.0.flush()).map_err(WriteError::Write)
-    }
+        let mut writer = CborWriter {
+            connection: self,
+            state: cobs::EncoderState::default(),
+            total_bytes_sent: 0,
+        };
 
-    fn write_byte(&mut self, b: u8) -> Result<(), WriteError<W>> {
-        nb::block!(self.0.write(b)).map_err(WriteError::Write)
+        minicbor::encode(value, &mut writer).map_err(IoError::CborEncoding)?;
+
+        writer.finalize().map_err(IoError::Serial)?;
+
+        self.do_flush().map_err(IoError::Serial)
     }
 
-    fn write_char(&mut self, c: char) -> Result<(), WriteError<W>> {
-        let mut buffer = [0; 4];
-        for b in c.encode_utf8(&mut buffer).bytes() {
-            self.write_byte(b)?;
-        }
-
-        Ok(())
+    fn do_flush(&mut self) -> Result<(), S::Error> {
+        self.connection
+            .write_all(&self.write_buffer[..self.write_buffer_usage])?;
+        self.write_buffer_usage = 0;
+        self.connection.flush()
     }
 
-    fn write_single_char(&mut self, c: char) -> Result<(), WriteError<W>> {
-        self.write_char(c)?;
-        self.flush()?;
-
-        Ok(())
-    }
-
-    fn write_be_u4_hex(&mut self, b: u8) -> Result<(), WriteError<W>> {
-        self.write_char(char::from_digit(b.into(), 16).unwrap())
-    }
-
-    fn write_be_u8_hex(&mut self, b: u8) -> Result<(), WriteError<W>> {
-        self.write_be_u4_hex((b >> 4) & 0xF)?;
-        self.write_be_u4_hex(b & 0xF)?;
-        Ok(())
-    }
-
-    fn write_be_serializable_hex<S: serializable::Serializable>(
-        &mut self,
-        value: S,
-    ) -> Result<(), WriteError<W>> {
-        for &b in value.into_be_bytes().as_ref() {
-            self.write_be_u8_hex(b)?;
-        }
-        Ok(())
-    }
-
-    fn write_value(
-        &mut self,
-        address: machine::Address,
-        value: machine::ReferenceOrValue,
-        data: impl Iterator<Item = u8>,
-        subterms: impl Iterator<Item = Option<machine::Address>>,
-    ) -> Result<(), WriteError<W>> {
-        match value {
-            machine::ReferenceOrValue::Reference(reference) => {
-                self.write_char('R')?;
-                self.write_be_serializable_hex(Some(reference))?;
-            }
-            machine::ReferenceOrValue::Value(machine::Value::Structure(f, n)) => {
-                self.write_char('S')?;
-                self.write_be_serializable_hex(f)?;
-                self.write_be_serializable_hex(n)?;
-            }
-            machine::ReferenceOrValue::Value(machine::Value::List) => {
-                self.write_char('L')?;
-            }
-            machine::ReferenceOrValue::Value(machine::Value::Constant(c)) => {
-                self.write_char('C')?;
-                self.write_be_serializable_hex(c)?;
-            }
-            machine::ReferenceOrValue::Value(machine::Value::Integer { sign, bytes_count }) => {
-                self.write_char('I')?;
-                self.write_char(match sign {
-                    machine::IntegerSign::Positive => '+',
-                    machine::IntegerSign::Negative => '-',
-                })?;
-                self.write_be_serializable_hex(bytes_count)?;
-            }
-        }
-
-        for byte in data {
-            self.write_be_serializable_hex(byte)?;
-        }
-
-        for subterm in subterms {
-            self.write_be_serializable_hex(subterm)?;
-        }
-
-        self.write_be_serializable_hex(Some(address))?;
-
-        self.flush()
-    }
-
-    fn write_system_calls<Calls: SystemCalls>(
-        &mut self,
-        system_calls: &Calls,
-    ) -> Result<(), WriteError<W>> {
-        self.write_be_serializable_hex(system_calls.count())?;
-
-        system_calls.for_each_call(|name, arity| {
-            self.write_be_serializable_hex(name.len() as u8)?;
-            for b in name.bytes() {
-                self.write_be_serializable_hex(b)?;
-            }
-            self.write_be_serializable_hex(arity)?;
-
+    fn ensure_not_full(&mut self) -> Result<(), S::Error> {
+        if self.write_buffer_usage == self.write_buffer.len() {
+            self.do_flush()
+        } else {
             Ok(())
-        })?;
+        }
+    }
+}
 
-        self.flush()
+struct CborWriter<'a, S: SerialReadWrite> {
+    connection: &'a mut SerialConnection<S>,
+    state: cobs::EncoderState,
+    total_bytes_sent: usize,
+}
+
+impl<'a, S: SerialReadWrite> CborWriter<'a, S> {
+    fn finalize(mut self) -> Result<(), S::Error> {
+        self.ensure_not_full()?;
+
+        let (index, byte) = self.state.clone().finalize();
+        self.set_byte(index, byte);
+        self.push_byte(0);
+
+        Ok(())
+    }
+
+    fn ensure_not_full(&mut self) -> Result<(), S::Error> {
+        let current_usage = self.connection.write_buffer_usage;
+        self.connection.ensure_not_full()?;
+        self.total_bytes_sent += current_usage - self.connection.write_buffer_usage;
+
+        Ok(())
+    }
+
+    fn push_byte(&mut self, byte: u8) {
+        self.connection.write_buffer[self.connection.write_buffer_usage] = byte;
+        self.connection.write_buffer_usage += 1;
+    }
+
+    fn set_byte(&mut self, index: usize, byte: u8) {
+        self.connection.write_buffer[index - self.total_bytes_sent] = byte;
+    }
+
+    fn handle_cobs(&mut self, result: cobs::PushResult) -> Result<(), S::Error> {
+        self.ensure_not_full()?;
+
+        match result {
+            cobs::PushResult::AddSingle(byte) => self.push_byte(byte),
+            cobs::PushResult::ModifyFromStartAndSkip((index, byte)) => {
+                self.set_byte(index, byte);
+                self.connection.write_buffer_usage += 1;
+            }
+            cobs::PushResult::ModifyFromStartAndPushAndSkip((index, byte, new_byte)) => {
+                self.set_byte(index, byte);
+                self.push_byte(new_byte);
+                self.ensure_not_full()?;
+                self.connection.write_buffer_usage += 1;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl<'a, S: SerialReadWrite> minicbor::encode::Write for CborWriter<'a, S> {
+    type Error = S::Error;
+
+    fn write_all(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
+        for &byte in buffer {
+            let result = self.state.push(byte);
+            self.handle_cobs(result)?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+enum LoadCodeError {
+    NoSpaceForCode {
+        code_length: usize,
+        memory_capacity: usize,
+    },
+    HashMismatch {
+        hash: Hash,
+        calculated_hash: Hash,
+    },
+}
+
+impl fmt::Display for LoadCodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoadCodeError::NoSpaceForCode { code_length, memory_capacity } => write!(f, "No space for code: code_length = {code_length}, memory_capacity = {memory_capacity}"),
+            LoadCodeError::HashMismatch { hash, calculated_hash } => write!(f, "Hashes do not match: received = {hash:X}, calculated = {calculated_hash:X}"),
+        }
     }
 }
 
@@ -269,86 +248,223 @@ struct LoadedCode<'code, 'rest> {
     rest_of_memory: &'rest mut [u32],
 }
 
+fn code_section_buffer(code_section: &mut [[u8; 4]]) -> &mut [u8] {
+    let core::ops::Range { start, end } = code_section.as_mut_ptr_range();
+    let start = start as *mut u8;
+    let end = end as *mut u8;
+
+    // Safety: this is a valid slice, and u8 has an alignment of 1
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            start,
+            usize::try_from(end.offset_from(start)).unwrap_unchecked(),
+        )
+    }
+}
+
 fn load_code<
     'code,
     'rest,
     'memory: 'code + 'rest,
     'memory_ref: 'code + 'rest,
     S: SerialReadWrite,
-    SC: core::borrow::BorrowMut<SerialConnection<S>>,
 >(
     memory: &'memory mut [u32],
-    serial_connection: &mut SC,
-) -> Result<Option<LoadedCode<'code, 'rest>>, ProcessInputError<S>> {
-    let mut serial_connection = serial_connection.borrow_mut();
-
-    let code_length = serial_connection.read_be_serializable_hex::<u32>()? as usize;
+    serial_connection: &mut SerialConnection<S>,
+    CodeSubmission { code_length, hash }: CodeSubmission,
+) -> Result<Result<LoadedCode<'code, 'rest>, LoadCodeError>, IoError<S>> {
     let memory_capacity = memory.len();
 
     log_debug!("Code length:     {}", code_length);
     log_debug!("Memory capacity: {}", memory_capacity);
 
     if code_length >= memory_capacity {
-        error!(
-            &mut serial_connection,
-            "Code length ({}) is more than memory capacity ({})", code_length, memory_capacity
-        )?;
-        return Ok(None);
+        return Ok(Err(LoadCodeError::NoSpaceForCode {
+            code_length,
+            memory_capacity,
+        }));
     }
 
     let (code_section, rest_of_memory) = memory.split_at_mut(code_length);
 
-    let mut hasher = sha2::Sha256::new();
+    let code_section = unsafe { core::mem::transmute::<_, &mut [[u8; 4]]>(code_section) };
 
-    for memory_word in code_section.iter_mut() {
-        let mut bytes = [0; 4];
-        for b in bytes.as_mut() {
-            *b = serial_connection.read_be_u8_hex()?;
-        }
-        hasher.update(bytes);
-        let word = u32::from_be_bytes(bytes);
-        log_trace!("Word: {:08X}", word);
-        *memory_word = word;
+    let calculated_hash =
+        sha2::Sha256::digest(serial_connection.read_exact(code_section_buffer(code_section))?);
+
+    for &code in code_section.iter() {
+        log_trace!("Word: {}", Hex(code));
     }
 
-    let mut received_hash = [0; 32];
-
-    for b in &mut received_hash {
-        *b = serial_connection.read_be_u8_hex()?;
-    }
-
-    let calculated_hash = hasher.finalize();
-
-    log_debug!("Received Hash:   {:X}", hex::Hex(&received_hash[..]));
+    log_debug!("Received Hash:   {:X}", hash);
     log_debug!("Calculated Hash: {:X}", calculated_hash);
 
-    if received_hash
-        .iter()
-        .zip(calculated_hash.iter())
-        .any(|(&a, &b)| a != b)
-    {
-        error!(&mut serial_connection, "Hashes don't match")?;
-        return Ok(None);
+    if hash != calculated_hash {
+        return Ok(Err(LoadCodeError::HashMismatch {
+            hash,
+            calculated_hash,
+        }));
     }
 
-    Ok(Some(LoadedCode {
+    Ok(Ok(LoadedCode {
         code_section: machine::Instructions::new(code_section),
         rest_of_memory,
     }))
 }
 
-#[derive(Debug, IntoPrimitive, TryFromPrimitive)]
-#[repr(u8)]
-pub enum CommandHeader {
-    ReportStatus = b'S',
-    SubmitProgram = b'P',
-    SubmitQuery = b'Q',
-    LookupMemory = b'M',
-    NextSolution = b'C',
+pub type Hash = sha2::digest::Output<sha2::Sha256>;
+
+fn decode_hash<'b, Ctx>(
+    d: &mut minicbor::Decoder<'b>,
+    _ctx: &mut Ctx,
+) -> Result<Hash, minicbor::decode::Error> {
+    d.bytes().and_then(|bytes| {
+        <[u8; 32]>::try_from(bytes)
+            .map(Hash::from)
+            .map_err(|_| minicbor::decode::Error::message("Bad Hash Length"))
+    })
 }
 
-impl CommandHeader {
-    fn parse(value: u8) -> Result<Self, UnexpectedInput> {
-        Self::try_from(value).map_err(|_err| UnexpectedInput(value))
+#[derive(Debug, minicbor::Decode)]
+pub struct CodeSubmission {
+    #[n(0)]
+    code_length: usize,
+    #[n(1)]
+    #[cbor(decode_with = "decode_hash")]
+    hash: Hash,
+}
+
+#[derive(Debug, minicbor::Decode)]
+pub enum Command {
+    #[n(0)]
+    ReportStatus,
+    #[n(1)]
+    GetSystemCalls,
+    #[n(2)]
+    SubmitProgram {
+        #[n(0)]
+        code_submission: CodeSubmission,
+    },
+    #[n(3)]
+    SubmitQuery {
+        #[n(0)]
+        code_submission: CodeSubmission,
+    },
+    #[n(4)]
+    LookupMemory {
+        #[n(0)]
+        address: machine::Address,
+    },
+    #[n(5)]
+    NextSolution,
+}
+
+struct ErrorWriter<'a, W: minicbor::encode::Write> {
+    encoder: &'a mut minicbor::Encoder<W>,
+    state: Result<(), minicbor::encode::Error<W::Error>>,
+}
+
+impl<'a, W: minicbor::encode::Write> core::fmt::Write for ErrorWriter<'a, W> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if self.state.is_ok() {
+            self.encoder.str(s).map_err(|err| {
+                self.state = Err(err);
+
+                core::fmt::Error
+            })?;
+
+            Ok(())
+        } else {
+            Err(core::fmt::Error)
+        }
     }
+}
+
+pub struct ErrorResponse<E: fmt::Display>(E);
+
+impl<E: fmt::Display, C> minicbor::Encode<C> for ErrorResponse<E> {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        use core::fmt::Write;
+
+        log_error!("{}", self.0);
+
+        e.array(2)?.u32(0)?.array(1)?.begin_str()?;
+
+        let mut writer = ErrorWriter {
+            encoder: e,
+            state: Ok(()),
+        };
+
+        write!(&mut writer, "{}", self.0)
+            .map_err(|core::fmt::Error| minicbor::encode::Error::message("Formatting Error"))?;
+        writer.state?;
+
+        e.end()?.ok()
+    }
+}
+
+// #[derive(Debug, minicbor::Encode)]
+// pub enum CommandResponse<'a> {
+//     #[n(1)]
+//     Success,
+//     #[n(2)]
+//     WaitingForProgram,
+//     #[n(3)]
+//     WaitingForQuery,
+//     #[n(4)]
+//     NoSolution,
+//     #[n(5)]
+//     Solution(#[n(0)] &'a machine::Solution<'a>),
+// }
+
+#[derive(Debug, minicbor::Encode)]
+pub enum ReportStatusResponse {
+    #[n(1)]
+    WaitingForProgram,
+    #[n(2)]
+    WaitingForQuery,
+}
+
+impl fmt::Display for ReportStatusResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReportStatusResponse::WaitingForQuery => "Waiting for Query".fmt(f),
+            ReportStatusResponse::WaitingForProgram => "Waiting for Program".fmt(f),
+        }
+    }
+}
+
+#[derive(Debug, minicbor::Encode)]
+pub enum GetSystemCallsResponse<Calls> {
+    #[n(3)]
+    SystemCalls(#[n(0)] Calls),
+}
+
+#[derive(Debug, minicbor::Encode)]
+pub enum SubmitProgramResponse {
+    #[n(4)]
+    Success,
+}
+
+#[derive(Debug, minicbor::Encode)]
+pub enum SubmitQueryResponse<'a> {
+    #[n(5)]
+    NoSolution,
+    #[n(6)]
+    Solution(#[n(0)] &'a machine::Solution<'a>),
+}
+
+#[derive(minicbor::Encode)]
+enum LookupMemoryResponse<'a> {
+    #[n(7)]
+    MemoryValue {
+        #[n(0)]
+        address: Address,
+        #[n(1)]
+        value: ReferenceOrValue<'a>,
+    },
 }

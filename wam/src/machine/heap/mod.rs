@@ -1,6 +1,6 @@
-use core::{fmt, num::NonZeroU16};
+use core::{fmt, iter::FusedIterator, num::NonZeroU16};
 
-use crate::{log_trace, serializable::SerializableWrapper};
+use crate::log_trace;
 
 use super::basic_types::{
     self, Arity, Constant, Functor, LongInteger, NoneRepresents, OptionDisplay, ProgramCounter, Yn,
@@ -13,6 +13,26 @@ use structure_iteration::State as StructureIterationState;
 
 type IntegerSign = core::cmp::Ordering;
 type IntegerWordUsage = u16;
+
+struct CommaSeparated<I>(I);
+
+impl<I> fmt::Debug for CommaSeparated<I>
+where
+    I: Clone + IntoIterator,
+    I::Item: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut iter = self.0.clone().into_iter();
+        match iter.next() {
+            None => Ok(()),
+            Some(first_item) => {
+                write!(f, "{first_item:?}")?;
+
+                iter.try_for_each(|item| write!(f, ", {item:?}"))
+            }
+        }
+    }
+}
 
 pub enum UnificationError {
     UnificationFailure,
@@ -163,9 +183,10 @@ pub enum ValueType {
     TrailVariable,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, minicbor::Encode, minicbor::Decode)]
 #[repr(transparent)]
-pub struct Address(NonZeroU16);
+#[cbor(transparent)]
+pub struct Address(#[n(0)] NonZeroU16);
 
 impl Address {
     fn from_word(word: TupleWord) -> Option<Self> {
@@ -195,18 +216,6 @@ impl fmt::Display for Address {
 
 impl NoneRepresents for Address {
     const NONE_REPRESENTS: &'static str = "NULL";
-}
-
-impl SerializableWrapper for Option<Address> {
-    type Inner = u16;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Address::from_word(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.map_or(0, Address::into_word)
-    }
 }
 
 pub struct AddressView(u16);
@@ -524,11 +533,11 @@ impl TupleEntry for Address {
 
 impl TupleEntry for Option<Address> {
     fn decode(word: TupleWord) -> Result<Self, TupleEntryError> {
-        Ok(Self::from_inner(word))
+        Ok(Address::from_word(word))
     }
 
     fn encode(self) -> TupleWord {
-        self.into_inner()
+        self.map_or(0, Address::into_word)
     }
 }
 
@@ -662,6 +671,53 @@ impl TupleMemoryIndex for core::ops::Range<TupleAddress> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct TermsList<'a>(&'a [TupleWord]);
+
+impl<'a> fmt::Debug for TermsList<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{:?}]", CommaSeparated(self.into_iter()))
+    }
+}
+
+impl<'a, C> minicbor::Encode<C> for TermsList<'a> {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.array(self.0.len() as u64)?;
+
+        self.into_iter()
+            .try_for_each(|address| e.encode(address)?.ok())
+    }
+}
+
+impl<'a> TermsList<'a> {
+    pub fn into_iter(
+        self,
+    ) -> impl Clone + ExactSizeIterator + FusedIterator + Iterator<Item = Option<Address>> + 'a
+    {
+        self.0.iter().copied().map(Address::from_word)
+    }
+
+    pub fn take<const N: usize>(self) -> [Option<Address>; N] {
+        let mut terms = [None; N];
+        for (slot, term) in terms.iter_mut().zip(self.into_iter()) {
+            *slot = term;
+        }
+        terms
+    }
+}
+
+#[derive(Debug, minicbor::Encode)]
+pub enum Solution<'a> {
+    #[n(0)]
+    SingleSolution(#[n(0)] TermsList<'a>),
+    #[n(1)]
+    MultipleSolutions(#[n(0)] TermsList<'a>),
+}
+
 struct TupleMemory<'m>(&'m mut [TupleWord]);
 
 impl<'m> TupleMemory<'m> {
@@ -742,19 +798,11 @@ impl<'m> TupleMemory<'m> {
     fn load_terms(
         &self,
         terms: Option<core::ops::Range<TupleAddress>>,
-    ) -> Result<
-        impl core::iter::ExactSizeIterator
-            + core::iter::FusedIterator
-            + Iterator<Item = Option<Address>>
-            + '_,
-        TupleMemoryError,
-    > {
-        Ok(match terms {
+    ) -> Result<TermsList, TupleMemoryError> {
+        Ok(TermsList(match terms {
             Some(terms) => self.get(terms)?,
             None => &[],
-        }
-        .iter()
-        .map(|&word| Address::from_word(word)))
+        }))
     }
 
     fn copy_within(&mut self, source: core::ops::Range<TupleAddress>, destination: TupleAddress) {
@@ -861,12 +909,6 @@ impl<'m> TupleMemory<'m> {
 }
 
 struct NoData;
-
-impl NoData {
-    fn into_iter<I: Iterator<Item = u8>>(self) -> DataIterator<I> {
-        DataIterator::NoData
-    }
-}
 
 trait BaseTupleInitialData<Data> {
     fn encode(&self, tuple_memory: &mut [TupleWord]);
@@ -1266,7 +1308,7 @@ trait Tuple: fmt::Debug + BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNext
     }
 }
 
-impl<T: fmt::Debug + BaseTuple + TupleTermsInfo + TupleDataInfo + TupleNextFreeSpaceInfo> Tuple
+impl<T: fmt::Debug + BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNextFreeSpaceInfo> Tuple
     for T
 {
 }
@@ -1329,15 +1371,15 @@ impl BaseTuple for ConstantValue {
 }
 
 struct IntegerWords<'a> {
-    words: &'a [u32],
+    words: &'a [[u8; 4]],
 }
 
 impl<'a> BaseTupleInitialData<IntegerWordsSlice> for IntegerWords<'a> {
     fn encode(&self, tuple_memory: &mut [TupleWord]) {
-        let words = self.words.iter().rev().flat_map(|&word| {
-            let [a, b, c, d] = word.to_le_bytes();
-            [u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d])]
-        });
+        let words = self
+            .words
+            .iter()
+            .flat_map(|&[a, b, c, d]| [u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d])]);
 
         for (slot, word) in tuple_memory.iter_mut().zip(words) {
             *slot = word;
@@ -1554,51 +1596,121 @@ impl BaseTuple for TrailVariable {
 }
 
 #[derive(Debug)]
-pub enum Value {
+pub enum ValueHead {
     Structure(Functor, Arity),
     List,
     Constant(Constant),
-    Integer {
-        sign: basic_types::IntegerSign,
-        bytes_count: u32,
-    },
+    Integer { sign: basic_types::IntegerSign },
 }
 
 #[derive(Debug)]
-pub enum ReferenceOrValue {
+pub enum ReferenceOrValueHead {
     Reference(Address),
-    Value(Value),
+    Value(ValueHead),
 }
 
-#[derive(Clone)]
-enum DataIterator<I: Iterator<Item = u8>> {
-    NoData,
-    Integer(I),
-}
+#[derive(Copy, Clone)]
+pub struct IntegerLeBytes<'a>(&'a [TupleWord]);
 
-impl<I: Iterator<Item = u8>> Iterator for DataIterator<I> {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::NoData => None,
-            Self::Integer(i) => i.next(),
+impl<'a> fmt::Debug for IntegerLeBytes<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for word in self.0 {
+            write!(f, "{:04x}", word)?;
         }
-    }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::NoData => (0, Some(0)),
-            Self::Integer(i) => i.size_hint(),
-        }
+        Ok(())
     }
 }
 
-impl<I: DoubleEndedIterator + Iterator<Item = u8>> DoubleEndedIterator for DataIterator<I> {
-    fn next_back(&mut self) -> Option<Self::Item> {
+impl<'a> PartialEq for IntegerLeBytes<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.equals(other.into_iter())
+    }
+}
+
+impl<'a, C> minicbor::Encode<C> for IntegerLeBytes<'a> {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.begin_array()?;
+
+        for byte in self.into_iter() {
+            e.u8(byte)?;
+        }
+
+        e.end()?.ok()
+    }
+}
+
+impl<'a> IntegerLeBytes<'a> {
+    pub fn into_iter(self) -> impl Clone + Iterator<Item = u8> + 'a {
+        self.0.iter().copied().flat_map(u16::to_le_bytes)
+    }
+
+    pub fn equals(&self, le_bytes: impl Iterator<Item = u8>) -> bool {
+        let mut i1 = self.into_iter();
+        let mut i2 = le_bytes;
+
+        loop {
+            return match (i1.next(), i2.next()) {
+                (Some(b1), Some(b2)) => {
+                    if b1 == b2 {
+                        continue;
+                    } else {
+                        false
+                    }
+                }
+                (None, None) => true,
+                (Some(b), None) => b == 0 && i1.all(|b| b == 0),
+                (None, Some(b)) => b == 0 && i2.all(|b| b == 0),
+            };
+        }
+    }
+}
+
+#[derive(Debug, minicbor::Encode)]
+pub enum Value<T, I> {
+    #[n(0)]
+    Structure(#[n(0)] Functor, #[n(1)] Arity, #[n(2)] T),
+    #[n(1)]
+    List(#[n(0)] Option<Address>, #[n(1)] Option<Address>),
+    #[n(2)]
+    Constant(#[n(0)] Constant),
+    #[n(3)]
+    Integer {
+        #[n(0)]
+        sign: basic_types::IntegerSign,
+        #[n(1)]
+        le_bytes: I,
+    },
+}
+
+impl<T, I> Value<T, I> {
+    pub fn head(self) -> ValueHead {
         match self {
-            Self::NoData => None,
-            Self::Integer(i) => i.next_back(),
+            Value::Structure(f, n, _) => ValueHead::Structure(f, n),
+            Value::List(_, _) => ValueHead::List,
+            Value::Constant(c) => ValueHead::Constant(c),
+            Value::Integer { sign, .. } => ValueHead::Integer { sign },
+        }
+    }
+}
+
+#[derive(Debug, minicbor::Encode)]
+pub enum ReferenceOrValue<T, I> {
+    #[n(0)]
+    Reference(#[n(0)] Address),
+    #[n(1)]
+    Value(#[n(0)] Value<T, I>),
+}
+
+impl<T, I> ReferenceOrValue<T, I> {
+    pub fn head(self) -> ReferenceOrValueHead {
+        match self {
+            ReferenceOrValue::Reference(reference) => ReferenceOrValueHead::Reference(reference),
+            ReferenceOrValue::Value(value) => ReferenceOrValueHead::Value(value.head()),
         }
     }
 }
@@ -1640,6 +1752,12 @@ pub enum MemoryError {
     UnmarkedEntryInScanQueue {
         item_to_scan: Address,
     },
+}
+
+impl fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
 }
 
 impl From<NoRegistryEntryAt> for MemoryError {
@@ -1919,7 +2037,7 @@ impl<'m> Heap<'m> {
     ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
         self.new_value(
             |_| {
-                let (sign, words_count) = if words.iter().copied().all(|word| word == 0) {
+                let (sign, words_count) = if words.iter().copied().flatten().all(|word| word == 0) {
                     (IntegerSign::Equal, TupleAddress(0))
                 } else {
                     (
@@ -1973,40 +2091,15 @@ impl<'m> Heap<'m> {
         self.new_integer_output(words_count)
     }
 
-    pub fn get_maybe_value(
-        &self,
-        address: Option<Address>,
-    ) -> Result<
-        (
-            Address,
-            ReferenceOrValue,
-            impl Iterator<Item = u8> + '_,
-            impl Iterator<Item = Option<Address>> + '_,
-        ),
-        MemoryError,
-    > {
-        self.get_value(address.ok_or(MemoryError::NoRegistryEntryAt {
-            address: AddressView(address.into_inner()),
-        })?)
-    }
-
     pub fn get_value(
         &self,
         mut address: Address,
-    ) -> Result<
-        (
-            Address,
-            ReferenceOrValue,
-            impl DoubleEndedIterator + Iterator<Item = u8> + '_,
-            impl Iterator<Item = Option<Address>> + '_,
-        ),
-        MemoryError,
-    > {
+    ) -> Result<(Address, ReferenceOrValue<TermsList, IntegerLeBytes>), MemoryError> {
         loop {
             log_trace!("Looking up memory at {}", address);
             let registry_entry = self.registry.get(address)?;
 
-            let (address, value, data, terms) = match &registry_entry.value_type {
+            let (address, value) = match &registry_entry.value_type {
                 ValueType::Reference => {
                     let (ReferenceValue(reference_address), metadata) =
                         ReferenceValue::decode_and_verify_address(
@@ -2023,8 +2116,6 @@ impl<'m> Heap<'m> {
                     (
                         metadata.registry_address,
                         ReferenceOrValue::Reference(reference_address),
-                        metadata.data.into_iter(),
-                        metadata.terms.into_address_range(),
                     )
                 }
                 ValueType::Structure => {
@@ -2037,9 +2128,12 @@ impl<'m> Heap<'m> {
 
                     (
                         metadata.registry_address,
-                        ReferenceOrValue::Value(Value::Structure(f, n)),
-                        metadata.data.into_iter(),
-                        metadata.terms.into_address_range(),
+                        ReferenceOrValue::Value(Value::Structure(
+                            f,
+                            n,
+                            self.tuple_memory
+                                .load_terms(metadata.terms.into_address_range())?,
+                        )),
                     )
                 }
                 ValueType::List => {
@@ -2049,11 +2143,17 @@ impl<'m> Heap<'m> {
                         registry_entry.tuple_address,
                     )?;
 
+                    let mut terms = self
+                        .tuple_memory
+                        .load_terms(metadata.terms.into_address_range())?
+                        .into_iter();
+
+                    let lhs = terms.next().flatten();
+                    let rhs = terms.next().flatten();
+
                     (
                         metadata.registry_address,
-                        ReferenceOrValue::Value(Value::List),
-                        metadata.data.into_iter(),
-                        metadata.terms.into_address_range(),
+                        ReferenceOrValue::Value(Value::List(lhs, rhs)),
                     )
                 }
                 ValueType::Constant => {
@@ -2066,8 +2166,6 @@ impl<'m> Heap<'m> {
                     (
                         metadata.registry_address,
                         ReferenceOrValue::Value(Value::Constant(c)),
-                        metadata.data.into_iter(),
-                        metadata.terms.into_address_range(),
                     )
                 }
                 ValueType::Integer => {
@@ -2084,21 +2182,14 @@ impl<'m> Heap<'m> {
                         IntegerSign::Less => basic_types::IntegerSign::Negative,
                     };
 
-                    let bytes_count = u32::from(integer.data_usage().0)
-                        * (core::mem::size_of::<TupleWord>() as u32);
-
                     (
                         metadata.registry_address,
-                        ReferenceOrValue::Value(Value::Integer { sign, bytes_count }),
-                        DataIterator::Integer(
-                            self.tuple_memory
-                                .get(metadata.data.into_address_range())?
-                                .iter()
-                                .rev()
-                                .copied()
-                                .flat_map(u16::to_be_bytes),
-                        ),
-                        metadata.terms.into_address_range(),
+                        ReferenceOrValue::Value(Value::Integer {
+                            sign,
+                            le_bytes: IntegerLeBytes(
+                                self.tuple_memory.get(metadata.data.into_address_range())?,
+                            ),
+                        }),
                     )
                 }
                 ValueType::Environment | ValueType::ChoicePoint | ValueType::TrailVariable => {
@@ -2120,7 +2211,7 @@ impl<'m> Heap<'m> {
 
             log_trace!("Value: {:?}", value);
 
-            break Ok((address, value, data, self.tuple_memory.load_terms(terms)?));
+            break Ok((address, value));
         }
     }
 
@@ -2318,39 +2409,16 @@ impl<'m> Heap<'m> {
 
     fn do_unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationError> {
         log_trace!("Unifying {} and {}", a1, a2);
-        let (a1, v1, d1, _) = self.get_value(a1)?;
-        let (a2, v2, d2, _) = self.get_value(a2)?;
+        let (a1, v1) = self.get_value(a1)?;
+        let (a2, v2) = self.get_value(a2)?;
         log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
+
+        let pairs = ((a1, v1), (a2, v2));
 
         if a1 == a2 {
             Ok(())
-        } else if let (
-            &ReferenceOrValue::Value(Value::Integer {
-                sign: s1,
-                bytes_count: n1,
-            }),
-            &ReferenceOrValue::Value(Value::Integer {
-                sign: s2,
-                bytes_count: n2,
-            }),
-        ) = (&v1, &v2)
-        {
-            if s1 == s2
-                && core::iter::zip(
-                    d1.rev().chain(core::iter::repeat(0)),
-                    d2.rev().chain(core::iter::repeat(0)),
-                )
-                .take(n1.max(n2) as usize)
-                .all(|(b1, b2)| b1 == b2)
-            {
-                Ok(())
-            } else {
-                Err(UnificationError::UnificationFailure)
-            }
         } else {
-            drop(d1);
-            drop(d2);
-            match ((a1, v1), (a2, v2)) {
+            match pairs {
                 ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {
                     self.bind_variables(a1, a2)??;
                     Ok(())
@@ -2367,8 +2435,8 @@ impl<'m> Heap<'m> {
                     Ok(())
                 }
                 (
-                    (a1, ReferenceOrValue::Value(Value::Structure(f1, n1))),
-                    (a2, ReferenceOrValue::Value(Value::Structure(f2, n2))),
+                    (a1, ReferenceOrValue::Value(Value::Structure(f1, n1, _))),
+                    (a2, ReferenceOrValue::Value(Value::Structure(f2, n2, _))),
                 ) => {
                     if self.registry.is_already_unified_with(a1, a2)? {
                         Ok(())
@@ -2387,8 +2455,8 @@ impl<'m> Heap<'m> {
                     }
                 }
                 (
-                    (a1, ReferenceOrValue::Value(Value::List)),
-                    (a2, ReferenceOrValue::Value(Value::List)),
+                    (a1, ReferenceOrValue::Value(Value::List(_, _))),
+                    (a2, ReferenceOrValue::Value(Value::List(_, _))),
                 ) => {
                     if self.registry.is_already_unified_with(a1, a2)? {
                         Ok(())
@@ -2409,6 +2477,29 @@ impl<'m> Heap<'m> {
                     (_, ReferenceOrValue::Value(Value::Constant(c2))),
                 ) => {
                     if c1 == c2 {
+                        Ok(())
+                    } else {
+                        Err(UnificationError::UnificationFailure)
+                    }
+                }
+                (
+                    (
+                        _,
+                        ReferenceOrValue::Value(Value::Integer {
+                            sign: s1,
+                            le_bytes: b1,
+                            ..
+                        }),
+                    ),
+                    (
+                        _,
+                        ReferenceOrValue::Value(Value::Integer {
+                            sign: s2,
+                            le_bytes: b2,
+                        }),
+                    ),
+                ) => {
+                    if (s1, b1) == (s2, b2) {
                         Ok(())
                     } else {
                         Err(UnificationError::UnificationFailure)
@@ -2811,7 +2902,7 @@ impl<'m> Heap<'m> {
         address: Option<Address>,
     ) -> Result<(Address, IntegerSign, IntegerWordsSlice), ExpressionEvaluationOrOutOfMemory> {
         let mut address = address.ok_or(MemoryError::NoRegistryEntryAt {
-            address: AddressView(address.into_inner()),
+            address: AddressView(0),
         })?;
 
         loop {
@@ -2853,13 +2944,10 @@ impl<'m> Heap<'m> {
 
                     match SpecialFunctor::try_from(structure)? {
                         SpecialFunctor::PrefixOperation { operation } => {
-                            let mut terms = self
+                            let [a1] = self
                                 .tuple_memory
-                                .load_terms(metadata.terms.into_address_range())?;
-
-                            let a1 = terms.next().flatten();
-
-                            drop(terms);
+                                .load_terms(metadata.terms.into_address_range())?
+                                .take();
 
                             let (_, s1, w1) = self.do_evaluate(a1)?;
 
@@ -2892,14 +2980,10 @@ impl<'m> Heap<'m> {
                             calculate_words_count,
                             operation,
                         } => {
-                            let mut terms = self
+                            let [a1, a2] = self
                                 .tuple_memory
-                                .load_terms(metadata.terms.into_address_range())?;
-
-                            let a1 = terms.next().flatten();
-                            let a2 = terms.next().flatten();
-
-                            drop(terms);
+                                .load_terms(metadata.terms.into_address_range())?
+                                .take();
 
                             let (_, s1, w1) = self.do_evaluate(a1)?;
                             let (_, s2, w2) = self.do_evaluate(a2)?;
@@ -2932,14 +3016,10 @@ impl<'m> Heap<'m> {
                             (o0.registry_address, s0, o0.data.0)
                         }
                         SpecialFunctor::DivMod(select) => {
-                            let mut terms = self
+                            let [a0, a1] = self
                                 .tuple_memory
-                                .load_terms(metadata.terms.into_address_range())?;
-
-                            let a0 = terms.next().flatten();
-                            let a1 = terms.next().flatten();
-
-                            drop(terms);
+                                .load_terms(metadata.terms.into_address_range())?
+                                .take();
 
                             let (_, s0, w0) = self.do_evaluate(a0)?;
                             let (_, s1, w1) = self.do_evaluate(a1)?;
@@ -2983,14 +3063,10 @@ impl<'m> Heap<'m> {
                             }
                         }
                         SpecialFunctor::MinMax { select_first_if } => {
-                            let mut terms = self
+                            let [a1, a2] = self
                                 .tuple_memory
-                                .load_terms(metadata.terms.into_address_range())?;
-
-                            let a1 = terms.next().flatten();
-                            let a2 = terms.next().flatten();
-
-                            drop(terms);
+                                .load_terms(metadata.terms.into_address_range())?
+                                .take();
 
                             let (a1, s1, w1) = self.do_evaluate(a1)?;
                             let (a2, s2, w2) = self.do_evaluate(a2)?;
@@ -3291,7 +3367,11 @@ impl<'m> Heap<'m> {
             }
         };
 
-        for term_address in self.tuple_memory.load_terms(term_address_range)? {
+        for term_address in self
+            .tuple_memory
+            .load_terms(term_address_range)?
+            .into_iter()
+        {
             self.registry
                 .add_maybe_item_to_be_scanned(term_address, next_list_head)?;
         }
@@ -3468,12 +3548,7 @@ impl<'m> Heap<'m> {
         self.latest_choice_point.is_some()
     }
 
-    pub fn solution_registers(
-        &self,
-    ) -> Result<
-        impl core::iter::ExactSizeIterator + Iterator<Item = Option<Address>> + '_,
-        MemoryError,
-    > {
+    pub fn solution(&self) -> Result<TermsList, MemoryError> {
         let (environment, _, metadata) = self.get_environment()?;
         if let Some(continuation_environment) = environment.continuation_environment {
             return Err(MemoryError::ContinuationEnvironmentRemaining {

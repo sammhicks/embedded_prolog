@@ -1,19 +1,19 @@
 use super::{
-    log_debug, log_info, log_trace, machine::Instructions, machine::SystemCalls, CommandHeader,
-    ProcessInputError, SerialConnection, SerialRead, SerialWrite,
+    log_debug, log_info,
+    machine::{ExecutionFailure, Instructions, SystemCallEncoder, SystemCalls},
+    CodeSubmission, Command, ErrorResponse, GetSystemCallsResponse, IoError, ReportStatusResponse,
+    SerialConnection, SerialReadWrite, SubmitQueryResponse,
 };
-
-use crate::machine::{ExecutionFailure, OptionDisplay};
 
 #[derive(Debug)]
 pub enum UnhandledCommand {
     Reset,
     ProcessNextCommand,
-    SubmitProgram,
-    SubmitQuery,
+    SubmitProgram { code_submission: CodeSubmission },
+    SubmitQuery { code_submission: CodeSubmission },
 }
 
-pub struct Device<'m, 's, Serial, Calls> {
+pub struct Device<'m, 's, Serial: SerialReadWrite, Calls> {
     pub program: Instructions<'m>,
     pub query: Instructions<'m>,
     pub memory: &'m mut [u32],
@@ -21,77 +21,74 @@ pub struct Device<'m, 's, Serial, Calls> {
     pub system_calls: &'s mut Calls,
 }
 
-impl<'m, 's, Serial: SerialRead<u8> + SerialWrite<u8>, Calls: SystemCalls>
-    Device<'m, 's, Serial, Calls>
-{
-    pub(crate) fn run(self) -> Result<UnhandledCommand, ProcessInputError<Serial>> {
+impl<'m, 's, Serial: SerialReadWrite, Calls: SystemCalls> Device<'m, 's, Serial, Calls> {
+    pub(crate) fn run(self) -> Result<UnhandledCommand, IoError<Serial>> {
         let mut machine =
             crate::machine::Machine::new(self.program, self.query, self.memory, self.system_calls);
 
         let mut execution_result = machine.next_solution();
 
         loop {
-            let success = match execution_result {
-                Ok(success) => success,
+            match execution_result {
+                Ok(()) => (),
                 Err(ExecutionFailure::Failed) => {
-                    self.serial_connection.write_single_char('F')?;
+                    self.serial_connection
+                        .encode(SubmitQueryResponse::NoSolution)?;
                     return Ok(UnhandledCommand::ProcessNextCommand);
                 }
-                Err(ExecutionFailure::Error(err)) => {
-                    crate::error!(self.serial_connection, "{:?}", err)?;
+                Err(ExecutionFailure::Error(error)) => {
+                    self.serial_connection.encode(ErrorResponse(error))?;
                     return Ok(UnhandledCommand::Reset);
                 }
-            };
-
-            let solution_registers = match machine.solution_registers() {
-                Ok(registers) => registers,
-                Err(err) => {
-                    crate::error!(self.serial_connection, "{:?}", err)?;
-                    return Ok(UnhandledCommand::Reset);
-                }
-            };
-
-            let success_code = match success {
-                crate::machine::ExecutionSuccess::SingleAnswer => 'A',
-                crate::machine::ExecutionSuccess::MultipleAnswers => 'C',
-            };
-
-            self.serial_connection.write_char(success_code)?;
-            self.serial_connection
-                .write_be_u8_hex(solution_registers.len() as u8)?;
-            for address in solution_registers {
-                log_trace!("Solution Register: {}", OptionDisplay(address));
-                self.serial_connection.write_be_serializable_hex(address)?;
             }
-            self.serial_connection.flush()?;
+
+            match machine.solution() {
+                Ok(solution) => self
+                    .serial_connection
+                    .encode(SubmitQueryResponse::Solution(&solution))?,
+                Err(err) => {
+                    self.serial_connection.encode(ErrorResponse(err))?;
+                    return Ok(UnhandledCommand::Reset);
+                }
+            }
 
             execution_result = loop {
-                let command = CommandHeader::parse(self.serial_connection.read_ascii_char()?)?;
+                let command = self.serial_connection.decode::<Command>()?;
 
                 log_info!("Processing command {:?}", command);
 
                 match command {
-                    CommandHeader::ReportStatus => {
-                        log_debug!("Status: {:?}", success);
-                        self.serial_connection.write_single_char(success_code)?;
+                    Command::ReportStatus => {
+                        let status = ReportStatusResponse::WaitingForQuery;
+                        log_debug!("Status: {}", status);
+                        self.serial_connection.encode(status)?;
                     }
-                    CommandHeader::SubmitProgram => return Ok(UnhandledCommand::SubmitProgram),
-                    CommandHeader::SubmitQuery => return Ok(UnhandledCommand::SubmitQuery),
-                    CommandHeader::LookupMemory => {
-                        match machine
-                            .lookup_memory(self.serial_connection.read_be_serializable_hex()?)
-                        {
-                            Ok((address, value, data, subterms)) => {
-                                self.serial_connection
-                                    .write_value(address, value, data, subterms)?;
+                    Command::GetSystemCalls => {
+                        self.serial_connection
+                            .encode(GetSystemCallsResponse::SystemCalls(SystemCallEncoder(
+                                machine.system_calls(),
+                            )))?;
+                    }
+                    Command::SubmitProgram { code_submission } => {
+                        return Ok(UnhandledCommand::SubmitProgram { code_submission })
+                    }
+                    Command::SubmitQuery { code_submission } => {
+                        return Ok(UnhandledCommand::SubmitQuery { code_submission })
+                    }
+                    Command::LookupMemory { address } => {
+                        match machine.lookup_memory(address) {
+                            Ok((address, value)) => {
+                                self.serial_connection.encode(
+                                    super::LookupMemoryResponse::MemoryValue { address, value },
+                                )?;
                             }
-                            Err(err) => {
-                                crate::error!(self.serial_connection, "{:?}", err)?;
-                                self.serial_connection.flush()?;
+                            Err(error) => {
+                                self.serial_connection.encode(ErrorResponse(error))?;
+                                return Ok(UnhandledCommand::Reset);
                             }
                         };
                     }
-                    CommandHeader::NextSolution => {
+                    Command::NextSolution => {
                         break machine.next_solution();
                     }
                 }

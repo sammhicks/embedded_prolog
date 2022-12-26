@@ -1,6 +1,6 @@
 use core::{fmt, marker::PhantomData};
 
-use crate::{log_info, log_trace, serializable::SerializableWrapper};
+use crate::{log_info, log_trace};
 
 use super::{
     basic_types::{Arity, Xn},
@@ -195,16 +195,16 @@ impl<'me, 'memory> MachineState<'me, 'memory> {
 
         log_trace!("Reading from {:?}", register_index);
 
-        let (_address, value, data, _terms) = self
+        let (_address, value) = self
             .machine
             .memory
             .get_value(self.machine.registers.load(register_index).unwrap())?;
 
-        let ReferenceOrValue::Value(super::Value::Integer { sign, .. }) = value else { return Err(SystemCallError::UnificationFailure) };
+        let ReferenceOrValue::Value(super::Value::Integer { sign, le_bytes, .. }) = value else { return Err(SystemCallError::UnificationFailure) };
+
+        let mut le_bytes = le_bytes.into_iter();
 
         let mut buffer = [0_u8; core::mem::size_of::<u128>()];
-
-        let mut le_bytes = data.rev();
 
         buffer.iter_mut().zip(le_bytes.by_ref()).for_each(write);
 
@@ -526,24 +526,6 @@ where
     }
 }
 
-// pub struct SystemCallSet<'a, S>(&'a [&'a dyn SystemCall<State = S>]);
-
-// impl<'a, S> SystemCallSet<'a, S> {
-//     fn call_all(&self, machine: &mut Machine, state: &mut S) {
-//         for (n, system_call) in self.0.iter().enumerate() {
-//             println!(
-//                 "Running system call {n}: {}/{}",
-//                 system_call.name(),
-//                 system_call.arity()
-//             );
-//             machine.current_register = 0;
-//             system_call.system_call(machine, state);
-//         }
-//     }
-// }
-
-// -----------------------------------------------------------------------------
-
 #[derive(Clone, Copy)]
 pub struct SystemCallIndex(pub u8);
 
@@ -559,24 +541,29 @@ impl fmt::Display for SystemCallIndex {
     }
 }
 
-impl SerializableWrapper for SystemCallIndex {
-    type Inner = u8;
-
-    fn from_inner(inner: Self::Inner) -> Self {
-        Self(inner)
-    }
-
-    fn into_inner(self) -> Self::Inner {
-        self.0
-    }
-}
-
 pub trait SystemCalls {
     fn count(&self) -> u16;
 
     fn for_each_call<F: FnMut(&str, Arity) -> Result<(), E>, E>(&self, f: F) -> Result<(), E>;
 
     fn execute(&mut self, machine: Machine, i: SystemCallIndex) -> Result<(), SystemCallError>;
+}
+
+pub struct SystemCallEncoder<'a, Calls: SystemCalls>(pub &'a Calls);
+
+impl<'a, Calls: SystemCalls, C> minicbor::Encode<C> for SystemCallEncoder<'a, Calls> {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        let Self(calls) = self;
+        e.array(calls.count().into())?;
+
+        calls.for_each_call(|name, arity| (name, arity).encode(e, ctx))?;
+
+        Ok(())
+    }
 }
 
 struct SystemCallSet<'a, State> {

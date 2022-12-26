@@ -1,5 +1,4 @@
 use std::{
-    borrow::Borrow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     io::{Read, Write},
@@ -11,10 +10,9 @@ use std::{
 use anyhow::Context;
 use arcstr::ArcStr;
 use clap::Parser;
-use compiler::{Functor, ProgramInfo, Query, Term};
 use crossterm::{
     event::{Event, KeyCode, KeyEvent, KeyEventKind},
-    style::{style, Print, Stylize},
+    style::{Print, Stylize},
     ExecutableCommand, QueueableCommand,
 };
 use num_bigint::BigInt;
@@ -22,92 +20,14 @@ use serialport::SerialPortType;
 use sha2::{digest::FixedOutput, Digest};
 
 mod compiler;
+use compiler::{Arity, Constant, Functor, IntegerSign, ProgramInfo, Query, Term};
 
 #[derive(Debug, thiserror::Error)]
-#[error("Bad Status: {0}")]
-struct BadStatus(StatusCode);
-
-#[derive(Debug)]
-enum StatusCode {
-    WaitingForProgram,
-    WaitingForQuery,
-    SingleAnswer,
-    ChoicePoint,
-    Error(String),
-}
-
-impl StatusCode {
-    fn assert_can_submit_program(self) -> Result<(), BadStatus> {
-        match self {
-            Self::WaitingForProgram
-            | Self::WaitingForQuery
-            | Self::SingleAnswer
-            | Self::ChoicePoint => Ok(()),
-            Self::Error(_) => Err(BadStatus(self)),
-        }
-    }
-
-    fn assert_can_submit_query(self) -> Result<(), BadStatus> {
-        match self {
-            Self::WaitingForQuery | Self::SingleAnswer | Self::ChoicePoint => Ok(()),
-            Self::WaitingForProgram | Self::Error(_) => Err(BadStatus(self)),
-        }
-    }
-}
-
-impl fmt::Display for StatusCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::WaitingForProgram => write!(f, "Waiting For Program"),
-            Self::WaitingForQuery => write!(f, "Waiting For Query"),
-            Self::SingleAnswer => write!(f, "Single Answer"),
-            Self::ChoicePoint => write!(f, "Choice Point"),
-            Self::Error(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("Expected hex, got {0:?}")]
-pub struct NotHex(u8);
-
-#[derive(Debug, thiserror::Error)]
-pub enum ReadHexError {
+enum ReadErrorStringError {
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
-    NotHex(#[from] NotHex),
-}
-
-#[derive(Debug, thiserror::Error)]
-enum ReadHexStringError {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    NotHex(#[from] NotHex),
-    #[error(transparent)]
-    NotUtf8(#[from] std::string::FromUtf8Error),
-}
-
-impl From<ReadHexError> for ReadHexStringError {
-    fn from(inner: ReadHexError) -> Self {
-        match inner {
-            ReadHexError::IO(inner) => inner.into(),
-            ReadHexError::NotHex(inner) => inner.into(),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum ReadStatusError {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    ReadHexError(#[from] ReadHexError),
-    #[error(transparent)]
-    ReadHexStringError(#[from] ReadHexStringError),
-    #[error("Bad status code {0:?}")]
-    BadStatus(char),
+    FromUtf8Error(#[from] std::string::FromUtf8Error),
 }
 
 type Address = u16;
@@ -120,18 +40,6 @@ enum Value {
     Constant(Functor),
     Integer(BigInt),
     Error(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-enum GetValueError {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    ReadHexError(#[from] ReadHexError),
-    #[error(transparent)]
-    ReadHexStringError(#[from] ReadHexStringError),
-    #[error("Bad value type {0}")]
-    BadValueType(u8),
 }
 
 struct DisplayCommaSeparated<I>(I);
@@ -680,16 +588,6 @@ impl<'a> fmt::Display for Answer<'a> {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-enum GetAnswerError {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    ReadHexError(#[from] ReadHexError),
-    #[error(transparent)]
-    GetValueError(#[from] GetValueError),
-}
-
 trait TryIteratorExt<T, E>: Sized + Iterator<Item = Result<T, E>> {
     fn try_collect_vec(self) -> Result<Vec<T>, E> {
         self.collect()
@@ -698,6 +596,228 @@ trait TryIteratorExt<T, E>: Sized + Iterator<Item = Result<T, E>> {
 
 impl<T, E, I: Iterator<Item = Result<T, E>>> TryIteratorExt<T, E> for I {}
 
+type Hash = sha2::digest::Output<sha2::Sha256>;
+
+fn encode_hash<C, W: minicbor::encode::Write>(
+    hash: &Hash,
+    e: &mut minicbor::Encoder<W>,
+    _ctx: &mut C,
+) -> Result<(), minicbor::encode::Error<W::Error>> {
+    e.bytes(hash.as_slice())?.ok()
+}
+
+#[derive(Debug, minicbor::Encode)]
+struct CodeSubmission {
+    #[n(0)]
+    code_length: usize,
+    #[n(1)]
+    #[cbor(encode_with = "encode_hash")]
+    hash: Hash,
+}
+
+impl CodeSubmission {
+    fn new(words: &[[u8; 4]]) -> CodeSubmission {
+        let mut hasher = sha2::Sha256::new();
+
+        for word in words {
+            hasher.update(word);
+        }
+
+        CodeSubmission {
+            code_length: words.len(),
+            hash: hasher.finalize_fixed(),
+        }
+    }
+}
+
+#[derive(Debug, minicbor::Encode)]
+enum Command {
+    #[n(0)]
+    ReportStatus,
+    #[n(1)]
+    GetSystemCalls,
+    #[n(2)]
+    SubmitProgram {
+        #[n(0)]
+        code_submission: CodeSubmission,
+    },
+    #[n(3)]
+    SubmitQuery {
+        #[n(0)]
+        code_submission: CodeSubmission,
+    },
+    #[n(4)]
+    LookupMemory {
+        #[n(0)]
+        address: Address,
+    },
+    #[n(5)]
+    NextSolution,
+}
+
+struct ErrorMessage(String);
+
+impl fmt::Debug for ErrorMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for ErrorMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<'b, C> minicbor::Decode<'b, C> for ErrorMessage {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        _ctx: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        d.str_iter()?.collect::<Result<_, _>>().map(ErrorMessage)
+    }
+}
+
+type SolutionRegisters = Vec<Option<Address>>;
+
+#[derive(Debug, minicbor::Decode)]
+enum Solution {
+    #[n(0)]
+    SingleSolution(#[n(0)] SolutionRegisters),
+    #[n(1)]
+    MultipleSolutions(#[n(0)] SolutionRegisters),
+}
+
+#[derive(Debug, minicbor::Decode)]
+enum ReportStatusResponse {
+    #[n(0)]
+    Error(#[n(0)] ErrorMessage),
+    #[n(1)]
+    WaitingForProgram,
+    #[n(2)]
+    WaitingForQuery,
+}
+
+impl fmt::Display for ReportStatusResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReportStatusResponse::Error(error) => error.fmt(f),
+            ReportStatusResponse::WaitingForQuery => "Waiting for Query".fmt(f),
+            ReportStatusResponse::WaitingForProgram => "Waiting for Program".fmt(f),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Bad Status: {0}")]
+struct BadStatus(ReportStatusResponse);
+
+impl ReportStatusResponse {
+    fn assert_can_submit_program(self) -> Result<(), BadStatus> {
+        match self {
+            Self::WaitingForProgram | Self::WaitingForQuery => Ok(()),
+            Self::Error(_) => Err(BadStatus(self)),
+        }
+    }
+
+    fn assert_can_submit_query(self) -> Result<(), BadStatus> {
+        match self {
+            Self::WaitingForQuery => Ok(()),
+            Self::WaitingForProgram | Self::Error(_) => Err(BadStatus(self)),
+        }
+    }
+}
+
+#[derive(Debug, minicbor::Decode)]
+enum GetSystemCallsResponse {
+    #[n(0)]
+    Error(#[n(0)] ErrorMessage),
+    #[n(3)]
+    SystemCalls(#[n(0)] Vec<(String, Arity)>),
+}
+
+impl GetSystemCallsResponse {
+    fn into_result(self) -> anyhow::Result<Vec<(String, Arity)>> {
+        match self {
+            Self::SystemCalls(system_calls) => Ok(system_calls),
+            Self::Error(error) => Err(anyhow::anyhow!(error)),
+        }
+    }
+}
+
+#[derive(Debug, minicbor::Decode)]
+enum SubmitProgramResponse {
+    #[n(0)]
+    Error(#[n(0)] ErrorMessage),
+    #[n(4)]
+    Success,
+}
+
+impl SubmitProgramResponse {
+    fn into_response(self) -> anyhow::Result<()> {
+        match self {
+            Self::Success => Ok(()),
+            Self::Error(error) => Err(anyhow::anyhow!(error)),
+        }
+    }
+}
+
+#[derive(Debug, minicbor::Decode)]
+enum SubmitQueryResponse {
+    #[n(0)]
+    Error(#[n(0)] ErrorMessage),
+    #[n(5)]
+    NoSolution,
+    #[n(6)]
+    Solution(#[n(0)] Solution),
+}
+
+fn decode_integer_bytes<'b, Ctx>(
+    d: &mut minicbor::Decoder<'b>,
+    _ctx: &mut Ctx,
+) -> Result<Vec<u8>, minicbor::decode::Error> {
+    d.array_iter()?.collect()
+}
+
+#[derive(Debug, minicbor::Decode)]
+enum LookupMemoryValue {
+    #[n(0)]
+    Structure(#[n(0)] Functor, #[n(1)] Arity, #[n(2)] Vec<Option<Address>>),
+    #[n(1)]
+    List(#[n(0)] Option<Address>, #[n(1)] Option<Address>),
+    #[n(2)]
+    Constant(#[n(0)] Constant),
+    #[n(3)]
+    Integer {
+        #[n(0)]
+        sign: IntegerSign,
+        #[n(1)]
+        #[cbor(decode_with = "decode_integer_bytes")]
+        le_bytes: Vec<u8>,
+    },
+}
+
+#[derive(Debug, minicbor::Decode)]
+enum LookupMemoryReferenceOrValue {
+    #[n(0)]
+    Reference(#[n(0)] Address),
+    #[n(1)]
+    Value(#[n(0)] LookupMemoryValue),
+}
+
+#[derive(minicbor::Decode)]
+enum LookupMemoryResponse {
+    #[n(0)]
+    Error(#[n(0)] ErrorMessage),
+    #[n(7)]
+    MemoryValue {
+        #[n(0)]
+        address: Address,
+        #[n(1)]
+        value: LookupMemoryReferenceOrValue,
+    },
+}
+
 trait ReadExt: Read {
     fn read_one(&mut self) -> std::io::Result<u8> {
         let mut buffer = 0;
@@ -705,118 +825,44 @@ trait ReadExt: Read {
         Ok(buffer)
     }
 
-    fn read_hex_u4(&mut self) -> Result<u8, ReadHexError> {
-        let b = self.read_one()?;
+    fn decode<T: for<'b> minicbor::Decode<'b, ()>>(&mut self) -> anyhow::Result<T> {
+        let mut buffer = Vec::new();
+        loop {
+            let block_size = self.read_one()?;
 
-        std::str::from_utf8(std::slice::from_ref(&b))
-            .ok()
-            .and_then(|src| u8::from_str_radix(src, 16).ok())
-            .ok_or(ReadHexError::NotHex(NotHex(b)))
-    }
+            let Some(block_size) = block_size.checked_sub(1) else {
+                return Ok(minicbor::decode(&buffer)?);
+            };
 
-    fn read_hex_u8(&mut self) -> Result<u8, ReadHexError> {
-        let a = self.read_hex_u4()?;
-        let b = self.read_hex_u4()?;
-        Ok((a << 4) + b)
-    }
+            let start = buffer.len();
 
-    fn read_hex_u16(&mut self) -> Result<u16, ReadHexError> {
-        let a = self.read_hex_u8()?;
-        let b = self.read_hex_u8()?;
-        Ok(u16::from_be_bytes([a, b]))
-    }
+            buffer.resize(start + usize::from(block_size), 0);
+            self.read_exact(&mut buffer[start..])?;
 
-    fn read_hex_u32(&mut self) -> Result<u32, ReadHexError> {
-        let a = self.read_hex_u8()?;
-        let b = self.read_hex_u8()?;
-        let c = self.read_hex_u8()?;
-        let d = self.read_hex_u8()?;
-
-        Ok(u32::from_be_bytes([a, b, c, d]))
-    }
-
-    fn read_hex_string(&mut self) -> Result<String, ReadHexStringError> {
-        let length = self.read_hex_u8()?;
-        let buffer = (0..length).map(|_| self.read_hex_u8()).try_collect_vec()?;
-
-        Ok(String::from_utf8(buffer)?)
-    }
-
-    fn read_error_message(&mut self) -> Result<String, ReadHexStringError> {
-        std::iter::from_fn(|| match self.read_hex_u8() {
-            Ok(b) => Some(Ok(b)),
-            Err(ReadHexError::IO(io)) => Some(Err(ReadHexError::IO(io))),
-            Err(ReadHexError::NotHex(NotHex(b'S'))) => None,
-            Err(ReadHexError::NotHex(not_hex)) => Some(Err(ReadHexError::NotHex(not_hex))),
-        })
-        .try_collect_vec()
-        .map_err(ReadHexStringError::from)
-        .and_then(|bytes| Ok(String::from_utf8(bytes)?))
+            if block_size < 254 {
+                buffer.push(0);
+            }
+        }
     }
 }
 
 impl<T: Read> ReadExt for T {}
 
 trait WriteExt: Write {
-    fn write_one(&mut self, b: u8) -> std::io::Result<()> {
-        self.write_all(std::slice::from_ref(&b))?;
-        self.flush()
+    fn encode<T: minicbor::Encode<()>>(&mut self, value: T) -> anyhow::Result<()> {
+        let buffer = minicbor::to_vec(value)?;
+
+        let mut buffer = cobs::encode_vec(&buffer);
+        buffer.push(0);
+
+        self.write_all(&buffer)?;
+        Ok(self.flush()?)
     }
 
-    fn write_char(&mut self, c: char) -> std::io::Result<()> {
-        let mut buffer = [0; 4];
-        self.write_all(c.encode_utf8(&mut buffer).as_bytes())
-    }
-
-    fn write_single_char(&mut self, c: char) -> std::io::Result<()> {
-        self.write_char(c)?;
-        self.flush()?;
-
-        Ok(())
-    }
-
-    fn write_be_u4_hex(&mut self, b: u8) -> std::io::Result<()> {
-        self.write_char(char::from_digit(b.into(), 16).unwrap())
-    }
-
-    fn write_be_u8_hex(&mut self, b: u8) -> std::io::Result<()> {
-        self.write_be_u4_hex((b >> 4) & 0xF)?;
-        self.write_be_u4_hex(b & 0xF)?;
-        Ok(())
-    }
-
-    fn write_be_u16_hex(&mut self, v: u16) -> std::io::Result<()> {
-        self.write_be_u8_hex_iter(v.to_be_bytes())
-    }
-
-    fn write_be_u32_hex(&mut self, v: u32) -> std::io::Result<()> {
-        self.write_be_u8_hex_iter(v.to_be_bytes())
-    }
-
-    fn write_be_u8_hex_iter<I>(&mut self, i: I) -> std::io::Result<()>
-    where
-        I: IntoIterator,
-        I::Item: Borrow<u8>,
-    {
-        i.into_iter()
-            .try_for_each(|b| self.write_be_u8_hex(*b.borrow()))
-    }
-
-    fn write_words_with_hash(&mut self, words: &[[u8; 4]]) -> std::io::Result<()> {
-        self.write_be_u32_hex(words.len() as u32)?;
-
-        self.write_be_u8_hex_iter(words.iter().flatten())?;
-
-        let mut hasher = sha2::Sha256::new();
-
+    fn write_words(&mut self, words: &[[u8; 4]]) -> std::io::Result<()> {
         for word in words {
-            hasher.update(word);
+            self.write_all(word)?;
         }
-
-        let hash = hasher.finalize_fixed();
-
-        self.write_be_u8_hex_iter(hash)?;
-
         self.flush()
     }
 }
@@ -824,80 +870,68 @@ trait WriteExt: Write {
 impl<T: Write> WriteExt for T {}
 
 trait ReadWriteExt: Sized + Read + Write {
-    fn get_status(&mut self) -> Result<StatusCode, ReadStatusError> {
-        self.write_one(b'S')?;
-
-        Ok(match self.read_one()? {
-            b'P' => StatusCode::WaitingForProgram,
-            b'Q' => StatusCode::WaitingForQuery,
-            b'A' => StatusCode::SingleAnswer,
-            b'C' => StatusCode::ChoicePoint,
-            b'E' => StatusCode::Error(self.read_error_message()?),
-            status_code => return Err(ReadStatusError::BadStatus(status_code as char)),
-        })
+    fn get_status(&mut self) -> anyhow::Result<ReportStatusResponse> {
+        self.encode(Command::ReportStatus)?;
+        self.decode()
     }
 
-    fn get_value(&mut self, address: Address) -> Result<(Address, Value), GetValueError> {
-        self.write_all(b"M")?;
-        self.write_be_u16_hex(address)?;
-        self.flush()?;
-
-        let value = match self.read_one()? {
-            b'R' => Value::Reference(self.read_hex_u16()?),
-            b'S' => {
-                let f = self.read_hex_u16()?;
-                let n = self.read_hex_u8()?;
-                Value::Structure(
-                    f,
-                    (0..n)
-                        .map(|_| self.read_hex_u16())
-                        .try_collect_vec()?
-                        .into(),
-                )
-            }
-            b'L' => {
-                let head = self.read_hex_u16()?;
-                let tail = self.read_hex_u16()?;
-                Value::List(head, tail)
-            }
-            b'C' => Value::Constant(self.read_hex_u16()?),
-            b'I' => {
-                let sign = match self.read_one()? {
-                    b'-' => num_bigint::Sign::Minus,
-                    b'+' => num_bigint::Sign::Plus,
-                    sign => panic!("Bad sign {sign}"),
+    fn get_value(&mut self, address: Address) -> anyhow::Result<(Address, Value)> {
+        self.encode(Command::LookupMemory { address })?;
+        match self.decode::<LookupMemoryResponse>()? {
+            LookupMemoryResponse::Error(ErrorMessage(error)) => Ok((address, Value::Error(error))),
+            LookupMemoryResponse::MemoryValue { address, value } => {
+                let value = match value {
+                    LookupMemoryReferenceOrValue::Reference(reference) => {
+                        Value::Reference(reference)
+                    }
+                    LookupMemoryReferenceOrValue::Value(LookupMemoryValue::Structure(
+                        f,
+                        _,
+                        terms,
+                    )) => Value::Structure(f, terms.into_iter().map(Option::unwrap).collect()),
+                    LookupMemoryReferenceOrValue::Value(LookupMemoryValue::List(lhs, rhs)) => {
+                        Value::List(lhs.unwrap(), rhs.unwrap())
+                    }
+                    LookupMemoryReferenceOrValue::Value(LookupMemoryValue::Constant(c)) => {
+                        Value::Constant(c)
+                    }
+                    LookupMemoryReferenceOrValue::Value(LookupMemoryValue::Integer {
+                        sign,
+                        le_bytes,
+                    }) => Value::Integer(BigInt::from_bytes_le(
+                        match sign {
+                            IntegerSign::Negative => num_bigint::Sign::Minus,
+                            IntegerSign::Positive => {
+                                if le_bytes.iter().all(|&n| n == 0) {
+                                    num_bigint::Sign::NoSign
+                                } else {
+                                    num_bigint::Sign::Plus
+                                }
+                            }
+                        },
+                        &le_bytes,
+                    )),
                 };
-                let n = self.read_hex_u32()?;
 
-                let be_bytes = (0..n).map(|_| self.read_hex_u8()).try_collect_vec()?;
-
-                Value::Integer(if be_bytes.iter().copied().all(|n| n == 0) {
-                    BigInt::from(0)
-                } else {
-                    BigInt::from_bytes_be(sign, &be_bytes)
-                })
+                Ok((address, value))
             }
-            b'E' => return Ok((address, Value::Error(self.read_error_message()?))),
-            code => return Err(GetValueError::BadValueType(code)),
-        };
-
-        let address = self.read_hex_u16()?;
-
-        Ok((address, value))
+        }
     }
 
     fn get_answer<'a>(
         &mut self,
         program_info: &'a ProgramInfo,
         query: &'a Query,
-    ) -> Result<Answer<'a>, GetAnswerError> {
-        let length = self.read_hex_u8()?;
-
-        let answer_registers = (0..length).map(|_| self.read_hex_u16()).try_collect_vec()?;
+        solution_registers: SolutionRegisters,
+    ) -> anyhow::Result<Answer<'a>> {
+        let solution_registers = solution_registers
+            .into_iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>();
 
         let mut known_values = BTreeMap::new();
 
-        let mut values_to_get = answer_registers.clone();
+        let mut values_to_get = solution_registers.clone();
 
         while !values_to_get.is_empty() {
             for address in std::mem::take(&mut values_to_get) {
@@ -933,7 +967,7 @@ trait ReadWriteExt: Sized + Read + Write {
             }
         }
 
-        let loops = answer_registers
+        let loops = solution_registers
             .iter()
             .copied()
             .fold(
@@ -949,7 +983,7 @@ trait ReadWriteExt: Sized + Read + Write {
         let variables = query
             .terms
             .iter()
-            .zip(answer_registers.as_slice())
+            .zip(solution_registers.as_slice())
             .fold(
                 VariableBindingsState {
                     values: &known_values,
@@ -1085,28 +1119,18 @@ fn main() -> anyhow::Result<()> {
 
     port.get_status()?.assert_can_submit_program()?;
 
-    port.write_one(b'P')?;
-
-    let system_call_count = port.read_hex_u16()?;
-
-    let system_calls = (0..system_call_count)
-        .map(|_| {
-            let name = port.read_hex_string()?;
-            let arity = port.read_hex_u8()?;
-
-            Ok::<_, ReadHexStringError>((name, arity))
-        })
-        .try_collect_vec()?;
+    port.encode(Command::GetSystemCalls)?;
+    let system_calls = port.decode::<GetSystemCallsResponse>()?.into_result()?;
 
     let (program_info, program_words) = compiler::compile_program(system_calls, program)?;
 
-    port.write_words_with_hash(&program_words)?;
+    port.encode(Command::SubmitProgram {
+        code_submission: CodeSubmission::new(&program_words),
+    })?;
 
-    match port.read_one()? {
-        b'S' => (),
-        b'E' => anyhow::bail!("Failed to send program: {}", port.read_error_message()?),
-        b => anyhow::bail!("Unknown response {b}"),
-    }
+    port.write_words(&program_words)?;
+
+    port.decode::<SubmitProgramResponse>()?.into_response()?;
 
     loop {
         port.get_status()?.assert_can_submit_query()?;
@@ -1131,19 +1155,25 @@ fn main() -> anyhow::Result<()> {
             }
         };
 
-        port.write_one(b'Q')?;
+        port.encode(Command::SubmitQuery {
+            code_submission: CodeSubmission::new(&query_words),
+        })?;
 
-        port.write_words_with_hash(&query_words)?;
+        port.write_words(&query_words)?;
 
         'outer: loop {
-            break match port.read_one()? {
-                b'A' => {
-                    let answer = port.get_answer(&program_info, &query)?;
+            break match port.decode::<SubmitQueryResponse>()? {
+                SubmitQueryResponse::Solution(Solution::SingleSolution(solution_registers)) => {
+                    let answer = port.get_answer(&program_info, &query, solution_registers)?;
 
                     stdout.queue(Print(answer))?
                 }
-                b'C' => {
-                    stdout.execute(Print(port.get_answer(&program_info, &query)?))?;
+                SubmitQueryResponse::Solution(Solution::MultipleSolutions(solution_registers)) => {
+                    stdout.execute(Print(port.get_answer(
+                        &program_info,
+                        &query,
+                        solution_registers,
+                    )?))?;
 
                     loop {
                         if let Event::Key(KeyEvent {
@@ -1169,14 +1199,13 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    port.write_one(b'C')?;
+                    port.encode(Command::NextSolution)?;
                     continue;
                 }
-                b'F' => stdout.queue(Print("fail".bold()))?,
-                b'E' => stdout.queue(Print(
-                    style(format_args!("error: {}", port.read_error_message()?)).red(),
-                ))?,
-                code => stdout.queue(Print(format_args!("Bad code {code}")))?,
+                SubmitQueryResponse::NoSolution => stdout.queue(Print("fail".bold()))?,
+                SubmitQueryResponse::Error(error) => {
+                    anyhow::bail!(error)
+                }
             };
         }
         .execute(PrintLn('.'))?;

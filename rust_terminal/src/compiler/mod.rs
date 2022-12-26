@@ -16,7 +16,7 @@ use ast::{Definition, Disjunction, Goal, Name, SourceId, VariableName};
 use instructions::{Ai, Instruction, LongInteger, ShortInteger, Xn, Yn};
 
 pub use ast::{CallName, Query, Term, TermList, EMPTY_LIST};
-pub use instructions::{Arity, Functor};
+pub use instructions::{Arity, Constant, Functor, IntegerSign};
 use num_bigint::BigInt;
 
 trait IntoOkOrError {
