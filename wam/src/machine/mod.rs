@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::{log_debug, log_trace, log_warn, Hex};
+use crate::{log_debug, log_trace, log_warn, CommaSeparated};
 
 mod basic_types;
 mod heap;
@@ -54,30 +54,22 @@ impl<'m> Instructions<'m> {
     }
 }
 
-struct BadMemoryWord([u8; 4]);
-
-impl fmt::Debug for BadMemoryWord {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", Hex(self.0))
-    }
-}
-
-pub struct BadMemoryRange<'m>(&'m [[u8; 4]]);
+pub struct BadMemoryRange<'m>(pub &'m [[u8; 4]]);
 
 impl fmt::Debug for BadMemoryRange<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut list = f.debug_list();
-        for &word in self.0 {
-            list.entry(&BadMemoryWord(word));
-        }
-        list.finish()
+        write!(
+            f,
+            "{:02X}",
+            CommaSeparated(self.0.iter().map(CommaSeparated))
+        )
     }
 }
 
 #[cfg(feature = "defmt-logging")]
 impl<'m> defmt::Format for BadMemoryRange<'m> {
     fn format(&self, fmt: defmt::Formatter) {
-        defmt::Debug2Format(self).format(fmt)
+        defmt::write!(fmt, "{:02X}", &self.0)
     }
 }
 
@@ -223,7 +215,7 @@ impl<'memory> Instruction<'memory> {
         pc: ProgramCounter,
     ) -> Result<(ProgramCounter, Self), Error> {
         let (word, range) = instructions.get(pc, 0)?;
-        log_trace!("{}", Hex(word));
+        log_trace!("{:02X}", CommaSeparated(word));
         Ok(match word {
             [0x00, ai, 0, xn] => (
                 pc.offset(1),

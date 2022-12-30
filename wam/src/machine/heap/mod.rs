@@ -1,6 +1,6 @@
 use core::{fmt, iter::FusedIterator, num::NonZeroU16};
 
-use crate::log_trace;
+use crate::{log_trace, CommaSeparated};
 
 use super::basic_types::{
     self, Arity, Constant, Functor, IntegerSign, LongInteger, NoneRepresents, OptionDisplay,
@@ -13,44 +13,6 @@ pub mod structure_iteration;
 use structure_iteration::State as StructureIterationState;
 
 type IntegerWordUsage = u16;
-
-struct CommaSeparated<I>(I);
-
-impl<I> fmt::Debug for CommaSeparated<I>
-where
-    I: Clone + IntoIterator,
-    I::Item: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut iter = self.0.clone().into_iter();
-        match iter.next() {
-            None => Ok(()),
-            Some(first_item) => {
-                write!(f, "{first_item:?}")?;
-
-                iter.try_for_each(|item| write!(f, ", {item:?}"))
-            }
-        }
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl<I> defmt::Format for CommaSeparated<I>
-where
-    I: Clone + IntoIterator,
-    I::Item: defmt::Format,
-{
-    fn format(&self, fmt: defmt::Formatter) {
-        let mut iter = self.0.clone().into_iter();
-        if let Some(first_item) = iter.next() {
-            defmt::write!(fmt, "{:?}", first_item);
-
-            for item in iter {
-                defmt::write!(fmt, ", {:?}", item)
-            }
-        }
-    }
-}
 
 pub enum UnificationError {
     UnificationFailure,

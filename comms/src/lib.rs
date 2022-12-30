@@ -35,7 +35,7 @@ impl fmt::Debug for Hash {
 #[cfg(feature = "defmt")]
 impl defmt::Format for Hash {
     fn format(&self, fmt: defmt::Formatter) {
-        defmt::Debug2Format(self).format(fmt)
+        defmt::write!(fmt, "{:02X}", self.0.as_slice())
     }
 }
 

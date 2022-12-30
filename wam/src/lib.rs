@@ -20,18 +20,60 @@ pub use machine::{system_call_handler, system_calls, SystemCalls};
 #[derive(Debug)]
 pub enum Never {}
 
-struct Hex<const N: usize>([u8; N]);
+struct CommaSeparated<I>(I);
 
-impl<const N: usize> fmt::Display for Hex<N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|b| write!(f, "{b:02X}"))
-    }
+macro_rules! impl_comma_separated {
+    ($($type:ident),*) => {
+        $(
+            impl<I> core::fmt::$type for CommaSeparated<I>
+            where
+                I: Clone + IntoIterator,
+                I::Item: core::fmt::$type,
+            {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.write_str("[")?;
+
+                    let mut iter = self.0.clone().into_iter();
+                    if let Some(first_item) = iter.next() {
+                        first_item.fmt(f)?;
+
+                        for item in iter {
+                            f.write_str(", ")?;
+                            item.fmt(f)?;
+                        }
+                    }
+
+                    f.write_str("]")
+                }
+            }
+        )*
+    };
 }
 
+impl_comma_separated!(
+    Binary, Debug, Display, LowerExp, LowerHex, Octal, Pointer, UpperExp, UpperHex
+);
+
 #[cfg(feature = "defmt-logging")]
-impl<const N: usize> defmt::Format for Hex<N> {
+impl<I> defmt::Format for CommaSeparated<I>
+where
+    I: Clone + IntoIterator,
+    I::Item: defmt::Format,
+{
     fn format(&self, fmt: defmt::Formatter) {
-        defmt::Display2Format(self).format(fmt)
+        defmt::write!(fmt, "[");
+
+        let mut iter = self.0.clone().into_iter();
+        if let Some(first_item) = iter.next() {
+            first_item.format(fmt);
+
+            for item in iter {
+                defmt::write!(fmt, ", ");
+                item.format(fmt);
+            }
+        }
+
+        defmt::write!(fmt, "]");
     }
 }
 
@@ -301,7 +343,7 @@ fn load_code<
         comms::Hash::new(serial_connection.read_exact(code_section_buffer(code_section))?);
 
     for &code in code_section.iter() {
-        log_trace!("Word: {}", Hex(code));
+        log_trace!("Word: {:02X}", CommaSeparated(code));
     }
 
     log_debug!("Received Hash:   {:X}", hash);
