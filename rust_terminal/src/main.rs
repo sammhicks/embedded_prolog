@@ -772,10 +772,28 @@ trait ReadWriteExt: Sized + Read + Write {
             Ok(LookupMemoryResponse::MemoryValue { address, value }) => {
                 let value = match value {
                     comms::Value::Reference(reference) => Value::Reference(reference),
-                    comms::Value::Structure(f, terms) => {
-                        Value::Structure(f, terms.0.into_iter().map(Option::unwrap).collect())
-                    }
-                    comms::Value::List(lhs, rhs) => Value::List(lhs.unwrap(), rhs.unwrap()),
+                    comms::Value::Structure(f, terms) => Value::Structure(
+                        f,
+                        (1..)
+                            .zip(terms.0.iter().copied())
+                            .map(|(index, term)| {
+                                term.with_context(|| {
+                                    format!(
+                                        "Term {} of structure {}/{} at {:X} is not set",
+                                        index,
+                                        f,
+                                        terms.0.len(),
+                                        address
+                                    )
+                                })
+                            })
+                            .try_collect_vec()?
+                            .into(),
+                    ),
+                    comms::Value::List(head, tail) => Value::List(
+                        head.with_context(|| format!("Head of list at {:X} is not set", address))?,
+                        tail.with_context(|| format!("Tail of list at {:X} is not set", address))?,
+                    ),
                     comms::Value::Constant(c) => Value::Constant(c),
                     comms::Value::Integer { sign, le_bytes } => {
                         Value::Integer(BigInt::from_bytes_le(
@@ -800,10 +818,12 @@ trait ReadWriteExt: Sized + Read + Write {
         query: &'a Query,
         solution_registers: SolutionRegisters,
     ) -> anyhow::Result<Answer<'a>> {
-        let solution_registers = solution_registers
-            .into_iter()
-            .map(Option::unwrap)
-            .collect::<Vec<_>>();
+        let solution_registers = (1..)
+            .zip(solution_registers.into_iter())
+            .map(|(index, solution_register)| {
+                solution_register.with_context(|| format!("Register {} is not set", index))
+            })
+            .try_collect_vec()?;
 
         let mut known_values = BTreeMap::new();
 
