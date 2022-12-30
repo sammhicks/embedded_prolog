@@ -19,7 +19,7 @@ impl SplitDouble {
     }
 }
 
-type Sign = Ordering;
+type Sign = super::basic_types::IntegerSign;
 
 struct UnsignedInput<'a> {
     words: &'a [Word],
@@ -115,13 +115,15 @@ impl<'a> PartialOrd for SignedInput<'a> {
 impl<'a> Ord for SignedInput<'a> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.sign, other.sign) {
-            (Ordering::Equal, Ordering::Equal) => Ordering::Equal,
-            (Ordering::Less, Ordering::Equal | Ordering::Greater)
-            | (Ordering::Equal, Ordering::Greater) => Ordering::Less,
-            (Ordering::Greater, Ordering::Less | Ordering::Equal)
-            | (Ordering::Equal, Ordering::Less) => Ordering::Greater,
-            (Ordering::Greater, Ordering::Greater) => self.size.cmp(&other.size),
-            (Ordering::Less, Ordering::Less) => self.size.cmp(&other.size).reverse(),
+            (Sign::Zero, Sign::Zero) => Ordering::Equal,
+            (Sign::Negative, Sign::Zero | Sign::Positive) | (Sign::Zero, Sign::Positive) => {
+                Ordering::Less
+            }
+            (Sign::Positive, Sign::Negative | Sign::Zero) | (Sign::Zero, Sign::Negative) => {
+                Ordering::Greater
+            }
+            (Sign::Negative, Sign::Negative) => self.size.cmp(&other.size).reverse(),
+            (Sign::Positive, Sign::Positive) => self.size.cmp(&other.size),
         }
     }
 }
@@ -178,7 +180,7 @@ impl<'a> UnsignedOutput<'a> {
             *word = 0;
         }
 
-        (Sign::Equal, 0)
+        (Sign::Zero, 0)
     }
 
     fn copy_from(self, (sign, src): (Sign, UnsignedInput)) -> (Sign, WordUsage) {
@@ -226,14 +228,12 @@ fn add_unsigned(mut r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) ->
 
 pub fn add_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> (Sign, WordUsage) {
     match (r1.split(), r2.split()) {
-        ((Ordering::Equal, _), r2) => r0.copy_from(r2),
-        (r1, (Ordering::Equal, _)) => r0.copy_from(r1),
-        ((Ordering::Greater, r1), (Ordering::Greater, r2)) => {
-            (Sign::Greater, add_unsigned(r0, r1, r2))
-        }
-        ((Ordering::Greater, r1), (Ordering::Less, r2)) => sub_unsigned(r0, r1, r2),
-        ((Ordering::Less, r1), (Ordering::Greater, r2)) => sub_unsigned(r0, r2, r1),
-        ((Ordering::Less, r1), (Ordering::Less, r2)) => (Sign::Less, add_unsigned(r0, r1, r2)),
+        ((Sign::Zero, _), r2) => r0.copy_from(r2),
+        (r1, (Sign::Zero, _)) => r0.copy_from(r1),
+        ((Sign::Positive, r1), (Sign::Positive, r2)) => (Sign::Positive, add_unsigned(r0, r1, r2)),
+        ((Sign::Positive, r1), (Sign::Negative, r2)) => sub_unsigned(r0, r1, r2),
+        ((Sign::Negative, r1), (Sign::Positive, r2)) => sub_unsigned(r0, r2, r1),
+        ((Sign::Negative, r1), (Sign::Negative, r2)) => (Sign::Negative, add_unsigned(r0, r1, r2)),
     }
 }
 
@@ -255,9 +255,9 @@ fn sub_unsigned(r0: UnsignedOutput, r1: UnsignedInput, r2: UnsignedInput) -> (Si
     }
 
     match r1.cmp(&r2) {
-        Ordering::Equal => (Sign::Equal, 0),
-        Ordering::Less => (Ordering::Less, sub_unsigned_unchecked(r0, r2, r1)),
-        Ordering::Greater => (Ordering::Greater, sub_unsigned_unchecked(r0, r1, r2)),
+        Ordering::Equal => (Sign::Zero, 0),
+        Ordering::Less => (Sign::Negative, sub_unsigned_unchecked(r0, r2, r1)),
+        Ordering::Greater => (Sign::Positive, sub_unsigned_unchecked(r0, r1, r2)),
     }
 }
 
@@ -286,17 +286,9 @@ pub fn mul_signed((r0, r1, r2): (UnsignedOutput, SignedInput, SignedInput)) -> (
     let (s1, r1) = r1.split();
     let (s2, r2) = r2.split();
 
-    if s1.is_eq() || s2.is_eq() {
-        r0.zero()
-    } else {
-        (
-            if s1 == s2 {
-                Ordering::Greater
-            } else {
-                Ordering::Less
-            },
-            mul_unsigned(r0, r1, r2),
-        )
+    match s1 * s2 {
+        Sign::Zero => r0.zero(),
+        sign => (sign, mul_unsigned(r0, r1, r2)),
     }
 }
 
@@ -344,17 +336,13 @@ pub fn div_mod_signed(
     let (s1, r1) = r1.split();
     let (s2, r2) = r2.split();
 
-    if s1.is_eq() || s2.is_eq() {
-        (rd.zero(), rm.zero())
-    } else {
-        let (ud, um) = div_mod_unsigned(rd, rm, r1, r2);
-        let sd = if s1 == s2 {
-            Ordering::Greater
-        } else {
-            Ordering::Less
-        };
-        let sm = s1;
-        ((sd, ud), (sm, um))
+    match s1 * s2 {
+        Sign::Zero => (rd.zero(), rm.zero()),
+        sd => {
+            let (ud, um) = div_mod_unsigned(rd, rm, r1, r2);
+            let sm = s1;
+            ((sd, ud), (sm, um))
+        }
     }
 }
 
@@ -409,7 +397,7 @@ mod tests {
     fn read_signed(((sign, usage), words): ((Sign, WordUsage), Words)) -> i128 {
         let n = read_unsigned(words, usage) as i128;
 
-        if let Sign::Less = sign {
+        if let Sign::Negative = sign {
             -n
         } else {
             n
@@ -417,7 +405,7 @@ mod tests {
     }
 
     fn write_signed(n: i128) -> (Sign, Words) {
-        (n.cmp(&0), write_unsigned(n.unsigned_abs()))
+        (n.cmp(&0).into(), write_unsigned(n.unsigned_abs()))
     }
 
     #[test]

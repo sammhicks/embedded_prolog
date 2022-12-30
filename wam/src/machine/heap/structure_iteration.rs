@@ -15,6 +15,7 @@ struct InnerState {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum Error {
     NotActive,
     CurrentlyActive,

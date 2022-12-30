@@ -3,7 +3,8 @@ use core::{fmt, iter::FusedIterator, num::NonZeroU16};
 use crate::log_trace;
 
 use super::basic_types::{
-    self, Arity, Constant, Functor, LongInteger, NoneRepresents, OptionDisplay, ProgramCounter, Yn,
+    self, Arity, Constant, Functor, IntegerSign, LongInteger, NoneRepresents, OptionDisplay,
+    ProgramCounter, Yn,
 };
 
 mod integer_operations;
@@ -11,7 +12,6 @@ pub mod structure_iteration;
 
 use structure_iteration::State as StructureIterationState;
 
-type IntegerSign = core::cmp::Ordering;
 type IntegerWordUsage = u16;
 
 struct CommaSeparated<I>(I);
@@ -29,6 +29,24 @@ where
                 write!(f, "{first_item:?}")?;
 
                 iter.try_for_each(|item| write!(f, ", {item:?}"))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl<I> defmt::Format for CommaSeparated<I>
+where
+    I: Clone + IntoIterator,
+    I::Item: defmt::Format,
+{
+    fn format(&self, fmt: defmt::Formatter) {
+        let mut iter = self.0.clone().into_iter();
+        if let Some(first_item) = iter.next() {
+            defmt::write!(fmt, "{:?}", first_item);
+
+            for item in iter {
+                defmt::write!(fmt, ", {:?}", item)
             }
         }
     }
@@ -62,11 +80,23 @@ impl From<structure_iteration::Error> for UnificationError {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+trait DisplayAndFormat: core::fmt::Display + defmt::Format {}
+
+#[cfg(feature = "defmt-logging")]
+impl<T: core::fmt::Display + defmt::Format> DisplayAndFormat for T {}
+
+#[cfg(not(feature = "defmt-logging"))]
+trait DisplayAndFormat: core::fmt::Display {}
+
+#[cfg(not(feature = "defmt-logging"))]
+impl<T: core::fmt::Display> DisplayAndFormat for T {}
+
 trait NeqAssign {
     fn neq_assign(&mut self, new: Self, message: &str) -> bool;
 }
 
-impl<T: core::fmt::Display + PartialEq> NeqAssign for T {
+impl<T: DisplayAndFormat + PartialEq> NeqAssign for T {
     fn neq_assign(&mut self, new: Self, message: &str) -> bool {
         if self != &new {
             log_trace!("{}: {} => {}", message, self, new);
@@ -160,6 +190,7 @@ impl TryFrom<StructureValue> for SpecialFunctor {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum BadValueType {
     Expected {
         expected: ValueType,
@@ -172,6 +203,7 @@ pub enum BadValueType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum ValueType {
     Reference,
     Structure,
@@ -183,12 +215,19 @@ pub enum ValueType {
     TrailVariable,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, minicbor::Encode, minicbor::Decode)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-#[cbor(transparent)]
-pub struct Address(#[n(0)] NonZeroU16);
+pub struct Address(NonZeroU16);
 
 impl Address {
+    pub fn new(n: NonZeroU16) -> Self {
+        Self(n)
+    }
+
+    pub fn into_inner(self) -> NonZeroU16 {
+        self.0
+    }
+
     fn from_word(word: TupleWord) -> Option<Self> {
         NonZeroU16::new(word).map(Self)
     }
@@ -214,6 +253,13 @@ impl fmt::Display for Address {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for Address {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:04X}", self.0)
+    }
+}
+
 impl NoneRepresents for Address {
     const NONE_REPRESENTS: &'static str = "NULL";
 }
@@ -223,6 +269,13 @@ pub struct AddressView(u16);
 impl fmt::Debug for AddressView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04X}", self.0)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for AddressView {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:04X}", self.0)
     }
 }
 
@@ -238,6 +291,13 @@ impl fmt::Debug for TupleAddress {
 impl fmt::Display for TupleAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04X}", self.0)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for TupleAddress {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:04X}", self.0)
     }
 }
 
@@ -306,6 +366,13 @@ impl fmt::Debug for TupleAddressView {
 impl fmt::Display for TupleAddressView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for TupleAddressView {
+    fn format(&self, fmt: defmt::Formatter) {
+        self.0.format(fmt)
     }
 }
 
@@ -419,7 +486,7 @@ impl<'m> Registry<'m> {
             return Ok(());
         }
 
-        log_trace!("Marking {address}, next is {next_list_head:?}");
+        log_trace!("Marking {}, next is {:?}", address, next_list_head);
 
         registry_entry.marked_state = MarkedState::IsMarked {
             next: next_list_head.replace(address),
@@ -512,6 +579,7 @@ impl<'m> Registry<'m> {
 type TupleWord = u16;
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum TupleEntryError {
     MustNotBeZero,
 }
@@ -542,6 +610,7 @@ impl TupleEntry for Option<Address> {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum TupleMemoryError {
     AddressOutOfRange {
         address: TupleAddressView,
@@ -680,6 +749,13 @@ impl<'a> fmt::Debug for TermsList<'a> {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl<'a> defmt::Format for TermsList<'a> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "[{}]", CommaSeparated(self.into_iter()))
+    }
+}
+
 impl<'a, C> minicbor::Encode<C> for TermsList<'a> {
     fn encode<W: minicbor::encode::Write>(
         &self,
@@ -689,7 +765,7 @@ impl<'a, C> minicbor::Encode<C> for TermsList<'a> {
         e.array(self.0.len() as u64)?;
 
         self.into_iter()
-            .try_for_each(|address| e.encode(address)?.ok())
+            .try_for_each(|address| e.encode(address.map(Address::into_inner))?.ok())
     }
 }
 
@@ -710,12 +786,19 @@ impl<'a> TermsList<'a> {
     }
 }
 
-#[derive(Debug, minicbor::Encode)]
+#[derive(Debug)]
 pub enum Solution<'a> {
-    #[n(0)]
-    SingleSolution(#[n(0)] TermsList<'a>),
-    #[n(1)]
-    MultipleSolutions(#[n(0)] TermsList<'a>),
+    SingleSolution(TermsList<'a>),
+    MultipleSolutions(TermsList<'a>),
+}
+
+impl<'a> Solution<'a> {
+    pub fn into_comms(self) -> comms::Solution<TermsList<'a>> {
+        match self {
+            Self::SingleSolution(registers) => comms::Solution::SingleSolution(registers),
+            Self::MultipleSolutions(registers) => comms::Solution::MultipleSolutions(registers),
+        }
+    }
 }
 
 struct TupleMemory<'m>(&'m mut [TupleWord]);
@@ -1314,6 +1397,7 @@ impl<T: fmt::Debug + BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNextFreeS
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct ReferenceValue(Address);
 
 impl BaseTuple for ReferenceValue {
@@ -1325,6 +1409,7 @@ impl BaseTuple for ReferenceValue {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct StructureValue(Functor, Arity);
 
 impl TupleTermsInfo for StructureValue {
@@ -1343,6 +1428,7 @@ impl BaseTuple for StructureValue {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct ListValue;
 
 impl TupleTermsInfo for ListValue {
@@ -1360,6 +1446,7 @@ impl BaseTuple for ListValue {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct ConstantValue(Constant);
 
 impl BaseTuple for ConstantValue {
@@ -1412,6 +1499,7 @@ impl IntegerWordsSlice {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct IntegerValue {
     sign: IntegerSign,
     words_count: TupleAddress,
@@ -1499,6 +1587,7 @@ impl IntegerEvaluationOutputLayout {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 #[repr(transparent)]
 struct IntegerEvaluationOutput(IntegerValue);
 
@@ -1525,6 +1614,7 @@ impl BaseTuple for IntegerEvaluationOutput {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct Environment {
     continuation_environment: Option<Address>,
     continuation_point: Option<ProgramCounter>,
@@ -1558,6 +1648,7 @@ impl BaseTuple for Environment {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct ChoicePoint {
     number_of_saved_registers: Arity,
     current_environment: Option<Address>,
@@ -1582,6 +1673,7 @@ impl BaseTuple for ChoicePoint {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct TrailVariable {
     variable: Address,
     next_trail_item: Option<Address>,
@@ -1619,6 +1711,15 @@ impl<'a> fmt::Debug for IntegerLeBytes<'a> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl<'a> defmt::Format for IntegerLeBytes<'a> {
+    fn format(&self, fmt: defmt::Formatter) {
+        for word in self.0 {
+            defmt::write!(fmt, "{:04x}", word);
+        }
     }
 }
 
@@ -1670,24 +1771,19 @@ impl<'a> IntegerLeBytes<'a> {
     }
 }
 
-#[derive(Debug, minicbor::Encode)]
-pub enum Value<T, I> {
-    #[n(0)]
-    Structure(#[n(0)] Functor, #[n(1)] Arity, #[n(2)] T),
-    #[n(1)]
-    List(#[n(0)] Option<Address>, #[n(1)] Option<Address>),
-    #[n(2)]
-    Constant(#[n(0)] Constant),
-    #[n(3)]
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
+pub enum Value<'a> {
+    Structure(Functor, Arity, TermsList<'a>),
+    List(Option<Address>, Option<Address>),
+    Constant(Constant),
     Integer {
-        #[n(0)]
         sign: basic_types::IntegerSign,
-        #[n(1)]
-        le_bytes: I,
+        le_bytes: IntegerLeBytes<'a>,
     },
 }
 
-impl<T, I> Value<T, I> {
+impl<'a> Value<'a> {
     pub fn head(self) -> ValueHead {
         match self {
             Value::Structure(f, n, _) => ValueHead::Structure(f, n),
@@ -1698,30 +1794,50 @@ impl<T, I> Value<T, I> {
     }
 }
 
-#[derive(Debug, minicbor::Encode)]
-pub enum ReferenceOrValue<T, I> {
-    #[n(0)]
-    Reference(#[n(0)] Address),
-    #[n(1)]
-    Value(#[n(0)] Value<T, I>),
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
+pub enum ReferenceOrValue<'a> {
+    Reference(Address),
+    Value(Value<'a>),
 }
 
-impl<T, I> ReferenceOrValue<T, I> {
+impl<'a> ReferenceOrValue<'a> {
     pub fn head(self) -> ReferenceOrValueHead {
         match self {
             ReferenceOrValue::Reference(reference) => ReferenceOrValueHead::Reference(reference),
             ReferenceOrValue::Value(value) => ReferenceOrValueHead::Value(value.head()),
         }
     }
+
+    pub fn into_comms(self) -> comms::Value<TermsList<'a>, IntegerLeBytes<'a>> {
+        match self {
+            ReferenceOrValue::Reference(reference) => {
+                comms::Value::Reference(reference.into_inner())
+            }
+            ReferenceOrValue::Value(Value::Structure(Functor(f), _, terms)) => {
+                comms::Value::Structure(f, terms)
+            }
+            ReferenceOrValue::Value(Value::List(head, tail)) => {
+                comms::Value::List(head.map(Address::into_inner), tail.map(Address::into_inner))
+            }
+            ReferenceOrValue::Value(Value::Constant(Constant(c))) => comms::Value::Constant(c),
+            ReferenceOrValue::Value(Value::Integer { sign, le_bytes }) => comms::Value::Integer {
+                sign: sign.into_comms(),
+                le_bytes,
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum OutOfMemory {
     OutOfRegistryEntries,
     OutOfTupleSpace,
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum MemoryError {
     NoRegistryEntryAt {
         address: AddressView,
@@ -1789,6 +1905,7 @@ impl From<TupleMemoryError> for MemoryError {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum PermanentVariableError {
     IndexOutOfRange {
         yn: Yn,
@@ -1852,6 +1969,7 @@ impl From<TupleMemoryError> for CutError {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum ExpressionEvaluationError {
     UnboundVariable(Address),
     NotAValidValue(Address, ValueType),
@@ -1886,6 +2004,7 @@ where
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct ScanningState {
     current_items_to_scan: Address,
     next_items_to_scan: Option<Address>,
@@ -1897,6 +2016,7 @@ struct ScanningResult {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct SweepingState {
     source: TupleAddress,
     destination: TupleAddress,
@@ -1904,6 +2024,7 @@ struct SweepingState {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 enum GarbageCollectionState {
     Suspended,
     Starting,
@@ -1916,6 +2037,18 @@ pub enum GarbageCollectionIsRunning {
     Suspected,
     Running,
 }
+
+#[cfg(feature = "defmt-logging")]
+trait DebugNewTuple: fmt::Debug + defmt::Format {}
+
+#[cfg(feature = "defmt-logging")]
+impl<T: fmt::Debug + defmt::Format> DebugNewTuple for T {}
+
+#[cfg(not(feature = "defmt-logging"))]
+trait DebugNewTuple: fmt::Debug {}
+
+#[cfg(not(feature = "defmt-logging"))]
+impl<T: fmt::Debug> DebugNewTuple for T {}
 
 pub struct Heap<'m> {
     registry: Registry<'m>,
@@ -1951,7 +2084,7 @@ impl<'m> Heap<'m> {
         }
     }
 
-    fn new_value<T: Tuple + core::fmt::Debug, D>(
+    fn new_value<T: Tuple + DebugNewTuple, D>(
         &mut self,
         factory: impl FnOnce(Address) -> T,
         terms: T::InitialTerms<'_>,
@@ -2037,17 +2170,7 @@ impl<'m> Heap<'m> {
     ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
         self.new_value(
             |_| {
-                let (sign, words_count) = if words.iter().copied().flatten().all(|word| word == 0) {
-                    (IntegerSign::Equal, TupleAddress(0))
-                } else {
-                    (
-                        match sign {
-                            basic_types::IntegerSign::Positive => IntegerSign::Greater,
-                            basic_types::IntegerSign::Negative => IntegerSign::Less,
-                        },
-                        IntegerValue::words_count(words),
-                    )
-                };
+                let words_count = IntegerValue::words_count(words);
 
                 IntegerValue {
                     sign,
@@ -2068,7 +2191,7 @@ impl<'m> Heap<'m> {
         self.new_value(
             |_| {
                 IntegerEvaluationOutput(IntegerValue {
-                    sign: IntegerSign::Equal,
+                    sign: IntegerSign::Zero,
                     words_count,
                     words_usage: words_count,
                 })
@@ -2094,7 +2217,7 @@ impl<'m> Heap<'m> {
     pub fn get_value(
         &self,
         mut address: Address,
-    ) -> Result<(Address, ReferenceOrValue<TermsList, IntegerLeBytes>), MemoryError> {
+    ) -> Result<(Address, ReferenceOrValue), MemoryError> {
         loop {
             log_trace!("Looking up memory at {}", address);
             let registry_entry = self.registry.get(address)?;
@@ -2148,12 +2271,12 @@ impl<'m> Heap<'m> {
                         .load_terms(metadata.terms.into_address_range())?
                         .into_iter();
 
-                    let lhs = terms.next().flatten();
-                    let rhs = terms.next().flatten();
+                    let head = terms.next().flatten();
+                    let tail = terms.next().flatten();
 
                     (
                         metadata.registry_address,
-                        ReferenceOrValue::Value(Value::List(lhs, rhs)),
+                        ReferenceOrValue::Value(Value::List(head, tail)),
                     )
                 }
                 ValueType::Constant => {
@@ -2175,17 +2298,10 @@ impl<'m> Heap<'m> {
                         registry_entry.tuple_address,
                     )?;
 
-                    let sign = match integer.sign {
-                        IntegerSign::Greater | IntegerSign::Equal => {
-                            basic_types::IntegerSign::Positive
-                        }
-                        IntegerSign::Less => basic_types::IntegerSign::Negative,
-                    };
-
                     (
                         metadata.registry_address,
                         ReferenceOrValue::Value(Value::Integer {
-                            sign,
+                            sign: integer.sign,
                             le_bytes: IntegerLeBytes(
                                 self.tuple_memory.get(metadata.data.into_address_range())?,
                             ),
@@ -3426,7 +3542,7 @@ impl<'m> Heap<'m> {
 
         Ok(match registry_entry.marked_state.clear() {
             MarkedState::NotMarked => {
-                log_trace!("Freeing {registry_address}");
+                log_trace!("Freeing {}", registry_address);
 
                 registry_slot.clear();
 
@@ -3437,7 +3553,7 @@ impl<'m> Heap<'m> {
                 }
             }
             MarkedState::IsMarked { .. } => {
-                log_trace!("Keeping {registry_address}");
+                log_trace!("Keeping {}", registry_address);
 
                 self.tuple_memory
                     .copy_within(source..next_free_space, destination);

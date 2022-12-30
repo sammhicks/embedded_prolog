@@ -3,6 +3,7 @@ use std::{
     fmt,
     io::{Read, Write},
     net::TcpStream,
+    num::NonZeroU16,
     path::PathBuf,
     rc::Rc,
 };
@@ -10,27 +11,19 @@ use std::{
 use anyhow::Context;
 use arcstr::ArcStr;
 use clap::Parser;
+use comms::minicbor;
 use crossterm::{
     event::{Event, KeyCode, KeyEvent, KeyEventKind},
     style::{Print, Stylize},
     ExecutableCommand, QueueableCommand,
 };
 use num_bigint::BigInt;
-use serialport::SerialPortType;
-use sha2::{digest::FixedOutput, Digest};
+use serialport::{SerialPortType, UsbPortInfo};
 
 mod compiler;
-use compiler::{Arity, Constant, Functor, IntegerSign, ProgramInfo, Query, Term};
+use compiler::{Arity, Functor, ProgramInfo, Query, Term};
 
-#[derive(Debug, thiserror::Error)]
-enum ReadErrorStringError {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    FromUtf8Error(#[from] std::string::FromUtf8Error),
-}
-
-type Address = u16;
+type Address = NonZeroU16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Value {
@@ -588,72 +581,21 @@ impl<'a> fmt::Display for Answer<'a> {
     }
 }
 
-trait TryIteratorExt<T, E>: Sized + Iterator<Item = Result<T, E>> {
+trait TryCollectVec<T, E>: Sized + Iterator<Item = Result<T, E>> {
     fn try_collect_vec(self) -> Result<Vec<T>, E> {
         self.collect()
     }
 }
 
-impl<T, E, I: Iterator<Item = Result<T, E>>> TryIteratorExt<T, E> for I {}
+impl<T, E, I: Iterator<Item = Result<T, E>>> TryCollectVec<T, E> for I {}
 
-type Hash = sha2::digest::Output<sha2::Sha256>;
-
-fn encode_hash<C, W: minicbor::encode::Write>(
-    hash: &Hash,
-    e: &mut minicbor::Encoder<W>,
-    _ctx: &mut C,
-) -> Result<(), minicbor::encode::Error<W::Error>> {
-    e.bytes(hash.as_slice())?.ok()
-}
-
-#[derive(Debug, minicbor::Encode)]
-struct CodeSubmission {
-    #[n(0)]
-    code_length: usize,
-    #[n(1)]
-    #[cbor(encode_with = "encode_hash")]
-    hash: Hash,
-}
-
-impl CodeSubmission {
-    fn new(words: &[[u8; 4]]) -> CodeSubmission {
-        let mut hasher = sha2::Sha256::new();
-
-        for word in words {
-            hasher.update(word);
-        }
-
-        CodeSubmission {
-            code_length: words.len(),
-            hash: hasher.finalize_fixed(),
-        }
+trait TryCollectString<'a, E>: Sized + Iterator<Item = Result<&'a str, E>> {
+    fn try_collect_string(self) -> Result<String, E> {
+        self.collect()
     }
 }
 
-#[derive(Debug, minicbor::Encode)]
-enum Command {
-    #[n(0)]
-    ReportStatus,
-    #[n(1)]
-    GetSystemCalls,
-    #[n(2)]
-    SubmitProgram {
-        #[n(0)]
-        code_submission: CodeSubmission,
-    },
-    #[n(3)]
-    SubmitQuery {
-        #[n(0)]
-        code_submission: CodeSubmission,
-    },
-    #[n(4)]
-    LookupMemory {
-        #[n(0)]
-        address: Address,
-    },
-    #[n(5)]
-    NextSolution,
-}
+impl<'a, E, I: Iterator<Item = Result<&'a str, E>>> TryCollectString<'a, E> for I {}
 
 struct ErrorMessage(String);
 
@@ -669,32 +611,23 @@ impl fmt::Display for ErrorMessage {
     }
 }
 
+impl std::error::Error for ErrorMessage {}
+
 impl<'b, C> minicbor::Decode<'b, C> for ErrorMessage {
     fn decode(
         d: &mut minicbor::Decoder<'b>,
         _ctx: &mut C,
     ) -> Result<Self, minicbor::decode::Error> {
-        d.str_iter()?.collect::<Result<_, _>>().map(ErrorMessage)
+        d.str_iter()?.try_collect_string().map(ErrorMessage)
     }
 }
 
 type SolutionRegisters = Vec<Option<Address>>;
 
-#[derive(Debug, minicbor::Decode)]
-enum Solution {
-    #[n(0)]
-    SingleSolution(#[n(0)] SolutionRegisters),
-    #[n(1)]
-    MultipleSolutions(#[n(0)] SolutionRegisters),
-}
-
-#[derive(Debug, minicbor::Decode)]
+#[derive(Debug)]
 enum ReportStatusResponse {
-    #[n(0)]
-    Error(#[n(0)] ErrorMessage),
-    #[n(1)]
+    Error(ErrorMessage),
     WaitingForProgram,
-    #[n(2)]
     WaitingForQuery,
 }
 
@@ -728,95 +661,38 @@ impl ReportStatusResponse {
     }
 }
 
-#[derive(Debug, minicbor::Decode)]
-enum GetSystemCallsResponse {
-    #[n(0)]
-    Error(#[n(0)] ErrorMessage),
-    #[n(3)]
-    SystemCalls(#[n(0)] Vec<(String, Arity)>),
-}
+type GetSystemCallsResponse = comms::GetSystemCallsResponse<Vec<(String, Arity)>>;
 
-impl GetSystemCallsResponse {
-    fn into_result(self) -> anyhow::Result<Vec<(String, Arity)>> {
-        match self {
-            Self::SystemCalls(system_calls) => Ok(system_calls),
-            Self::Error(error) => Err(anyhow::anyhow!(error)),
-        }
+#[derive(Debug)]
+struct StructureTerms(Vec<Option<Address>>);
+
+impl<'b, C> minicbor::Decode<'b, C> for StructureTerms {
+    fn decode(d: &mut minicbor::Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        d.decode_with(ctx).map(Self)
     }
 }
 
-#[derive(Debug, minicbor::Decode)]
-enum SubmitProgramResponse {
-    #[n(0)]
-    Error(#[n(0)] ErrorMessage),
-    #[n(4)]
-    Success,
-}
+#[derive(Debug)]
+struct IntegerLeBytes(Vec<u8>);
 
-impl SubmitProgramResponse {
-    fn into_response(self) -> anyhow::Result<()> {
-        match self {
-            Self::Success => Ok(()),
-            Self::Error(error) => Err(anyhow::anyhow!(error)),
-        }
+impl<'b, C> minicbor::Decode<'b, C> for IntegerLeBytes {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        _ctx: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        d.array_iter()?.try_collect_vec().map(Self)
     }
 }
 
-#[derive(Debug, minicbor::Decode)]
-enum SubmitQueryResponse {
-    #[n(0)]
-    Error(#[n(0)] ErrorMessage),
-    #[n(5)]
-    NoSolution,
-    #[n(6)]
-    Solution(#[n(0)] Solution),
+impl AsRef<[u8]> for IntegerLeBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
 }
 
-fn decode_integer_bytes<'b, Ctx>(
-    d: &mut minicbor::Decoder<'b>,
-    _ctx: &mut Ctx,
-) -> Result<Vec<u8>, minicbor::decode::Error> {
-    d.array_iter()?.collect()
-}
-
-#[derive(Debug, minicbor::Decode)]
-enum LookupMemoryValue {
-    #[n(0)]
-    Structure(#[n(0)] Functor, #[n(1)] Arity, #[n(2)] Vec<Option<Address>>),
-    #[n(1)]
-    List(#[n(0)] Option<Address>, #[n(1)] Option<Address>),
-    #[n(2)]
-    Constant(#[n(0)] Constant),
-    #[n(3)]
-    Integer {
-        #[n(0)]
-        sign: IntegerSign,
-        #[n(1)]
-        #[cbor(decode_with = "decode_integer_bytes")]
-        le_bytes: Vec<u8>,
-    },
-}
-
-#[derive(Debug, minicbor::Decode)]
-enum LookupMemoryReferenceOrValue {
-    #[n(0)]
-    Reference(#[n(0)] Address),
-    #[n(1)]
-    Value(#[n(0)] LookupMemoryValue),
-}
-
-#[derive(minicbor::Decode)]
-enum LookupMemoryResponse {
-    #[n(0)]
-    Error(#[n(0)] ErrorMessage),
-    #[n(7)]
-    MemoryValue {
-        #[n(0)]
-        address: Address,
-        #[n(1)]
-        value: LookupMemoryReferenceOrValue,
-    },
-}
+type LookupMemoryResponse = comms::LookupMemoryResponse<StructureTerms, IntegerLeBytes>;
+type Solution = comms::Solution<SolutionRegisters>;
+type SubmitQueryResponse = comms::SubmitQueryResponse<SolutionRegisters>;
 
 trait ReadExt: Read {
     fn read_one(&mut self) -> std::io::Result<u8> {
@@ -825,13 +701,15 @@ trait ReadExt: Read {
         Ok(buffer)
     }
 
-    fn decode<T: for<'b> minicbor::Decode<'b, ()>>(&mut self) -> anyhow::Result<T> {
+    fn decode_response<T: for<'b> minicbor::Decode<'b, ()>>(
+        &mut self,
+    ) -> anyhow::Result<Result<T, ErrorMessage>> {
         let mut buffer = Vec::new();
         loop {
             let block_size = self.read_one()?;
 
             let Some(block_size) = block_size.checked_sub(1) else {
-                return Ok(minicbor::decode(&buffer)?);
+                return Ok(comms::CommandResponse::into_response(minicbor::decode(&buffer)?));
             };
 
             let start = buffer.len();
@@ -844,13 +722,17 @@ trait ReadExt: Read {
             }
         }
     }
+
+    fn decode_response_ok<T: for<'b> minicbor::Decode<'b, ()>>(&mut self) -> anyhow::Result<T> {
+        self.decode_response()?.map_err(anyhow::Error::new)
+    }
 }
 
 impl<T: Read> ReadExt for T {}
 
 trait WriteExt: Write {
-    fn encode<T: minicbor::Encode<()>>(&mut self, value: T) -> anyhow::Result<()> {
-        let buffer = minicbor::to_vec(value)?;
+    fn encode_command(&mut self, command: comms::Command) -> anyhow::Result<()> {
+        let buffer = minicbor::to_vec(command)?;
 
         let mut buffer = cobs::encode_vec(&buffer);
         buffer.push(0);
@@ -871,46 +753,40 @@ impl<T: Write> WriteExt for T {}
 
 trait ReadWriteExt: Sized + Read + Write {
     fn get_status(&mut self) -> anyhow::Result<ReportStatusResponse> {
-        self.encode(Command::ReportStatus)?;
-        self.decode()
+        self.encode_command(comms::Command::ReportStatus)?;
+        self.decode_response().map(|response| match response {
+            Err(error) => ReportStatusResponse::Error(error),
+            Ok(comms::ReportStatusResponse::WaitingForProgram) => {
+                ReportStatusResponse::WaitingForProgram
+            }
+            Ok(comms::ReportStatusResponse::WaitingForQuery) => {
+                ReportStatusResponse::WaitingForQuery
+            }
+        })
     }
 
     fn get_value(&mut self, address: Address) -> anyhow::Result<(Address, Value)> {
-        self.encode(Command::LookupMemory { address })?;
-        match self.decode::<LookupMemoryResponse>()? {
-            LookupMemoryResponse::Error(ErrorMessage(error)) => Ok((address, Value::Error(error))),
-            LookupMemoryResponse::MemoryValue { address, value } => {
+        self.encode_command(comms::Command::LookupMemory { address })?;
+        match self.decode_response()? {
+            Err(ErrorMessage(error)) => Ok((address, Value::Error(error))),
+            Ok(LookupMemoryResponse::MemoryValue { address, value }) => {
                 let value = match value {
-                    LookupMemoryReferenceOrValue::Reference(reference) => {
-                        Value::Reference(reference)
+                    comms::Value::Reference(reference) => Value::Reference(reference),
+                    comms::Value::Structure(f, terms) => {
+                        Value::Structure(f, terms.0.into_iter().map(Option::unwrap).collect())
                     }
-                    LookupMemoryReferenceOrValue::Value(LookupMemoryValue::Structure(
-                        f,
-                        _,
-                        terms,
-                    )) => Value::Structure(f, terms.into_iter().map(Option::unwrap).collect()),
-                    LookupMemoryReferenceOrValue::Value(LookupMemoryValue::List(lhs, rhs)) => {
-                        Value::List(lhs.unwrap(), rhs.unwrap())
+                    comms::Value::List(lhs, rhs) => Value::List(lhs.unwrap(), rhs.unwrap()),
+                    comms::Value::Constant(c) => Value::Constant(c),
+                    comms::Value::Integer { sign, le_bytes } => {
+                        Value::Integer(BigInt::from_bytes_le(
+                            match sign {
+                                comms::IntegerSign::Negative => num_bigint::Sign::Minus,
+                                comms::IntegerSign::Zero => num_bigint::Sign::NoSign,
+                                comms::IntegerSign::Positive => num_bigint::Sign::Plus,
+                            },
+                            le_bytes.as_ref(),
+                        ))
                     }
-                    LookupMemoryReferenceOrValue::Value(LookupMemoryValue::Constant(c)) => {
-                        Value::Constant(c)
-                    }
-                    LookupMemoryReferenceOrValue::Value(LookupMemoryValue::Integer {
-                        sign,
-                        le_bytes,
-                    }) => Value::Integer(BigInt::from_bytes_le(
-                        match sign {
-                            IntegerSign::Negative => num_bigint::Sign::Minus,
-                            IntegerSign::Positive => {
-                                if le_bytes.iter().all(|&n| n == 0) {
-                                    num_bigint::Sign::NoSign
-                                } else {
-                                    num_bigint::Sign::Plus
-                                }
-                            }
-                        },
-                        &le_bytes,
-                    )),
                 };
 
                 Ok((address, value))
@@ -1107,7 +983,12 @@ fn main() -> anyhow::Result<()> {
                 serialport::available_ports()?
                     .into_iter()
                     .find_map(|port| match port.port_type {
-                        SerialPortType::UsbPort(_) => Some(port.port_name),
+                        SerialPortType::UsbPort(UsbPortInfo {
+                            serial_number: Some(serial_number),
+                            ..
+                        }) if serial_number.starts_with("BARE_METAL_PROLOG_") => {
+                            Some(port.port_name)
+                        }
                         _ => None,
                     })
                     .context("Device not connected")?,
@@ -1119,18 +1000,19 @@ fn main() -> anyhow::Result<()> {
 
     port.get_status()?.assert_can_submit_program()?;
 
-    port.encode(Command::GetSystemCalls)?;
-    let system_calls = port.decode::<GetSystemCallsResponse>()?.into_result()?;
+    port.encode_command(comms::Command::GetSystemCalls)?;
+    let GetSystemCallsResponse::SystemCalls(system_calls) = port.decode_response_ok()?;
 
     let (program_info, program_words) = compiler::compile_program(system_calls, program)?;
 
-    port.encode(Command::SubmitProgram {
-        code_submission: CodeSubmission::new(&program_words),
+    port.encode_command(comms::Command::SubmitProgram {
+        code_submission: comms::CodeSubmission::new(&program_words),
     })?;
 
     port.write_words(&program_words)?;
 
-    port.decode::<SubmitProgramResponse>()?.into_response()?;
+    let comms::SubmitProgramResponse::Success =
+        port.decode_response_ok::<comms::SubmitProgramResponse>()?;
 
     loop {
         port.get_status()?.assert_can_submit_query()?;
@@ -1155,14 +1037,14 @@ fn main() -> anyhow::Result<()> {
             }
         };
 
-        port.encode(Command::SubmitQuery {
-            code_submission: CodeSubmission::new(&query_words),
+        port.encode_command(comms::Command::SubmitQuery {
+            code_submission: comms::CodeSubmission::new(&query_words),
         })?;
 
         port.write_words(&query_words)?;
 
         'outer: loop {
-            break match port.decode::<SubmitQueryResponse>()? {
+            break match port.decode_response_ok::<SubmitQueryResponse>()? {
                 SubmitQueryResponse::Solution(Solution::SingleSolution(solution_registers)) => {
                     let answer = port.get_answer(&program_info, &query, solution_registers)?;
 
@@ -1199,13 +1081,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    port.encode(Command::NextSolution)?;
+                    port.encode_command(comms::Command::NextSolution)?;
                     continue;
                 }
                 SubmitQueryResponse::NoSolution => stdout.queue(Print("fail".bold()))?,
-                SubmitQueryResponse::Error(error) => {
-                    anyhow::bail!(error)
-                }
             };
         }
         .execute(PrintLn('.'))?;

@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "comms",
     "wam",
     "target_tcp_server",
     "rust_terminal",

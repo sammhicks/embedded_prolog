@@ -3,15 +3,13 @@ use core::{fmt, marker::PhantomData};
 use crate::{log_info, log_trace};
 
 use super::{
-    basic_types::{Arity, Xn},
+    basic_types::{Arity, IntegerSign, Xn},
     heap::{
         structure_iteration, IntegerEvaluationOutputLayout, MemoryError, OutOfMemory,
         UnificationError,
     },
     Heap, ReferenceOrValue, RegisterBlock,
 };
-
-type IntegerSign = core::cmp::Ordering;
 
 #[derive(Clone, Copy)]
 pub struct Value {
@@ -21,12 +19,7 @@ pub struct Value {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}",
-            if self.sign.is_lt() { "-" } else { "" },
-            self.size
-        )
+        write!(f, "{}{}", self.sign, self.size)
     }
 }
 
@@ -40,7 +33,7 @@ where
         + TryFrom<i128, Error = core::num::TryFromIntError>,
 {
     fn from_value(Value { sign, size }: Value) -> Option<Self> {
-        if sign.is_lt() {
+        if let IntegerSign::Negative = sign {
             Self::try_from(size.checked_neg()?).ok()
         } else {
             Self::try_from(size).ok()
@@ -59,7 +52,7 @@ macro_rules! impl_unsigned_number_into_value {
                 fn into_value(self) -> Value {
                     u128::try_from(self)
                         .map(|size| Value {
-                            sign: size.cmp(&0),
+                            sign: size.cmp(&0).into(),
                             size,
                         })
                         .unwrap()
@@ -78,7 +71,7 @@ macro_rules! impl_signed_number_into_value {
                 fn into_value(self) -> Value {
                     i128::try_from(self)
                         .map(|size| Value {
-                            sign: size.cmp(&0),
+                            sign: size.cmp(&0).into(),
                             size: size.unsigned_abs(),
                         })
                         .unwrap()
@@ -92,6 +85,7 @@ impl_signed_number_into_value!(i8, i16, i32, i64, i128);
 
 #[allow(dead_code)]
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub struct SystemCallIndexOutOfRange {
     system_call_index: SystemCallIndex,
     system_call_count: usize,
@@ -214,14 +208,7 @@ impl<'me, 'memory> MachineState<'me, 'memory> {
 
         let size = u128::from_le_bytes(buffer);
 
-        T::from_value(Value {
-            sign: match sign {
-                super::IntegerSign::Positive => size.cmp(&0),
-                super::IntegerSign::Negative => IntegerSign::Less,
-            },
-            size,
-        })
-        .ok_or(SystemCallError::UnificationFailure)
+        T::from_value(Value { sign, size }).ok_or(SystemCallError::UnificationFailure)
     }
 
     fn request_storage<T: IntoValue>(&mut self) -> Result<Storage<T>, SystemCallError> {
@@ -541,6 +528,13 @@ impl fmt::Display for SystemCallIndex {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for SystemCallIndex {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:02X}", self.0)
+    }
+}
+
 pub trait SystemCalls {
     fn count(&self) -> u16;
 
@@ -560,7 +554,7 @@ impl<'a, Calls: SystemCalls, C> minicbor::Encode<C> for SystemCallEncoder<'a, Ca
         let Self(calls) = self;
         e.array(calls.count().into())?;
 
-        calls.for_each_call(|name, arity| (name, arity).encode(e, ctx))?;
+        calls.for_each_call(|name, Arity(arity)| (name, arity).encode(e, ctx))?;
 
         Ok(())
     }

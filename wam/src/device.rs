@@ -3,24 +3,27 @@ use core::fmt;
 use super::{
     load_code, log_debug, log_info, log_trace,
     machine::{SystemCallEncoder, SystemCalls},
-    CodeSubmission, Command, ErrorResponse, GetSystemCallsResponse, IoError, LoadedCode, Never,
-    ReportStatusResponse, SerialConnection, SerialReadWrite, SubmitProgramResponse,
+    ErrorResponse, IoError, LoadedCode, Never, SerialConnection, SerialReadWrite,
 };
 
 #[derive(Debug)]
 enum HandledCommand {
     ReportStatus,
     GetSystemCalls,
-    SubmitProgram { code_submission: CodeSubmission },
+    SubmitProgram {
+        code_submission: comms::CodeSubmission,
+    },
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 enum UnhandledCommand {
     SubmitQuery,
     LookupMemory,
     NextSolution,
 }
 
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 struct NoProgramError {
     unhandled_command: UnhandledCommand,
 }
@@ -34,7 +37,7 @@ impl fmt::Display for NoProgramError {
 enum Action {
     Reset,
     ProcessNextCommand,
-    ProcessCommand(Command),
+    ProcessCommand(comms::Command),
 }
 
 pub enum Error<S: SerialReadWrite> {
@@ -81,7 +84,7 @@ pub struct Device<'a, Serial: SerialReadWrite, Calls> {
 impl<'a, Serial: SerialReadWrite, Calls: SystemCalls> Device<'a, Serial, Calls> {
     fn handle_submit_program(
         &mut self,
-        code_submission: CodeSubmission,
+        code_submission: comms::CodeSubmission,
     ) -> Result<Action, IoError<Serial>> {
         log_info!("Loading program");
 
@@ -91,7 +94,7 @@ impl<'a, Serial: SerialReadWrite, Calls: SystemCalls> Device<'a, Serial, Calls> 
         } = match load_code(self.memory, &mut self.serial_connection, code_submission)? {
             Ok(code) => {
                 self.serial_connection
-                    .encode(SubmitProgramResponse::Success)?;
+                    .encode(comms::SubmitProgramResponse::Success)?;
 
                 code
             }
@@ -113,7 +116,7 @@ impl<'a, Serial: SerialReadWrite, Calls: SystemCalls> Device<'a, Serial, Calls> 
 
         match unhandled_command {
             crate::device_with_program::UnhandledCommand::SubmitProgram { code_submission } => {
-                Ok(Action::ProcessCommand(Command::SubmitProgram {
+                Ok(Action::ProcessCommand(comms::Command::SubmitProgram {
                     code_submission,
                 }))
             }
@@ -121,32 +124,32 @@ impl<'a, Serial: SerialReadWrite, Calls: SystemCalls> Device<'a, Serial, Calls> 
         }
     }
 
-    fn process_command(&mut self, command: Command) -> Result<Action, IoError<Serial>> {
+    fn process_command(&mut self, command: comms::Command) -> Result<Action, IoError<Serial>> {
         log_info!("Processing command {:?}", command);
 
         let command = match command {
-            Command::ReportStatus => Ok(HandledCommand::ReportStatus),
-            Command::GetSystemCalls => Ok(HandledCommand::GetSystemCalls),
-            Command::SubmitProgram { code_submission } => {
+            comms::Command::ReportStatus => Ok(HandledCommand::ReportStatus),
+            comms::Command::GetSystemCalls => Ok(HandledCommand::GetSystemCalls),
+            comms::Command::SubmitProgram { code_submission } => {
                 Ok(HandledCommand::SubmitProgram { code_submission })
             }
-            Command::SubmitQuery { .. } => Err(UnhandledCommand::SubmitQuery),
-            Command::LookupMemory { .. } => Err(UnhandledCommand::LookupMemory),
-            Command::NextSolution => Err(UnhandledCommand::NextSolution),
+            comms::Command::SubmitQuery { .. } => Err(UnhandledCommand::SubmitQuery),
+            comms::Command::LookupMemory { .. } => Err(UnhandledCommand::LookupMemory),
+            comms::Command::NextSolution => Err(UnhandledCommand::NextSolution),
         };
 
         match command {
             Ok(HandledCommand::ReportStatus) => {
-                let status = ReportStatusResponse::WaitingForProgram;
-                log_debug!("Status: {status}");
+                let status = comms::ReportStatusResponse::WaitingForProgram;
+                log_debug!("Status: {:?}", status);
                 self.serial_connection.encode(status)?;
                 Ok(Action::ProcessNextCommand)
             }
             Ok(HandledCommand::GetSystemCalls) => {
                 self.serial_connection
-                    .encode(GetSystemCallsResponse::SystemCalls(SystemCallEncoder(
-                        &self.system_calls,
-                    )))?;
+                    .encode(comms::GetSystemCallsResponse::SystemCalls(
+                        SystemCallEncoder(&self.system_calls),
+                    ))?;
                 Ok(Action::ProcessNextCommand)
             }
             Ok(HandledCommand::SubmitProgram { code_submission }) => {
@@ -162,11 +165,11 @@ impl<'a, Serial: SerialReadWrite, Calls: SystemCalls> Device<'a, Serial, Calls> 
 
     pub fn run(mut self) -> Result<Never, Error<Serial>> {
         log_info!("Running");
-        let mut command = self.serial_connection.decode::<Command>()?;
+        let mut command = self.serial_connection.decode::<comms::Command>()?;
         loop {
             command = match self.process_command(command)? {
                 Action::Reset => return Err(Error::Reset),
-                Action::ProcessNextCommand => self.serial_connection.decode::<Command>()?,
+                Action::ProcessNextCommand => self.serial_connection.decode::<comms::Command>()?,
                 Action::ProcessCommand(command) => command,
             };
         }

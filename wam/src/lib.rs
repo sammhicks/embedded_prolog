@@ -2,11 +2,11 @@
 
 use core::fmt;
 
-use machine::{Address, ReferenceOrValue};
-use sha2::Digest;
-
 #[cfg(feature = "logging")]
 pub use log;
+
+#[cfg(feature = "defmt-logging")]
+pub use defmt;
 
 mod device;
 mod device_with_program;
@@ -25,6 +25,13 @@ struct Hex<const N: usize>([u8; N]);
 impl<const N: usize> fmt::Display for Hex<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.iter().try_for_each(|b| write!(f, "{b:02X}"))
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl<const N: usize> defmt::Format for Hex<N> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::Display2Format(self).format(fmt)
     }
 }
 
@@ -223,14 +230,15 @@ impl<'a, S: SerialReadWrite> minicbor::encode::Write for CborWriter<'a, S> {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 enum LoadCodeError {
     NoSpaceForCode {
         code_length: usize,
         memory_capacity: usize,
     },
     HashMismatch {
-        hash: Hash,
-        calculated_hash: Hash,
+        hash: comms::Hash,
+        calculated_hash: comms::Hash,
     },
 }
 
@@ -271,7 +279,7 @@ fn load_code<
 >(
     memory: &'memory mut [u32],
     serial_connection: &mut SerialConnection<S>,
-    CodeSubmission { code_length, hash }: CodeSubmission,
+    comms::CodeSubmission { code_length, hash }: comms::CodeSubmission,
 ) -> Result<Result<LoadedCode<'code, 'rest>, LoadCodeError>, IoError<S>> {
     let memory_capacity = memory.len();
 
@@ -290,7 +298,7 @@ fn load_code<
     let code_section = unsafe { core::mem::transmute::<_, &mut [[u8; 4]]>(code_section) };
 
     let calculated_hash =
-        sha2::Sha256::digest(serial_connection.read_exact(code_section_buffer(code_section))?);
+        comms::Hash::new(serial_connection.read_exact(code_section_buffer(code_section))?);
 
     for &code in code_section.iter() {
         log_trace!("Word: {}", Hex(code));
@@ -310,53 +318,6 @@ fn load_code<
         code_section: machine::Instructions::new(code_section),
         rest_of_memory,
     }))
-}
-
-pub type Hash = sha2::digest::Output<sha2::Sha256>;
-
-fn decode_hash<'b, Ctx>(
-    d: &mut minicbor::Decoder<'b>,
-    _ctx: &mut Ctx,
-) -> Result<Hash, minicbor::decode::Error> {
-    d.bytes().and_then(|bytes| {
-        <[u8; 32]>::try_from(bytes)
-            .map(Hash::from)
-            .map_err(|_| minicbor::decode::Error::message("Bad Hash Length"))
-    })
-}
-
-#[derive(Debug, minicbor::Decode)]
-pub struct CodeSubmission {
-    #[n(0)]
-    code_length: usize,
-    #[n(1)]
-    #[cbor(decode_with = "decode_hash")]
-    hash: Hash,
-}
-
-#[derive(Debug, minicbor::Decode)]
-pub enum Command {
-    #[n(0)]
-    ReportStatus,
-    #[n(1)]
-    GetSystemCalls,
-    #[n(2)]
-    SubmitProgram {
-        #[n(0)]
-        code_submission: CodeSubmission,
-    },
-    #[n(3)]
-    SubmitQuery {
-        #[n(0)]
-        code_submission: CodeSubmission,
-    },
-    #[n(4)]
-    LookupMemory {
-        #[n(0)]
-        address: machine::Address,
-    },
-    #[n(5)]
-    NextSolution,
 }
 
 struct ErrorWriter<'a, W: minicbor::encode::Write> {
@@ -380,91 +341,52 @@ impl<'a, W: minicbor::encode::Write> core::fmt::Write for ErrorWriter<'a, W> {
     }
 }
 
+fn write_error_response<E: fmt::Display, C, W: minicbor::encode::Write>(
+    encoder: &mut minicbor::Encoder<W>,
+    error: &E,
+    _ctx: &mut C,
+) -> Result<(), minicbor::encode::Error<W::Error>> {
+    use core::fmt::Write;
+
+    encoder.array(2)?.u32(0)?.array(1)?.begin_str()?;
+
+    let mut writer = ErrorWriter {
+        encoder,
+        state: Ok(()),
+    };
+
+    write!(&mut writer, "{}", error)
+        .map_err(|core::fmt::Error| minicbor::encode::Error::message("Formatting Error"))?;
+    writer.state?;
+
+    encoder.end()?.ok()
+}
+
+#[cfg(feature = "defmt-logging")]
+pub struct ErrorResponse<E: fmt::Display + defmt::Format>(E);
+
+#[cfg(feature = "defmt-logging")]
+impl<E: fmt::Display + defmt::Format, C> minicbor::Encode<C> for ErrorResponse<E> {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        encoder: &mut minicbor::Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        log_error!("{}", self.0);
+        write_error_response(encoder, &self.0, ctx)
+    }
+}
+
+#[cfg(not(feature = "defmt-logging"))]
 pub struct ErrorResponse<E: fmt::Display>(E);
 
+#[cfg(not(feature = "defmt-logging"))]
 impl<E: fmt::Display, C> minicbor::Encode<C> for ErrorResponse<E> {
     fn encode<W: minicbor::encode::Write>(
         &self,
-        e: &mut minicbor::Encoder<W>,
-        _ctx: &mut C,
+        encoder: &mut minicbor::Encoder<W>,
+        ctx: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        use core::fmt::Write;
-
-        log_error!("{}", self.0);
-
-        e.array(2)?.u32(0)?.array(1)?.begin_str()?;
-
-        let mut writer = ErrorWriter {
-            encoder: e,
-            state: Ok(()),
-        };
-
-        write!(&mut writer, "{}", self.0)
-            .map_err(|core::fmt::Error| minicbor::encode::Error::message("Formatting Error"))?;
-        writer.state?;
-
-        e.end()?.ok()
+        write_error_response(encoder, &self.0, ctx)
     }
-}
-
-// #[derive(Debug, minicbor::Encode)]
-// pub enum CommandResponse<'a> {
-//     #[n(1)]
-//     Success,
-//     #[n(2)]
-//     WaitingForProgram,
-//     #[n(3)]
-//     WaitingForQuery,
-//     #[n(4)]
-//     NoSolution,
-//     #[n(5)]
-//     Solution(#[n(0)] &'a machine::Solution<'a>),
-// }
-
-#[derive(Debug, minicbor::Encode)]
-pub enum ReportStatusResponse {
-    #[n(1)]
-    WaitingForProgram,
-    #[n(2)]
-    WaitingForQuery,
-}
-
-impl fmt::Display for ReportStatusResponse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReportStatusResponse::WaitingForQuery => "Waiting for Query".fmt(f),
-            ReportStatusResponse::WaitingForProgram => "Waiting for Program".fmt(f),
-        }
-    }
-}
-
-#[derive(Debug, minicbor::Encode)]
-pub enum GetSystemCallsResponse<Calls> {
-    #[n(3)]
-    SystemCalls(#[n(0)] Calls),
-}
-
-#[derive(Debug, minicbor::Encode)]
-pub enum SubmitProgramResponse {
-    #[n(4)]
-    Success,
-}
-
-#[derive(Debug, minicbor::Encode)]
-pub enum SubmitQueryResponse<'a> {
-    #[n(5)]
-    NoSolution,
-    #[n(6)]
-    Solution(#[n(0)] &'a machine::Solution<'a>),
-}
-
-#[derive(minicbor::Encode)]
-enum LookupMemoryResponse<'a> {
-    #[n(7)]
-    MemoryValue {
-        #[n(0)]
-        address: Address,
-        #[n(1)]
-        value: ReferenceOrValue<'a>,
-    },
 }

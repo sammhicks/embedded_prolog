@@ -56,14 +56,32 @@ pub type Arity = u8;
 pub type ProgramCounter = u16;
 pub type SystemCallIndex = u8;
 
-#[derive(Debug, minicbor::Decode)]
-#[repr(u8)]
-#[cbor(index_only)]
+#[derive(Debug)]
+#[repr(i8)]
 pub enum IntegerSign {
-    #[n(0)]
-    Positive = 0,
-    #[n(1)]
-    Negative = 1,
+    Negative = -1,
+    Zero = 0,
+    Positive = 1,
+}
+
+impl fmt::Display for IntegerSign {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Negative => "-",
+            Self::Zero | Self::Positive => "",
+        }
+        .fmt(f)
+    }
+}
+
+impl From<num_bigint::Sign> for IntegerSign {
+    fn from(sign: num_bigint::Sign) -> Self {
+        match sign {
+            num_bigint::Sign::Minus => Self::Negative,
+            num_bigint::Sign::NoSign => Self::Zero,
+            num_bigint::Sign::Plus => Self::Positive,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -77,10 +95,7 @@ impl fmt::Display for LongInteger {
         write!(
             f,
             "{}{}",
-            match self.sign {
-                IntegerSign::Positive => "",
-                IntegerSign::Negative => "-",
-            },
+            self.sign,
             crate::DisplayCommaSeparated(self.le_words.iter())
         )
     }
@@ -89,10 +104,6 @@ impl fmt::Display for LongInteger {
 impl<'a> From<&'a BigInt> for LongInteger {
     fn from(int: &'a BigInt) -> Self {
         let (sign, bytes) = int.to_bytes_le();
-        let sign = match sign {
-            num_bigint::Sign::NoSign | num_bigint::Sign::Plus => IntegerSign::Positive,
-            num_bigint::Sign::Minus => IntegerSign::Negative,
-        };
 
         let le_words = bytes
             .chunks(std::mem::size_of::<IntegerWord>())
@@ -105,7 +116,10 @@ impl<'a> From<&'a BigInt> for LongInteger {
             })
             .collect();
 
-        Self { sign, le_words }
+        Self {
+            sign: sign.into(),
+            le_words,
+        }
     }
 }
 

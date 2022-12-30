@@ -15,28 +15,89 @@ impl<T: NoneRepresents> fmt::Display for OptionDisplay<T> {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl<T: defmt::Format + NoneRepresents> defmt::Format for OptionDisplay<T> {
+    fn format(&self, fmt: defmt::Formatter) {
+        match self.0.as_ref() {
+            Some(t) => t.format(fmt),
+            None => defmt::write!(fmt, "{}", T::NONE_REPRESENTS),
+        }
+    }
+}
+
 /// A Register Index
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Xn {
     pub xn: u8,
 }
 
+impl fmt::Debug for Xn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Xn({})", self)
+    }
+}
+
+impl fmt::Display for Xn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02X}", self.xn)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for Xn {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:02X}", self.xn)
+    }
+}
+
 /// An Environment "Register Index", i.e. the nth variable on the stack
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Yn {
     pub yn: u8,
 }
 
+impl fmt::Debug for Yn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Yn({})", self)
+    }
+}
+
 impl fmt::Display for Yn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.yn)
+        write!(f, "{:02X}", self.yn)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for Yn {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:02X}", self.yn)
     }
 }
 
 /// An Argument Index. Functionally the same as a [Register Index](Xn)
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Ai {
     pub ai: u8,
+}
+
+impl fmt::Debug for Ai {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Ai({})", self)
+    }
+}
+
+impl fmt::Display for Ai {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02X}", self.ai)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for Ai {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:02X}", self.ai)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +115,13 @@ impl fmt::Display for RegisterIndex {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for RegisterIndex {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:02X}", self.0)
+    }
+}
+
 impl From<Xn> for RegisterIndex {
     fn from(Xn { xn }: Xn) -> Self {
         RegisterIndex(xn)
@@ -66,9 +134,8 @@ impl From<Ai> for RegisterIndex {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
-#[cbor(transparent)]
-pub struct Functor(#[n(0)] pub u16);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Functor(pub u16);
 
 impl fmt::Debug for Functor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -82,9 +149,15 @@ impl fmt::Display for Functor {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, minicbor::Encode, minicbor::Decode)]
-#[cbor(transparent)]
-pub struct Arity(#[n(0)] pub u8);
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for Functor {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:04X}", self.0)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Arity(pub u8);
 
 impl fmt::Debug for Arity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -98,6 +171,13 @@ impl fmt::Display for Arity {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for Arity {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:02X}", self.0)
+    }
+}
+
 impl core::ops::SubAssign for Arity {
     fn sub_assign(&mut self, Arity(n): Self) {
         self.0 -= n;
@@ -108,9 +188,8 @@ impl Arity {
     pub const ZERO: Self = Self(0);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
-#[cbor(transparent)]
-pub struct Constant(#[n(0)] pub u16);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Constant(pub u16);
 
 impl fmt::Debug for Constant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -124,26 +203,88 @@ impl fmt::Display for Constant {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for Constant {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:04X}", self.0)
+    }
+}
+
 impl Constant {
     pub fn from_le_bytes(bytes: [u8; 2]) -> Self {
         Self(u16::from_le_bytes(bytes))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, minicbor::Encode)]
-#[repr(u8)]
-#[cbor(index_only)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
+#[repr(i8)]
 pub enum IntegerSign {
-    #[n(0)]
-    Positive = 0,
-    #[n(1)]
-    Negative = 1,
+    Negative = -1,
+    Zero = 0,
+    Positive = 1,
+}
+
+impl fmt::Display for IntegerSign {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Negative => "-",
+            Self::Zero | Self::Positive => "",
+        }
+        .fmt(f)
+    }
+}
+
+impl From<core::cmp::Ordering> for IntegerSign {
+    fn from(ordering: core::cmp::Ordering) -> Self {
+        match ordering {
+            core::cmp::Ordering::Less => Self::Negative,
+            core::cmp::Ordering::Equal => Self::Zero,
+            core::cmp::Ordering::Greater => Self::Positive,
+        }
+    }
+}
+
+impl core::ops::Mul for IntegerSign {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Self::Zero, _) | (_, Self::Zero) => Self::Zero,
+            (Self::Positive, Self::Positive) | (Self::Negative, Self::Negative) => Self::Positive,
+            (Self::Positive, Self::Negative) | (Self::Negative, Self::Positive) => Self::Negative,
+        }
+    }
 }
 
 impl IntegerSign {
     pub fn from_u8(s: u8) -> Option<Self> {
-        IntoIterator::into_iter([Self::Positive, Self::Negative])
-            .find_map(|sign| ((sign as u8) == s).then_some(sign))
+        Self::from_i8(s as i8)
+    }
+
+    pub fn from_i8(s: i8) -> Option<Self> {
+        Some(match s {
+            -1 => Self::Negative,
+            0 => Self::Zero,
+            1 => Self::Positive,
+            _ => return None,
+        })
+    }
+
+    pub fn reverse(self) -> Self {
+        match self {
+            Self::Negative => Self::Positive,
+            Self::Zero => Self::Zero,
+            Self::Positive => Self::Negative,
+        }
+    }
+
+    pub fn into_comms(self) -> comms::IntegerSign {
+        match self {
+            IntegerSign::Negative => comms::IntegerSign::Negative,
+            IntegerSign::Zero => comms::IntegerSign::Zero,
+            IntegerSign::Positive => comms::IntegerSign::Positive,
+        }
     }
 }
 
@@ -170,12 +311,7 @@ impl ShortInteger {
     }
 
     pub fn into_value(self) -> i16 {
-        let sign = match self.sign {
-            IntegerSign::Positive => 1,
-            IntegerSign::Negative => -1,
-        };
-
-        sign * (u32::from_le_bytes(self.value) as i16)
+        i16::from(self.sign as i8) * (u32::from_le_bytes(self.value) as i16)
     }
 
     pub fn as_long(&self) -> LongInteger {
@@ -195,6 +331,13 @@ impl fmt::Debug for ShortInteger {
 impl fmt::Display for ShortInteger {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04X}", self.into_value())
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for ShortInteger {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:04X}", self.into_value())
     }
 }
 
@@ -222,6 +365,15 @@ impl<'memory> fmt::Display for DisplayLongIntegerWords<'memory> {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl<'memory> defmt::Format for DisplayLongIntegerWords<'memory> {
+    fn format(&self, fmt: defmt::Formatter) {
+        for &byte in self.0.iter().flatten().rev() {
+            defmt::write!(fmt, "{:02X}", byte);
+        }
+    }
+}
+
 impl<'memory> fmt::Debug for LongInteger<'memory> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "LongInteger({})", self)
@@ -232,12 +384,16 @@ impl<'memory> fmt::Display for LongInteger<'memory> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let &Self { sign, words } = self;
 
-        let sign = match sign {
-            IntegerSign::Positive => "",
-            IntegerSign::Negative => "-",
-        };
-
         write!(f, "{}{}", sign, DisplayLongIntegerWords(words))
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl<'memory> defmt::Format for LongInteger<'memory> {
+    fn format(&self, fmt: defmt::Formatter) {
+        let &Self { sign, words } = self;
+
+        defmt::write!(fmt, "{}{}", sign, DisplayLongIntegerWords(words))
     }
 }
 
@@ -253,6 +409,13 @@ impl fmt::Debug for ProgramCounter {
 impl fmt::Display for ProgramCounter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04X}", self.into_word())
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl defmt::Format for ProgramCounter {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:04X}", self.into_word())
     }
 }
 

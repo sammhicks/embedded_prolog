@@ -1,17 +1,22 @@
 use super::{
     log_debug, log_info,
-    machine::{ExecutionFailure, Instructions, SystemCallEncoder, SystemCalls},
-    CodeSubmission, Command, ErrorResponse, GetSystemCallsResponse, IoError, ReportStatusResponse,
-    SerialConnection, SerialReadWrite, SubmitQueryResponse,
+    machine::{Address, ExecutionFailure, Instructions, SystemCallEncoder, SystemCalls, TermsList},
+    ErrorResponse, IoError, SerialConnection, SerialReadWrite,
 };
 
 #[derive(Debug)]
 pub enum UnhandledCommand {
     Reset,
     ProcessNextCommand,
-    SubmitProgram { code_submission: CodeSubmission },
-    SubmitQuery { code_submission: CodeSubmission },
+    SubmitProgram {
+        code_submission: comms::CodeSubmission,
+    },
+    SubmitQuery {
+        code_submission: comms::CodeSubmission,
+    },
 }
+
+type SubmitQueryResponse<'a> = comms::SubmitQueryResponse<TermsList<'a>>;
 
 pub struct Device<'m, 's, Serial: SerialReadWrite, Calls> {
     pub program: Instructions<'m>,
@@ -45,7 +50,7 @@ impl<'m, 's, Serial: SerialReadWrite, Calls: SystemCalls> Device<'m, 's, Serial,
             match machine.solution() {
                 Ok(solution) => self
                     .serial_connection
-                    .encode(SubmitQueryResponse::Solution(&solution))?,
+                    .encode(SubmitQueryResponse::Solution(solution.into_comms()))?,
                 Err(err) => {
                     self.serial_connection.encode(ErrorResponse(err))?;
                     return Ok(UnhandledCommand::Reset);
@@ -53,33 +58,37 @@ impl<'m, 's, Serial: SerialReadWrite, Calls: SystemCalls> Device<'m, 's, Serial,
             }
 
             execution_result = loop {
-                let command = self.serial_connection.decode::<Command>()?;
+                let command = self.serial_connection.decode::<comms::Command>()?;
 
                 log_info!("Processing command {:?}", command);
 
                 match command {
-                    Command::ReportStatus => {
-                        let status = ReportStatusResponse::WaitingForQuery;
-                        log_debug!("Status: {}", status);
+                    comms::Command::ReportStatus => {
+                        let status = comms::ReportStatusResponse::WaitingForQuery;
+                        log_debug!("Status: {:?}", status);
                         self.serial_connection.encode(status)?;
                     }
-                    Command::GetSystemCalls => {
-                        self.serial_connection
-                            .encode(GetSystemCallsResponse::SystemCalls(SystemCallEncoder(
+                    comms::Command::GetSystemCalls => {
+                        self.serial_connection.encode(
+                            comms::GetSystemCallsResponse::SystemCalls(SystemCallEncoder(
                                 machine.system_calls(),
-                            )))?;
+                            )),
+                        )?;
                     }
-                    Command::SubmitProgram { code_submission } => {
+                    comms::Command::SubmitProgram { code_submission } => {
                         return Ok(UnhandledCommand::SubmitProgram { code_submission })
                     }
-                    Command::SubmitQuery { code_submission } => {
+                    comms::Command::SubmitQuery { code_submission } => {
                         return Ok(UnhandledCommand::SubmitQuery { code_submission })
                     }
-                    Command::LookupMemory { address } => {
-                        match machine.lookup_memory(address) {
+                    comms::Command::LookupMemory { address } => {
+                        match machine.lookup_memory(Address::new(address)) {
                             Ok((address, value)) => {
                                 self.serial_connection.encode(
-                                    super::LookupMemoryResponse::MemoryValue { address, value },
+                                    comms::LookupMemoryResponse::MemoryValue {
+                                        address: address.into_inner(),
+                                        value: value.into_comms(),
+                                    },
                                 )?;
                             }
                             Err(error) => {
@@ -88,7 +97,7 @@ impl<'m, 's, Serial: SerialReadWrite, Calls: SystemCalls> Device<'m, 's, Serial,
                             }
                         };
                     }
-                    Command::NextSolution => {
+                    comms::Command::NextSolution => {
                         break machine.next_solution();
                     }
                 }

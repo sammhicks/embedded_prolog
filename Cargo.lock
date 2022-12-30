@@ -159,6 +159,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67ba02a97a2bd10f4b59b25c7973101c79642302776489e030cd13cdab09ed15"
 
 [[package]]
+name = "comms"
+version = "0.1.0"
+dependencies = [
+ "defmt",
+ "minicbor",
+ "sha2",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -229,6 +238,35 @@ dependencies = [
  "generic-array",
  "typenum",
 ]
+
+[[package]]
+name = "defmt"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3a0ae7494d9bff013d7b89471f4c424356a71e9752e0c78abe7e6c608a16bb3"
+dependencies = [
+ "bitflags",
+ "defmt-macros",
+]
+
+[[package]]
+name = "defmt-macros"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8500cbe4cca056412efce4215a63d0bc20492942aeee695f23b624a53e0a6854"
+dependencies = [
+ "defmt-parser",
+ "proc-macro-error",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "defmt-parser"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0db23d29972d99baa3de2ee2ae3f104c10564a6d05a346eb3f4c4f2c0525a06e"
 
 [[package]]
 name = "digest"
@@ -675,11 +713,10 @@ dependencies = [
  "chumsky",
  "clap",
  "cobs",
+ "comms",
  "crossterm",
- "minicbor",
  "num-bigint",
  "serialport",
- "sha2",
  "strsim",
  "thiserror",
 ]
@@ -854,11 +891,12 @@ name = "wam"
 version = "0.1.0"
 dependencies = [
  "cobs",
+ "comms",
+ "defmt",
  "generic-array",
  "log",
  "minicbor",
  "rand",
- "sha2",
 ]
 
 [[package]]

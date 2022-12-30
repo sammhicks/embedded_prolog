@@ -14,12 +14,10 @@ use heap::{
     structure_iteration::{ReadWriteMode, State as StructureIterationState},
     Heap,
 };
-pub use heap::{Address, ReferenceOrValueHead, Solution, ValueHead};
+pub use heap::{
+    Address, ReferenceOrValue, ReferenceOrValueHead, Solution, TermsList, Value, ValueHead,
+};
 pub use system_call::{system_call_handler, system_calls, SystemCallEncoder, SystemCalls};
-
-pub type Value<'a> = heap::Value<heap::TermsList<'a>, heap::IntegerLeBytes<'a>>;
-pub type ReferenceOrValue<'a> =
-    heap::ReferenceOrValue<heap::TermsList<'a>, heap::IntegerLeBytes<'a>>;
 
 struct ProgramCounterOutOfRange {
     pc: ProgramCounter,
@@ -76,9 +74,17 @@ impl fmt::Debug for BadMemoryRange<'_> {
     }
 }
 
+#[cfg(feature = "defmt-logging")]
+impl<'m> defmt::Format for BadMemoryRange<'m> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::Debug2Format(self).format(fmt)
+    }
+}
+
 struct UnificationFailure;
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum Error<'m> {
     ProgramCounterOutOfRange {
         pc: ProgramCounter,
@@ -118,6 +124,7 @@ impl<'m> From<ProgramCounterOutOfRange> for Error<'m> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum Comparison {
     GreaterThan,
     LessThan,
@@ -128,6 +135,7 @@ pub enum Comparison {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 enum Instruction<'memory> {
     PutVariableXn { ai: Ai, xn: Xn },
     PutVariableYn { ai: Ai, yn: Yn },
@@ -486,6 +494,7 @@ impl<'memory> Instruction<'memory> {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum RegisterBlockError {
     IndexOutOfRange {
         index: RegisterIndex,
@@ -556,12 +565,14 @@ impl RegisterBlock {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 enum CurrentlyExecuting {
     Query,
     Program,
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum ExecutionFailure<'m> {
     Failed,
     Error(Error<'m>),
