@@ -94,6 +94,21 @@ pub struct ProgramInfo {
     functors: FunctorSet,
 }
 
+impl fmt::Debug for ProgramInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            source_files: _,
+            labels,
+            functors,
+        } = self;
+
+        f.debug_struct("ProgramInfo")
+            .field("labels", labels)
+            .field("functors", functors)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ProgramInfo {
     pub fn new(system_call_source: &str, program_path: Rc<Path>, program_source: &str) -> Self {
         Self {

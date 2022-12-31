@@ -14,9 +14,7 @@ use heap::{
     structure_iteration::{ReadWriteMode, State as StructureIterationState},
     Heap,
 };
-pub use heap::{
-    Address, ReferenceOrValue, ReferenceOrValueHead, Solution, TermsList, Value, ValueHead,
-};
+pub use heap::{Address, MaybeFree, Solution, TermsList, Value, ValueHead};
 pub use system_call::{system_call_handler, system_calls, SystemCallEncoder, SystemCalls};
 
 struct ProgramCounterOutOfRange {
@@ -797,16 +795,16 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
             Instruction::GetStructure { ai, f, n } => {
                 let (address, value) = self.get_register_value(ai)?;
                 match value.head() {
-                    ReferenceOrValueHead::Reference(variable_address) => {
+                    MaybeFree::FreeVariable => {
                         log_trace!("Writing structure {}/{}", f, n);
 
                         let value_address = self.new_structure(f, n)?;
 
                         Ok(self
                             .memory
-                            .bind_variable_to_value(variable_address, value_address)??)
+                            .bind_variable_to_value(address, value_address)??)
                     }
-                    ReferenceOrValueHead::Value(value) => {
+                    MaybeFree::BoundTo(value) => {
                         if let ValueHead::Structure(found_f, found_n) = value {
                             if f == found_f && n == found_n {
                                 log_trace!("Reading structure {}/{}", f, n);
@@ -824,17 +822,17 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
             Instruction::GetList { ai } => {
                 let (address, value) = self.get_register_value(ai)?;
                 match value.head() {
-                    ReferenceOrValueHead::Reference(variable_address) => {
+                    MaybeFree::FreeVariable => {
                         log_trace!("Writing list");
 
                         let value_address = self.new_list()?;
 
                         Ok(self
                             .memory
-                            .bind_variable_to_value(variable_address, value_address)??)
+                            .bind_variable_to_value(address, value_address)??)
                     }
 
-                    ReferenceOrValueHead::Value(value) => {
+                    MaybeFree::BoundTo(value) => {
                         if let ValueHead::List = value {
                             log_trace!("Reading list");
                             Ok(self.structure_iteration_state.start_reading(address)?)
@@ -845,16 +843,16 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 }
             }
             Instruction::GetConstant { ai, c } => {
-                let (_, value) = self.get_register_value(ai)?;
+                let (address, value) = self.get_register_value(ai)?;
 
                 match value.head() {
-                    ReferenceOrValueHead::Reference(variable_address) => {
+                    MaybeFree::FreeVariable => {
                         let value_address = self.new_constant(c)?;
                         self.memory
-                            .bind_variable_to_value(variable_address, value_address)??;
+                            .bind_variable_to_value(address, value_address)??;
                         Ok(())
                     }
-                    ReferenceOrValueHead::Value(value) => {
+                    MaybeFree::BoundTo(value) => {
                         if let ValueHead::Constant(c1) = value {
                             if c == c1 {
                                 Ok(())
@@ -871,15 +869,15 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 self.execute_instruction(&Instruction::GetInteger { ai, i: i.as_long() })
             }
             Instruction::GetInteger { ai, i } => ({
-                let (_, value) = self.get_register_value(ai)?;
+                let (address, value) = self.get_register_value(ai)?;
                 match value {
-                    ReferenceOrValue::Reference(variable_address) => {
+                    MaybeFree::FreeVariable => {
                         let value_address = self.new_integer(i)?;
                         self.memory
-                            .bind_variable_to_value(variable_address, value_address)??;
+                            .bind_variable_to_value(address, value_address)??;
                         Ok(())
                     }
-                    ReferenceOrValue::Value(value) => {
+                    MaybeFree::BoundTo(value) => {
                         if let Value::Integer { sign, le_bytes, .. } = value {
                             if i.equals(sign, le_bytes) {
                                 Ok(())
@@ -960,16 +958,16 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                         let term_address =
                             self.structure_iteration_state.read_next(&self.memory)?;
 
-                        let (_, value) = self.memory.get_value(term_address)?;
+                        let (address, value) = self.memory.get_value(term_address)?;
 
                         match value.head() {
-                            ReferenceOrValueHead::Reference(variable_address) => {
+                            MaybeFree::FreeVariable => {
                                 let value_address = self.new_constant(c)?;
                                 self.memory
-                                    .bind_variable_to_value(variable_address, value_address)??;
+                                    .bind_variable_to_value(address, value_address)??;
                                 Ok(())
                             }
-                            ReferenceOrValueHead::Value(value) => {
+                            MaybeFree::BoundTo(value) => {
                                 if let ValueHead::Constant(c1) = value {
                                     if c == c1 {
                                         Ok(())
@@ -1001,18 +999,16 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                             self.structure_iteration_state.read_next(&self.memory)?;
 
                         ({
-                            let (_, value) = self.memory.get_value(term_address)?;
+                            let (address, value) = self.memory.get_value(term_address)?;
 
                             match value {
-                                ReferenceOrValue::Reference(variable_address) => {
+                                MaybeFree::FreeVariable => {
                                     let value_address = self.new_integer(i)?;
-                                    self.memory.bind_variable_to_value(
-                                        variable_address,
-                                        value_address,
-                                    )??;
+                                    self.memory
+                                        .bind_variable_to_value(address, value_address)??;
                                     Ok(())
                                 }
-                                ReferenceOrValue::Value(Value::Integer {
+                                MaybeFree::BoundTo(Value::Integer {
                                     sign,
                                     le_bytes: be_bytes,
                                     ..
@@ -1023,7 +1019,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                                         Err(UnificationFailure)
                                     }
                                 }
-                                ReferenceOrValue::Value(
+                                MaybeFree::BoundTo(
                                     Value::Structure(..) | Value::List(..) | Value::Constant(..),
                                 ) => Err(UnificationFailure),
                             }
@@ -1194,7 +1190,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
     fn get_register_value(
         &self,
         index: Ai,
-    ) -> Result<(Address, ReferenceOrValue), ExecutionFailure<'m>> {
+    ) -> Result<(Address, MaybeFree<Value>), ExecutionFailure<'m>> {
         Ok(self.memory.get_value(self.registers.load(index)?)?)
     }
 
@@ -1238,7 +1234,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
     pub fn lookup_memory(
         &self,
         address: Address,
-    ) -> Result<(Address, ReferenceOrValue), heap::MemoryError> {
+    ) -> Result<(Address, MaybeFree<Value>), heap::MemoryError> {
         self.memory.get_value(address)
     }
 

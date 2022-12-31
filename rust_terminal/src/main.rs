@@ -27,7 +27,7 @@ type Address = NonZeroU16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Value {
-    Reference(Address),
+    FreeVariable(Address),
     Structure(Functor, Rc<[Address]>),
     List(Address, Address),
     Constant(Functor),
@@ -91,41 +91,26 @@ struct DisplayValue<'a> {
 impl<'a> fmt::Display for DisplayValue<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let answer = self.answer;
+        let address = self.address;
 
         if let Some(parent) = self.parent.copied() {
             if answer.loops.contains(&LoopLink {
                 parent,
                 child: *self.address,
             }) {
-                return DisplayReference {
-                    answer,
-                    reference: self.address,
-                }
-                .fmt(f);
+                return DisplayVariable { answer, address }.fmt(f);
             }
         }
 
         match self.answer.values.get(self.address) {
-            Some(Value::Reference(reference)) => {
-                if reference == self.address {
-                    DisplayReference { answer, reference }.fmt(f)
-                } else {
-                    DisplayValue {
-                        answer,
-                        parent: Some(self.address),
-                        address: reference,
-                        precedence: self.precedence,
-                    }
-                    .fmt(f)
-                }
-            }
+            Some(Value::FreeVariable(address)) => DisplayVariable { answer, address }.fmt(f),
             Some(Value::Structure(name, terms)) => {
                 write!(
                     f,
                     "{}",
                     DisplayStructure {
                         answer,
-                        address: self.address,
+                        address,
                         name,
                         terms,
                         precedence: self.precedence,
@@ -163,21 +148,21 @@ impl<'a> fmt::Display for DisplayValue<'a> {
     }
 }
 
-struct DisplayReference<'a> {
+struct DisplayVariable<'a> {
     answer: &'a Answer<'a>,
-    reference: &'a Address,
+    address: &'a Address,
 }
 
-impl<'a> fmt::Display for DisplayReference<'a> {
+impl<'a> fmt::Display for DisplayVariable<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self
             .answer
             .variables
             .iter()
-            .find_map(|(name, address)| (address == self.reference).then_some(name))
+            .find_map(|(name, address)| (address == self.address).then_some(name))
         {
             Some(name) => name.fmt(f),
-            None => write!(f, "_{}", self.reference),
+            None => write!(f, "_{}", self.address),
         }
     }
 }
@@ -348,36 +333,20 @@ struct DisplayListTail<'a> {
 impl<'a> fmt::Display for DisplayListTail<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let answer = self.answer;
+        let address = self.address;
 
         if let Some(parent) = self.parent.copied() {
             if answer.loops.contains(&LoopLink {
                 parent,
                 child: *self.address,
             }) {
-                return write!(
-                    f,
-                    "|{}",
-                    DisplayReference {
-                        answer,
-                        reference: self.address,
-                    }
-                );
+                return write!(f, "|{}", DisplayVariable { answer, address });
             }
         }
 
         match self.answer.values.get(self.address) {
-            Some(Value::Reference(reference)) => {
-                if reference == self.address {
-                    write!(f, "|{}", DisplayReference { answer, reference })
-                } else {
-                    DisplayValue {
-                        answer,
-                        parent: Some(self.address),
-                        address: reference,
-                        precedence: None,
-                    }
-                    .fmt(f)
-                }
+            Some(Value::FreeVariable(address)) => {
+                write!(f, "|{}", DisplayVariable { answer, address })
             }
             Some(Value::Structure(name, terms)) => write!(
                 f,
@@ -436,7 +405,6 @@ struct LoopScannerState<'a> {
 impl<'a> LoopScannerState<'a> {
     fn check_node_for_loops(self, parent: Address) -> Self {
         match self.values.get(&parent).unwrap() {
-            Value::Reference(child) => self.check_link_for_loops((parent, *child)),
             Value::Structure(_, children) => children
                 .as_ref()
                 .iter()
@@ -445,7 +413,9 @@ impl<'a> LoopScannerState<'a> {
             Value::List(lhs, rhs) => self
                 .check_link_for_loops((parent, *lhs))
                 .check_link_for_loops((parent, *rhs)),
-            Value::Constant(_) | Value::Integer(_) | Value::Error(_) => self,
+            Value::FreeVariable(_) | Value::Constant(_) | Value::Integer(_) | Value::Error(_) => {
+                self
+            }
         }
     }
 
@@ -476,20 +446,9 @@ struct VariableBindingsState<'a> {
 
 impl<'a> VariableBindingsState<'a> {
     fn get_value(&self, address: &Address) -> &'a Value {
-        match self
-            .values
+        self.values
             .get(address)
             .unwrap_or_else(|| panic!("No value for address {address}"))
-        {
-            value @ Value::Reference(reference) => {
-                if address == reference {
-                    value
-                } else {
-                    self.get_value(reference)
-                }
-            }
-            value => value,
-        }
     }
 
     fn calculate_bindings(mut self, (term, address): (&'a Term, &Address)) -> Self {
@@ -532,6 +491,7 @@ impl<'a> VariableBindingsState<'a> {
     }
 }
 
+#[derive(Debug)]
 struct Answer<'a> {
     program_info: &'a ProgramInfo,
     values: BTreeMap<Address, Value>,
@@ -545,12 +505,12 @@ impl<'a> fmt::Display for Answer<'a> {
             self.variables
                 .iter()
                 .try_fold(0, |printed_answers_count, (name, address)| {
-                    if let Some(Value::Reference(reference)) = self.values.get(address) {
+                    if let Some(Value::FreeVariable(location)) = self.values.get(address) {
                         if Some(name)
                             == self
                                 .variables
                                 .iter()
-                                .find_map(|(name, address)| (reference == address).then_some(name))
+                                .find_map(|(name, address)| (location == address).then_some(name))
                         {
                             return Ok(printed_answers_count);
                         }
@@ -771,7 +731,7 @@ trait ReadWriteExt: Sized + Read + Write {
             Err(ErrorMessage(error)) => Ok((address, Value::Error(error))),
             Ok(LookupMemoryResponse::MemoryValue { address, value }) => {
                 let value = match value {
-                    comms::Value::Reference(reference) => Value::Reference(reference),
+                    comms::Value::FreeVariable => Value::FreeVariable(address),
                     comms::Value::Structure(f, terms) => Value::Structure(
                         f,
                         (1..)
@@ -844,11 +804,6 @@ trait ReadWriteExt: Sized + Read + Write {
                 }
 
                 match value {
-                    Value::Reference(reference) => {
-                        if reference != deref_address {
-                            values_to_get.push(reference);
-                        }
-                    }
                     Value::Structure(_, terms) => {
                         for term in terms.as_ref().iter().copied() {
                             values_to_get.push(term);
@@ -858,7 +813,10 @@ trait ReadWriteExt: Sized + Read + Write {
                         values_to_get.push(head);
                         values_to_get.push(tail);
                     }
-                    Value::Constant(_) | Value::Integer(_) | Value::Error(_) => {}
+                    Value::FreeVariable(_)
+                    | Value::Constant(_)
+                    | Value::Integer(_)
+                    | Value::Error(_) => {}
                 }
             }
         }

@@ -8,7 +8,7 @@ use super::{
         structure_iteration, IntegerEvaluationOutputLayout, MemoryError, OutOfMemory,
         UnificationError,
     },
-    Heap, ReferenceOrValue, RegisterBlock,
+    Heap, MaybeFree, RegisterBlock,
 };
 
 #[derive(Clone, Copy)]
@@ -194,7 +194,7 @@ impl<'me, 'memory> MachineState<'me, 'memory> {
             .memory
             .get_value(self.machine.registers.load(register_index).unwrap())?;
 
-        let ReferenceOrValue::Value(super::Value::Integer { sign, le_bytes, .. }) = value else { return Err(SystemCallError::UnificationFailure) };
+        let MaybeFree::BoundTo(super::Value::Integer { sign, le_bytes, .. }) = value else { return Err(SystemCallError::UnificationFailure) };
 
         let mut le_bytes = le_bytes.into_iter();
 

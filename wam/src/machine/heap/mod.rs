@@ -164,6 +164,13 @@ pub enum BadValueType {
     },
 }
 
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
+pub enum MaybeFree<V> {
+    FreeVariable,
+    BoundTo(V),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 pub enum ValueType {
@@ -1360,7 +1367,30 @@ impl<T: fmt::Debug + BaseTuple + TupleDataInfo + TupleTermsInfo + TupleNextFreeS
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
-struct ReferenceValue(Address);
+struct ReferenceValue(MaybeFree<Address>);
+
+impl ReferenceValue {
+    fn address(self) -> Option<Address> {
+        match self.0 {
+            MaybeFree::FreeVariable => None,
+            MaybeFree::BoundTo(reference) => Some(reference),
+        }
+    }
+
+    fn assert_is_free(self) -> Result<(), Address> {
+        match self.0 {
+            MaybeFree::FreeVariable => Ok(()),
+            MaybeFree::BoundTo(reference) => Err(reference),
+        }
+    }
+
+    fn assert_is_bound<E>(self, err: impl FnOnce() -> E) -> Result<Address, E> {
+        match self.0 {
+            MaybeFree::FreeVariable => Err(err()),
+            MaybeFree::BoundTo(value) => Ok(value),
+        }
+    }
+}
 
 impl BaseTuple for ReferenceValue {
     const VALUE_TYPE: ValueType = ValueType::Reference;
@@ -1657,12 +1687,6 @@ pub enum ValueHead {
     Integer { sign: basic_types::IntegerSign },
 }
 
-#[derive(Debug)]
-pub enum ReferenceOrValueHead {
-    Reference(Address),
-    Value(ValueHead),
-}
-
 #[derive(Copy, Clone)]
 pub struct IntegerLeBytes<'a>(&'a [TupleWord]);
 
@@ -1756,34 +1780,25 @@ impl<'a> Value<'a> {
     }
 }
 
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
-pub enum ReferenceOrValue<'a> {
-    Reference(Address),
-    Value(Value<'a>),
-}
-
-impl<'a> ReferenceOrValue<'a> {
-    pub fn head(self) -> ReferenceOrValueHead {
+impl<'a> MaybeFree<Value<'a>> {
+    pub fn head(self) -> MaybeFree<ValueHead> {
         match self {
-            ReferenceOrValue::Reference(reference) => ReferenceOrValueHead::Reference(reference),
-            ReferenceOrValue::Value(value) => ReferenceOrValueHead::Value(value.head()),
+            MaybeFree::FreeVariable => MaybeFree::FreeVariable,
+            MaybeFree::BoundTo(value) => MaybeFree::BoundTo(value.head()),
         }
     }
 
     pub fn into_comms(self) -> comms::Value<TermsList<'a>, IntegerLeBytes<'a>> {
         match self {
-            ReferenceOrValue::Reference(reference) => {
-                comms::Value::Reference(reference.into_inner())
-            }
-            ReferenceOrValue::Value(Value::Structure(Functor(f), _, terms)) => {
+            MaybeFree::FreeVariable => comms::Value::FreeVariable,
+            MaybeFree::BoundTo(Value::Structure(Functor(f), _, terms)) => {
                 comms::Value::Structure(f, terms)
             }
-            ReferenceOrValue::Value(Value::List(head, tail)) => {
+            MaybeFree::BoundTo(Value::List(head, tail)) => {
                 comms::Value::List(head.map(Address::into_inner), tail.map(Address::into_inner))
             }
-            ReferenceOrValue::Value(Value::Constant(Constant(c))) => comms::Value::Constant(c),
-            ReferenceOrValue::Value(Value::Integer { sign, le_bytes }) => comms::Value::Integer {
+            MaybeFree::BoundTo(Value::Constant(Constant(c))) => comms::Value::Constant(c),
+            MaybeFree::BoundTo(Value::Integer { sign, le_bytes }) => comms::Value::Integer {
                 sign: sign.into_comms(),
                 le_bytes,
             },
@@ -2048,22 +2063,20 @@ impl<'m> Heap<'m> {
 
     fn new_value<T: Tuple + DebugNewTuple, D>(
         &mut self,
-        factory: impl FnOnce(Address) -> T,
+        head: T,
         terms: T::InitialTerms<'_>,
         data: T::InitialData<'_>,
         required_info: fn(TupleLayout<T>) -> D,
     ) -> Result<Result<D, OutOfMemory>, MemoryError> {
-        let Some((address, registry_entry)) = self.registry.new_registry_entry() else {
+        let Some((registry_address, registry_entry)) = self.registry.new_registry_entry() else {
             return Ok(Err(OutOfMemory::OutOfRegistryEntries));
         };
 
         let tuple_address = self.tuple_memory_end;
 
-        let value = factory(address);
+        log_trace!("New value at {}: {:?}", tuple_address, head);
 
-        log_trace!("New value at {}: {:?}", tuple_address, value);
-
-        let Ok(tuple_layout) = value.encode(address, &mut self.tuple_memory, tuple_address, terms, data) else {
+        let Ok(tuple_layout) = head.encode(registry_address, &mut self.tuple_memory, tuple_address, terms, data) else {
             return Ok(Err(OutOfMemory::OutOfTupleSpace));
         };
 
@@ -2078,14 +2091,14 @@ impl<'m> Heap<'m> {
             is_unified_with: None,
         });
 
-        self.mark_moved_value(Some(address))?;
+        self.mark_moved_value(Some(registry_address))?;
 
         Ok(Ok(required_info(tuple_layout)))
     }
 
     pub fn new_variable(&mut self) -> Result<Result<Address, OutOfMemory>, MemoryError> {
         self.new_value(
-            ReferenceValue,
+            ReferenceValue(MaybeFree::FreeVariable),
             NoTerms,
             NoData,
             TupleLayout::registry_address,
@@ -2098,7 +2111,7 @@ impl<'m> Heap<'m> {
         n: Arity,
     ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
         self.new_value(
-            |_| StructureValue(f, n),
+            StructureValue(f, n),
             FillWithNone,
             NoData,
             TupleLayout::registry_address,
@@ -2107,7 +2120,7 @@ impl<'m> Heap<'m> {
 
     pub fn new_list(&mut self) -> Result<Result<Address, OutOfMemory>, MemoryError> {
         self.new_value(
-            |_| ListValue,
+            ListValue,
             FillWithNone,
             NoData,
             TupleLayout::registry_address,
@@ -2119,7 +2132,7 @@ impl<'m> Heap<'m> {
         c: Constant,
     ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
         self.new_value(
-            |_| ConstantValue(c),
+            ConstantValue(c),
             NoTerms,
             NoData,
             TupleLayout::registry_address,
@@ -2130,15 +2143,12 @@ impl<'m> Heap<'m> {
         &mut self,
         LongInteger { sign, words }: LongInteger<'_>,
     ) -> Result<Result<Address, OutOfMemory>, MemoryError> {
+        let words_count = IntegerValue::words_count(words);
         self.new_value(
-            |_| {
-                let words_count = IntegerValue::words_count(words);
-
-                IntegerValue {
-                    sign,
-                    words_count,
-                    words_usage: words_count,
-                }
+            IntegerValue {
+                sign,
+                words_count,
+                words_usage: words_count,
             },
             NoTerms,
             IntegerWords { words },
@@ -2151,13 +2161,11 @@ impl<'m> Heap<'m> {
         words_count: TupleAddress,
     ) -> Result<Result<IntegerEvaluationOutputLayout, OutOfMemory>, MemoryError> {
         self.new_value(
-            |_| {
-                IntegerEvaluationOutput(IntegerValue {
-                    sign: IntegerSign::Zero,
-                    words_count,
-                    words_usage: words_count,
-                })
-            },
+            IntegerEvaluationOutput(IntegerValue {
+                sign: IntegerSign::Zero,
+                words_count,
+                words_usage: words_count,
+            }),
             NoTerms,
             FillWithZero,
             IntegerEvaluationOutputLayout::new,
@@ -2176,10 +2184,15 @@ impl<'m> Heap<'m> {
         self.new_integer_output(words_count)
     }
 
-    pub fn get_value(
+    pub fn get_value(&self, address: Address) -> Result<(Address, MaybeFree<Value>), MemoryError> {
+        self.get_value_with_tuple_address(address)
+            .map(|(address, _, value)| (address, value))
+    }
+
+    fn get_value_with_tuple_address(
         &self,
         mut address: Address,
-    ) -> Result<(Address, ReferenceOrValue), MemoryError> {
+    ) -> Result<(Address, TupleAddress, MaybeFree<Value>), MemoryError> {
         loop {
             log_trace!("Looking up memory at {}", address);
             let registry_entry = self.registry.get(address)?;
@@ -2193,15 +2206,15 @@ impl<'m> Heap<'m> {
                             registry_entry.tuple_address,
                         )?;
 
-                    if reference_address != address {
-                        address = reference_address;
-                        continue;
+                    match reference_address {
+                        MaybeFree::BoundTo(reference_address) => {
+                            address = reference_address;
+                            continue;
+                        }
+                        MaybeFree::FreeVariable => {
+                            (metadata.registry_address, MaybeFree::FreeVariable)
+                        }
                     }
-
-                    (
-                        metadata.registry_address,
-                        ReferenceOrValue::Reference(reference_address),
-                    )
                 }
                 ValueType::Structure => {
                     let (StructureValue(f, n), metadata) =
@@ -2213,7 +2226,7 @@ impl<'m> Heap<'m> {
 
                     (
                         metadata.registry_address,
-                        ReferenceOrValue::Value(Value::Structure(
+                        MaybeFree::BoundTo(Value::Structure(
                             f,
                             n,
                             self.tuple_memory
@@ -2238,7 +2251,7 @@ impl<'m> Heap<'m> {
 
                     (
                         metadata.registry_address,
-                        ReferenceOrValue::Value(Value::List(head, tail)),
+                        MaybeFree::BoundTo(Value::List(head, tail)),
                     )
                 }
                 ValueType::Constant => {
@@ -2250,7 +2263,7 @@ impl<'m> Heap<'m> {
 
                     (
                         metadata.registry_address,
-                        ReferenceOrValue::Value(Value::Constant(c)),
+                        MaybeFree::BoundTo(Value::Constant(c)),
                     )
                 }
                 ValueType::Integer => {
@@ -2262,7 +2275,7 @@ impl<'m> Heap<'m> {
 
                     (
                         metadata.registry_address,
-                        ReferenceOrValue::Value(Value::Integer {
+                        MaybeFree::BoundTo(Value::Integer {
                             sign: integer.sign,
                             le_bytes: IntegerLeBytes(
                                 self.tuple_memory.get(metadata.data.into_address_range())?,
@@ -2289,7 +2302,7 @@ impl<'m> Heap<'m> {
 
             log_trace!("Value: {:?}", value);
 
-            break Ok((address, value));
+            break Ok((address, registry_entry.tuple_address, value));
         }
     }
 
@@ -2423,35 +2436,24 @@ impl<'m> Heap<'m> {
         Ok((reference, entry.tuple_address))
     }
 
-    fn verify_is_free_variable(&self, address: Address) -> Result<TupleAddress, MemoryError> {
-        let (ReferenceValue(reference), tuple_address) = self.verify_is_reference(address)?;
-
-        if reference == address {
-            Ok(tuple_address)
-        } else {
-            Err(MemoryError::NotAFreeVariable { address, reference })
-        }
-    }
-
     pub fn bind_variable_to_value(
         &mut self,
-        variable_address: Address,
+        address: Address,
         value_address: Address,
     ) -> Result<Result<(), OutOfMemory>, MemoryError> {
-        log_trace!(
-            "Binding memory {} to value at {}",
-            variable_address,
-            value_address
-        );
+        log_trace!("Binding memory {} to value at {}", address, value_address);
 
-        let tuple_address = self.verify_is_free_variable(variable_address)?;
+        let (reference, tuple_address) = self.verify_is_reference(address)?;
+        reference
+            .assert_is_free()
+            .map_err(|reference| MemoryError::NotAFreeVariable { address, reference })?;
 
         self.mark_moved_value(Some(value_address))?;
 
-        match self.add_variable_to_trail(variable_address, tuple_address) {
+        match self.add_variable_to_trail(address, tuple_address) {
             Ok(Ok(())) => {
-                ReferenceValue(value_address).encode(
-                    variable_address,
+                ReferenceValue(MaybeFree::BoundTo(value_address)).encode(
+                    address,
                     &mut self.tuple_memory,
                     tuple_address,
                     NoTerms,
@@ -2464,21 +2466,6 @@ impl<'m> Heap<'m> {
         }
     }
 
-    pub fn bind_variables(
-        &mut self,
-        a1: Address,
-        a2: Address,
-    ) -> Result<Result<(), OutOfMemory>, MemoryError> {
-        let t1 = self.verify_is_free_variable(a1)?;
-        let t2 = self.verify_is_free_variable(a2)?;
-
-        if t1 < t2 {
-            self.bind_variable_to_value(a2, a1)
-        } else {
-            self.bind_variable_to_value(a1, a2)
-        }
-    }
-
     pub fn unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationError> {
         let result = self.do_unify(a1, a2);
         self.registry.clear_unification();
@@ -2487,8 +2474,8 @@ impl<'m> Heap<'m> {
 
     fn do_unify(&mut self, a1: Address, a2: Address) -> Result<(), UnificationError> {
         log_trace!("Unifying {} and {}", a1, a2);
-        let (a1, v1) = self.get_value(a1)?;
-        let (a2, v2) = self.get_value(a2)?;
+        let (a1, ta1, v1) = self.get_value_with_tuple_address(a1)?;
+        let (a2, ta2, v2) = self.get_value_with_tuple_address(a2)?;
         log_trace!("Resolved to {:?} @ {} and {:?} @ {}", v1, a1, v2, a2);
 
         let pairs = ((a1, v1), (a2, v2));
@@ -2497,24 +2484,28 @@ impl<'m> Heap<'m> {
             Ok(())
         } else {
             match pairs {
-                ((a1, ReferenceOrValue::Reference(_)), (a2, ReferenceOrValue::Reference(_))) => {
-                    self.bind_variables(a1, a2)??;
+                ((a1, MaybeFree::FreeVariable), (a2, MaybeFree::FreeVariable)) => {
+                    if ta1 < ta2 {
+                        self.bind_variable_to_value(a2, a1)??
+                    } else {
+                        self.bind_variable_to_value(a1, a2)??
+                    }
                     Ok(())
                 }
                 (
-                    (variable_address, ReferenceOrValue::Reference(_)),
-                    (value_address, ReferenceOrValue::Value(_)),
+                    (variable_address, MaybeFree::FreeVariable),
+                    (value_address, MaybeFree::BoundTo(_)),
                 )
                 | (
-                    (value_address, ReferenceOrValue::Value(_)),
-                    (variable_address, ReferenceOrValue::Reference(_)),
+                    (value_address, MaybeFree::BoundTo(_)),
+                    (variable_address, MaybeFree::FreeVariable),
                 ) => {
                     self.bind_variable_to_value(variable_address, value_address)??;
                     Ok(())
                 }
                 (
-                    (a1, ReferenceOrValue::Value(Value::Structure(f1, n1, _))),
-                    (a2, ReferenceOrValue::Value(Value::Structure(f2, n2, _))),
+                    (a1, MaybeFree::BoundTo(Value::Structure(f1, n1, _))),
+                    (a2, MaybeFree::BoundTo(Value::Structure(f2, n2, _))),
                 ) => {
                     if self.registry.is_already_unified_with(a1, a2)? {
                         Ok(())
@@ -2533,8 +2524,8 @@ impl<'m> Heap<'m> {
                     }
                 }
                 (
-                    (a1, ReferenceOrValue::Value(Value::List(_, _))),
-                    (a2, ReferenceOrValue::Value(Value::List(_, _))),
+                    (a1, MaybeFree::BoundTo(Value::List(_, _))),
+                    (a2, MaybeFree::BoundTo(Value::List(_, _))),
                 ) => {
                     if self.registry.is_already_unified_with(a1, a2)? {
                         Ok(())
@@ -2551,8 +2542,8 @@ impl<'m> Heap<'m> {
                     }
                 }
                 (
-                    (_, ReferenceOrValue::Value(Value::Constant(c1))),
-                    (_, ReferenceOrValue::Value(Value::Constant(c2))),
+                    (_, MaybeFree::BoundTo(Value::Constant(c1))),
+                    (_, MaybeFree::BoundTo(Value::Constant(c2))),
                 ) => {
                     if c1 == c2 {
                         Ok(())
@@ -2563,7 +2554,7 @@ impl<'m> Heap<'m> {
                 (
                     (
                         _,
-                        ReferenceOrValue::Value(Value::Integer {
+                        MaybeFree::BoundTo(Value::Integer {
                             sign: s1,
                             le_bytes: b1,
                             ..
@@ -2571,7 +2562,7 @@ impl<'m> Heap<'m> {
                     ),
                     (
                         _,
-                        ReferenceOrValue::Value(Value::Integer {
+                        MaybeFree::BoundTo(Value::Integer {
                             sign: s2,
                             le_bytes: b2,
                         }),
@@ -2584,7 +2575,7 @@ impl<'m> Heap<'m> {
                     }
                 }
 
-                ((_, ReferenceOrValue::Value(_)), (_, ReferenceOrValue::Value(_))) => {
+                ((_, MaybeFree::BoundTo(_)), (_, MaybeFree::BoundTo(_))) => {
                     Err(UnificationError::UnificationFailure)
                 }
             }
@@ -2607,7 +2598,7 @@ impl<'m> Heap<'m> {
 
         Ok(self
             .new_value(
-                |_| Environment {
+                Environment {
                     continuation_environment,
                     continuation_point,
                     number_of_active_permanent_variables: number_of_permanent_variables,
@@ -2702,7 +2693,7 @@ impl<'m> Heap<'m> {
 
         Ok(self
             .new_value(
-                |_| ChoicePoint {
+                ChoicePoint {
                     number_of_saved_registers,
                     current_environment,
                     continuation_point,
@@ -2821,7 +2812,7 @@ impl<'m> Heap<'m> {
 
     fn add_variable_to_trail(
         &mut self,
-        variable: Address,
+        address: Address,
         tuple_address: TupleAddress,
     ) -> Result<Result<(), OutOfMemory>, MemoryError> {
         let is_unconditional = self
@@ -2835,14 +2826,14 @@ impl<'m> Heap<'m> {
             return Ok(Ok(()));
         }
 
-        self.mark_moved_value(Some(variable))?;
+        self.mark_moved_value(Some(address))?;
         self.mark_moved_value(self.trail_top)?;
 
         let next_trail_item = self.trail_top;
         Ok(self
             .new_value(
-                |_| TrailVariable {
-                    variable,
+                TrailVariable {
+                    variable: address,
                     next_trail_item,
                 },
                 NoTerms,
@@ -2896,11 +2887,11 @@ impl<'m> Heap<'m> {
                 entry.tuple_address,
             )?;
 
-            log_trace!("Resetting Reference @ {}", trail_item.variable);
+            log_trace!("Freeing Variable @ {}", trail_item.variable);
 
             let (_, item_tuple_address) = self.verify_is_reference(trail_item.variable)?;
 
-            ReferenceValue(trail_item.variable).encode(
+            ReferenceValue(MaybeFree::BoundTo(trail_item.variable)).encode(
                 trail_item.variable,
                 &mut self.tuple_memory,
                 item_tuple_address,
@@ -2989,18 +2980,14 @@ impl<'m> Heap<'m> {
 
             return Ok(match &registry_entry.value_type {
                 ValueType::Reference => {
-                    let (ReferenceValue(reference_address), _) =
-                        ReferenceValue::decode_and_verify_address(
-                            &self.tuple_memory,
-                            address,
-                            registry_entry.tuple_address,
-                        )?;
+                    let (reference, _) = ReferenceValue::decode_and_verify_address(
+                        &self.tuple_memory,
+                        address,
+                        registry_entry.tuple_address,
+                    )?;
 
-                    if reference_address == address {
-                        return Err(ExpressionEvaluationError::UnboundVariable(address).into());
-                    }
-
-                    address = reference_address;
+                    address = reference
+                        .assert_is_bound(|| ExpressionEvaluationError::UnboundVariable(address))?;
                     continue;
                 }
                 ValueType::Integer => {
@@ -3329,15 +3316,16 @@ impl<'m> Heap<'m> {
 
         let term_address_range = match registry_entry.value_type {
             ValueType::Reference => {
-                let (ReferenceValue(reference_address), metadata) =
-                    ReferenceValue::decode_and_verify_address(
-                        &self.tuple_memory,
-                        item_to_scan,
-                        registry_entry.tuple_address,
-                    )?;
+                let (reference, metadata) = ReferenceValue::decode_and_verify_address(
+                    &self.tuple_memory,
+                    item_to_scan,
+                    registry_entry.tuple_address,
+                )?;
 
-                self.registry
-                    .add_item_to_be_scanned(reference_address, next_list_head)?;
+                if let Some(reference_address) = reference.address() {
+                    self.registry
+                        .add_item_to_be_scanned(reference_address, next_list_head)?;
+                }
 
                 metadata.terms.into_address_range()
             }

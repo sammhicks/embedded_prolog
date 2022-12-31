@@ -216,7 +216,7 @@ pub enum IntegerSign {
 #[derive(minicbor::Encode, minicbor::Decode)]
 pub enum Value<Terms, IntegerLeBytes> {
     #[n(0)]
-    Reference(#[n(0)] Address),
+    FreeVariable,
     #[n(1)]
     Structure(#[n(0)] Functor, #[n(1)] Terms),
     #[n(2)]
