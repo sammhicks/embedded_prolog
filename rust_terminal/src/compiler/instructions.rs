@@ -2,6 +2,8 @@ use std::fmt;
 
 use num_bigint::BigInt;
 
+use comms_derive::{CommsFromInto, HexNewType};
+
 #[derive(Debug, Clone, Copy)]
 pub struct Ai {
     pub ai: u8,
@@ -48,13 +50,26 @@ impl fmt::Display for Yn {
 }
 
 pub type Word = u32;
-pub type Functor = u16;
-pub type Constant = u16;
 pub type ShortInteger = i16;
 pub type IntegerWord = u32;
 pub type Arity = u8;
 pub type ProgramCounter = u16;
 pub type SystemCallIndex = u8;
+
+#[derive(Clone, Copy, PartialEq, Eq, HexNewType, CommsFromInto)]
+#[repr(transparent)]
+pub struct Functor(pub u16);
+
+#[derive(Clone, Copy, PartialEq, Eq, HexNewType, CommsFromInto)]
+#[repr(transparent)]
+pub struct Constant(pub u16);
+
+impl std::borrow::Borrow<Functor> for Constant {
+    fn borrow(&self) -> &Functor {
+        //Safety: both Functor and Constant are transparent
+        unsafe { std::mem::transmute(self) }
+    }
+}
 
 #[derive(Debug)]
 #[repr(i8)]
@@ -311,6 +326,18 @@ impl Instruction {
             }
         }
 
+        impl HalfWord for Functor {
+            fn encode(self) -> [u8; 2] {
+                self.0.encode()
+            }
+        }
+
+        impl HalfWord for Constant {
+            fn encode(self) -> [u8; 2] {
+                self.0.encode()
+            }
+        }
+
         impl HalfWord for i16 {
             fn encode(self) -> [u8; 2] {
                 self.to_be_bytes()
@@ -356,7 +383,7 @@ impl Instruction {
             short_opcode: u8,
             long_opcode: u8,
             Ai { ai }: Ai,
-            f: Functor,
+            Functor(f): Functor,
             n: Arity,
         ) -> ABC<std::iter::Once<WordBytes>, std::array::IntoIter<WordBytes, 2>, C> {
             match u8::try_from(f) {

@@ -1,6 +1,6 @@
 use super::{
     log_debug, log_info,
-    machine::{Address, ExecutionFailure, Instructions, SystemCallEncoder, SystemCalls, TermsList},
+    machine::{ExecutionFailure, Instructions, SystemCallEncoder, SystemCalls, TermsList},
     ErrorResponse, IoError, SerialConnection, SerialReadWrite,
 };
 
@@ -82,11 +82,11 @@ impl<'m, 's, Serial: SerialReadWrite, Calls: SystemCalls> Device<'m, 's, Serial,
                         return Ok(UnhandledCommand::SubmitQuery { code_submission })
                     }
                     comms::Command::LookupMemory { address } => {
-                        match machine.lookup_memory(Address::new(address)) {
+                        match machine.lookup_memory(address.into()) {
                             Ok((address, value)) => {
                                 self.serial_connection.encode(
                                     comms::LookupMemoryResponse::MemoryValue {
-                                        address: address.into_inner(),
+                                        address: address.into(),
                                         value: value.into_comms(),
                                     },
                                 )?;

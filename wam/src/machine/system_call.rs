@@ -1,5 +1,7 @@
 use core::{fmt, marker::PhantomData};
 
+use comms_derive::HexNewType;
+
 use crate::{log_info, log_trace};
 
 use super::{
@@ -513,27 +515,9 @@ where
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, HexNewType)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct SystemCallIndex(pub u8);
-
-impl fmt::Debug for SystemCallIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SystemCallIndex({})", self)
-    }
-}
-
-impl fmt::Display for SystemCallIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:02X}", self.0)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for SystemCallIndex {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:02X}", self.0)
-    }
-}
 
 pub trait SystemCalls {
     fn count(&self) -> u16;

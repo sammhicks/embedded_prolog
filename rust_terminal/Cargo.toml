@@ -2,7 +2,6 @@
 name = "rust_terminal"
 version = "0.1.0"
 edition = "2021"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -14,8 +13,11 @@ clap = { version = "4.0.29", features = ["derive"] }
 cobs = "0.2.3"
 crossterm = "0.25.0"
 num-bigint = "0.4.3"
+pretty_env_logger = "0.4.0"
 serialport = "4.2.0"
 strsim = "0.10.0"
 thiserror = "1.0.37"
 
 comms = { path = "../comms", features = ["std"] }
+comms_derive = { path = "../comms_derive" }
+wam = { path = "../wam", features = ["logging"] }

@@ -149,8 +149,8 @@ impl ProgramInfo {
         new_info
     }
 
-    pub fn lookup_functor(&self, name: &u16) -> Option<&str> {
-        self.functors.lookup(name)
+    pub fn lookup_functor<Name: Borrow<Functor>>(&self, name: &Name) -> Option<&str> {
+        self.functors.lookup(&name.borrow().0)
     }
 
     fn as_source_cache(&self) -> ProgramInfoSourceCache {
@@ -1303,7 +1303,7 @@ impl<'a, 'i> TokenHandler<ProgramMode> for Assembler<'a, 'i, ProgramMode> {
 
     fn token_sa(&mut self, name: &Name, n: u8, ai: Ai) {
         self.known_variables.insert(ai);
-        let f = self.program_info.functors.get(name.into());
+        let f = Functor(self.program_info.functors.get(name.into()));
         self.instructions
             .push(Instruction::GetStructure { f, n, ai })
     }
@@ -1315,7 +1315,7 @@ impl<'a, 'i> TokenHandler<ProgramMode> for Assembler<'a, 'i, ProgramMode> {
 
     fn token_ca(&mut self, name: &Name, ai: Ai) {
         self.known_variables.insert(ai);
-        let c = self.program_info.functors.get(name.into());
+        let c = Constant(self.program_info.functors.get(name.into()));
         self.instructions.push(Instruction::GetConstant { c, ai })
     }
 
@@ -1344,7 +1344,7 @@ impl<'a, 'i> TokenHandler<ProgramMode> for Assembler<'a, 'i, ProgramMode> {
     }
 
     fn token_c(&mut self, name: &Name) {
-        let c = self.program_info.functors.get(name.into());
+        let c = Constant(self.program_info.functors.get(name.into()));
         self.instructions.push(Instruction::UnifyConstant { c })
     }
 
@@ -1424,7 +1424,7 @@ impl<'a, 'i> TokenHandler<RuleGoalMode> for Assembler<'a, 'i, RuleGoalMode> {
 
     fn token_sa(&mut self, name: &Name, n: u8, ai: Ai) {
         self.known_variables.insert(ai);
-        let f = self.program_info.functors.get(name.into());
+        let f = Functor(self.program_info.functors.get(name.into()));
         self.instructions
             .push(Instruction::PutStructure { f, n, ai })
     }
@@ -1436,7 +1436,7 @@ impl<'a, 'i> TokenHandler<RuleGoalMode> for Assembler<'a, 'i, RuleGoalMode> {
 
     fn token_ca(&mut self, name: &Name, ai: Ai) {
         self.known_variables.insert(ai);
-        let c = self.program_info.functors.get(name.into());
+        let c = Constant(self.program_info.functors.get(name.into()));
         self.instructions.push(Instruction::PutConstant { c, ai })
     }
 
@@ -1465,7 +1465,7 @@ impl<'a, 'i> TokenHandler<RuleGoalMode> for Assembler<'a, 'i, RuleGoalMode> {
     }
 
     fn token_c(&mut self, name: &Name) {
-        let c = self.program_info.functors.get(name.into());
+        let c = Constant(self.program_info.functors.get(name.into()));
         self.instructions.push(Instruction::SetConstant { c });
     }
 
@@ -1502,7 +1502,7 @@ impl<'a, 'i> TokenHandler<QueryMode> for Assembler<'a, 'i, QueryMode> {
 
     fn token_sa(&mut self, name: &Name, n: u8, ai: Ai) {
         self.known_variables.insert(ai);
-        let f = self.program_info.functors.get(name.into());
+        let f = Functor(self.program_info.functors.get(name.into()));
         self.instructions
             .push(Instruction::PutStructure { f, n, ai })
     }
@@ -1514,7 +1514,7 @@ impl<'a, 'i> TokenHandler<QueryMode> for Assembler<'a, 'i, QueryMode> {
 
     fn token_ca(&mut self, name: &Name, ai: Ai) {
         self.known_variables.insert(ai);
-        let c = self.program_info.functors.get(name.into());
+        let c = Constant(self.program_info.functors.get(name.into()));
         self.instructions.push(Instruction::PutConstant { c, ai })
     }
 
@@ -1544,7 +1544,7 @@ impl<'a, 'i> TokenHandler<QueryMode> for Assembler<'a, 'i, QueryMode> {
     }
 
     fn token_c(&mut self, name: &Name) {
-        let c = self.program_info.functors.get(name.into());
+        let c = Constant(self.program_info.functors.get(name.into()));
         self.instructions.push(Instruction::SetConstant { c });
     }
 

@@ -1,5 +1,9 @@
 use core::{fmt, num::NonZeroU16};
 
+use comms_derive::{CommsFromInto, HexNewType};
+
+use crate::CommaSeparated;
+
 pub trait NoneRepresents: fmt::Display {
     const NONE_REPRESENTS: &'static str;
 }
@@ -26,101 +30,29 @@ impl<T: defmt::Format + NoneRepresents> defmt::Format for OptionDisplay<T> {
 }
 
 /// A Register Index
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, HexNewType)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct Xn {
     pub xn: u8,
 }
 
-impl fmt::Debug for Xn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Xn({})", self)
-    }
-}
-
-impl fmt::Display for Xn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:02X}", self.xn)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for Xn {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:02X}", self.xn)
-    }
-}
-
 /// An Environment "Register Index", i.e. the nth variable on the stack
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, HexNewType)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct Yn {
     pub yn: u8,
 }
 
-impl fmt::Debug for Yn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Yn({})", self)
-    }
-}
-
-impl fmt::Display for Yn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:02X}", self.yn)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for Yn {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:02X}", self.yn)
-    }
-}
-
 /// An Argument Index. Functionally the same as a [Register Index](Xn)
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, HexNewType)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct Ai {
     pub ai: u8,
 }
 
-impl fmt::Debug for Ai {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Ai({})", self)
-    }
-}
-
-impl fmt::Display for Ai {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:02X}", self.ai)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for Ai {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:02X}", self.ai)
-    }
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, HexNewType)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct RegisterIndex(pub u8);
-
-impl fmt::Debug for RegisterIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "RegisterIndex({})", self)
-    }
-}
-
-impl fmt::Display for RegisterIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:02X}", self.0)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for RegisterIndex {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:02X}", self.0)
-    }
-}
 
 impl From<Xn> for RegisterIndex {
     fn from(Xn { xn }: Xn) -> Self {
@@ -134,49 +66,13 @@ impl From<Ai> for RegisterIndex {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, HexNewType, CommsFromInto)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct Functor(pub u16);
 
-impl fmt::Debug for Functor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Functor({})", self)
-    }
-}
-
-impl fmt::Display for Functor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04X}", self.0)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for Functor {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:04X}", self.0)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, HexNewType, CommsFromInto)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct Arity(pub u8);
-
-impl fmt::Debug for Arity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Arity({})", self)
-    }
-}
-
-impl fmt::Display for Arity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:02X}", self.0)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for Arity {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:02X}", self.0)
-    }
-}
 
 impl core::ops::SubAssign for Arity {
     fn sub_assign(&mut self, Arity(n): Self) {
@@ -188,27 +84,9 @@ impl Arity {
     pub const ZERO: Self = Self(0);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, HexNewType, CommsFromInto)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct Constant(pub u16);
-
-impl fmt::Debug for Constant {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Constant({})", self)
-    }
-}
-
-impl fmt::Display for Constant {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04X}", self.0)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for Constant {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:04X}", self.0)
-    }
-}
 
 impl Constant {
     pub fn from_le_bytes(bytes: [u8; 2]) -> Self {
@@ -353,27 +231,6 @@ impl<'memory> LongInteger<'memory> {
     }
 }
 
-struct DisplayLongIntegerWords<'memory>(&'memory [[u8; 4]]);
-
-impl<'memory> fmt::Display for DisplayLongIntegerWords<'memory> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for &byte in self.0.iter().flatten().rev() {
-            write!(f, "{:02X}", byte)?;
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl<'memory> defmt::Format for DisplayLongIntegerWords<'memory> {
-    fn format(&self, fmt: defmt::Formatter) {
-        for &byte in self.0.iter().flatten().rev() {
-            defmt::write!(fmt, "{:02X}", byte);
-        }
-    }
-}
-
 impl<'memory> fmt::Debug for LongInteger<'memory> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "LongInteger({})", self)
@@ -384,7 +241,12 @@ impl<'memory> fmt::Display for LongInteger<'memory> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let &Self { sign, words } = self;
 
-        write!(f, "{}{}", sign, DisplayLongIntegerWords(words))
+        write!(
+            f,
+            "{}{:02X}",
+            sign,
+            CommaSeparated(words.iter().flatten().rev())
+        )
     }
 }
 
@@ -393,31 +255,18 @@ impl<'memory> defmt::Format for LongInteger<'memory> {
     fn format(&self, fmt: defmt::Formatter) {
         let &Self { sign, words } = self;
 
-        defmt::write!(fmt, "{}{}", sign, DisplayLongIntegerWords(words))
+        defmt::write!(
+            fmt,
+            "{}{:02X}",
+            sign,
+            CommaSeparated(words.iter().flatten().rev())
+        )
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, HexNewType)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct ProgramCounter(NonZeroU16);
-
-impl fmt::Debug for ProgramCounter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ProgramCounter({})", self)
-    }
-}
-
-impl fmt::Display for ProgramCounter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04X}", self.into_word())
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for ProgramCounter {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:04X}", self.into_word())
-    }
-}
 
 impl NoneRepresents for ProgramCounter {
     const NONE_REPRESENTS: &'static str = "End of Program";

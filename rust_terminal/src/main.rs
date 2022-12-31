@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     io::{Read, Write},
-    net::TcpStream,
     num::NonZeroU16,
     path::PathBuf,
     rc::Rc,
@@ -11,7 +10,6 @@ use std::{
 use anyhow::Context;
 use arcstr::ArcStr;
 use clap::Parser;
-use comms::minicbor;
 use crossterm::{
     event::{Event, KeyCode, KeyEvent, KeyEventKind},
     style::{Print, Stylize},
@@ -20,17 +18,23 @@ use crossterm::{
 use num_bigint::BigInt;
 use serialport::{SerialPortType, UsbPortInfo};
 
-mod compiler;
-use compiler::{Arity, Functor, ProgramInfo, Query, Term};
+use comms::minicbor;
+use comms_derive::{CommsFromInto, HexNewType};
 
-type Address = NonZeroU16;
+mod compiler;
+use compiler::{Arity, Constant, Functor, ProgramInfo, Query, Term};
+
+mod simulator;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, HexNewType, CommsFromInto)]
+pub struct Address(pub NonZeroU16);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Value {
     FreeVariable(Address),
     Structure(Functor, Rc<[Address]>),
     List(Address, Address),
-    Constant(Functor),
+    Constant(Constant),
     Integer(BigInt),
     Error(String),
 }
@@ -54,12 +58,14 @@ where
     }
 }
 
-struct DisplayFunctorName<'a> {
+struct DisplayFunctorName<'a, Name: std::borrow::Borrow<Functor>> {
     answer: &'a Answer<'a>,
-    name: &'a Functor,
+    name: &'a Name,
 }
 
-impl<'a> fmt::Display for DisplayFunctorName<'a> {
+impl<'a, Name: fmt::Display + std::borrow::Borrow<Functor>> fmt::Display
+    for DisplayFunctorName<'a, Name>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.answer.program_info.lookup_functor(self.name) {
             Some(name) => write!(f, "{name}"),
@@ -582,7 +588,7 @@ impl<'b, C> minicbor::Decode<'b, C> for ErrorMessage {
     }
 }
 
-type SolutionRegisters = Vec<Option<Address>>;
+type SolutionRegisters = Vec<Option<comms::Address>>;
 
 #[derive(Debug)]
 enum ReportStatusResponse {
@@ -626,9 +632,20 @@ type GetSystemCallsResponse = comms::GetSystemCallsResponse<Vec<(String, Arity)>
 #[derive(Debug)]
 struct StructureTerms(Vec<Option<Address>>);
 
+impl StructureTerms {
+    fn from_comms(terms: Vec<Option<comms::Address>>) -> Self {
+        Self(
+            terms
+                .into_iter()
+                .map(|address| address.map(Address::from))
+                .collect(),
+        )
+    }
+}
+
 impl<'b, C> minicbor::Decode<'b, C> for StructureTerms {
     fn decode(d: &mut minicbor::Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
-        d.decode_with(ctx).map(Self)
+        d.decode_with(ctx).map(Self::from_comms)
     }
 }
 
@@ -726,35 +743,43 @@ trait ReadWriteExt: Sized + Read + Write {
     }
 
     fn get_value(&mut self, address: Address) -> anyhow::Result<(Address, Value)> {
-        self.encode_command(comms::Command::LookupMemory { address })?;
+        self.encode_command(comms::Command::LookupMemory {
+            address: address.into(),
+        })?;
         match self.decode_response()? {
             Err(ErrorMessage(error)) => Ok((address, Value::Error(error))),
             Ok(LookupMemoryResponse::MemoryValue { address, value }) => {
+                let address = Address::from(address);
                 let value = match value {
                     comms::Value::FreeVariable => Value::FreeVariable(address),
-                    comms::Value::Structure(f, terms) => Value::Structure(
-                        f,
-                        (1..)
-                            .zip(terms.0.iter().copied())
-                            .map(|(index, term)| {
-                                term.with_context(|| {
-                                    format!(
-                                        "Term {} of structure {}/{} at {:X} is not set",
-                                        index,
-                                        f,
-                                        terms.0.len(),
-                                        address
-                                    )
+                    comms::Value::Structure(f, terms) => {
+                        let f = Functor::from(f);
+                        Value::Structure(
+                            f,
+                            (1..)
+                                .zip(terms.0.iter().copied())
+                                .map(|(index, term)| {
+                                    term.with_context(|| {
+                                        format!(
+                                            "Term {} of structure {}/{} at {} is not set",
+                                            index,
+                                            f,
+                                            terms.0.len(),
+                                            address
+                                        )
+                                    })
                                 })
-                            })
-                            .try_collect_vec()?
+                                .try_collect_vec()?
+                                .into(),
+                        )
+                    }
+                    comms::Value::List(head, tail) => Value::List(
+                        head.with_context(|| format!("Head of list at {address} is not set"))?
+                            .into(),
+                        tail.with_context(|| format!("Tail of list at {address} is not set"))?
                             .into(),
                     ),
-                    comms::Value::List(head, tail) => Value::List(
-                        head.with_context(|| format!("Head of list at {:X} is not set", address))?,
-                        tail.with_context(|| format!("Tail of list at {:X} is not set", address))?,
-                    ),
-                    comms::Value::Constant(c) => Value::Constant(c),
+                    comms::Value::Constant(c) => Value::Constant(c.into()),
                     comms::Value::Integer { sign, le_bytes } => {
                         Value::Integer(BigInt::from_bytes_le(
                             match sign {
@@ -781,7 +806,9 @@ trait ReadWriteExt: Sized + Read + Write {
         let solution_registers = (1..)
             .zip(solution_registers.into_iter())
             .map(|(index, solution_register)| {
-                solution_register.with_context(|| format!("Register {} is not set", index))
+                solution_register
+                    .with_context(|| format!("Register {} is not set", index))
+                    .map(Address::from)
             })
             .try_collect_vec()?;
 
@@ -914,14 +941,14 @@ struct Cli {
 }
 
 enum Port {
-    TcpStream(TcpStream),
+    Simulator(simulator::Channels),
     Serial(Box<dyn serialport::SerialPort>),
 }
 
 impl Read for Port {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            Self::TcpStream(stream) => stream.read(buf),
+            Self::Simulator(channels) => channels.read(buf),
             Self::Serial(serial) => serial.read(buf),
         }
     }
@@ -930,20 +957,22 @@ impl Read for Port {
 impl Write for Port {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            Self::TcpStream(stream) => stream.write(buf),
+            Self::Simulator(channels) => channels.write(buf),
             Self::Serial(serial) => serial.write(buf),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            Self::TcpStream(stream) => stream.flush(),
+            Self::Simulator(channels) => channels.flush(),
             Self::Serial(serial) => serial.flush(),
         }
     }
 }
 
 fn main() -> anyhow::Result<()> {
+    pretty_env_logger::init();
+
     let Cli {
         program,
         connect_to_simulator,
@@ -953,8 +982,7 @@ fn main() -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
 
     let mut port = if connect_to_simulator {
-        stdout.execute(PrintLn("Connecting to device"))?;
-        Port::TcpStream(TcpStream::connect("localhost:8080").context("Failed to connect")?)
+        Port::Simulator(simulator::run())
     } else {
         Port::Serial(
             serialport::new(

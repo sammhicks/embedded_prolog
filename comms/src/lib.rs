@@ -4,11 +4,27 @@ use core::{fmt, num::NonZeroU16};
 
 pub use minicbor;
 
-pub type Functor = u16;
-pub type Arity = u8;
-pub type Constant = u16;
+use comms_derive::HexNewType;
 
-pub type Address = NonZeroU16;
+#[derive(HexNewType, minicbor::Encode, minicbor::Decode)]
+#[cfg_attr(feature = "defmt", derive(comms_derive::HexDefmt))]
+#[cbor(transparent)]
+pub struct Functor(#[n(0)] pub u16);
+
+#[derive(HexNewType, minicbor::Encode, minicbor::Decode)]
+#[cfg_attr(feature = "defmt", derive(comms_derive::HexDefmt))]
+#[cbor(transparent)]
+pub struct Arity(#[n(0)] pub u8);
+
+#[derive(HexNewType, minicbor::Encode, minicbor::Decode)]
+#[cfg_attr(feature = "defmt", derive(comms_derive::HexDefmt))]
+#[cbor(transparent)]
+pub struct Constant(#[n(0)] pub u16);
+
+#[derive(HexNewType, minicbor::Encode, minicbor::Decode)]
+#[cfg_attr(feature = "defmt", derive(comms_derive::HexDefmt))]
+#[cbor(transparent)]
+pub struct Address(#[n(0)] pub NonZeroU16);
 
 #[derive(PartialEq, Eq)]
 pub struct Hash(pub sha2::digest::Output<sha2::Sha256>);

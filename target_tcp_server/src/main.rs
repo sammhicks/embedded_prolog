@@ -36,38 +36,6 @@ impl wam::SerialReadWrite for Channels {
     }
 }
 
-#[derive(Default)]
-struct SystemState {
-    value: i32,
-}
-
-impl SystemState {
-    fn hello() {
-        println!("Hello");
-    }
-
-    fn get(&self) -> i32 {
-        self.value
-    }
-
-    fn put(&mut self, value: i32) {
-        self.value = value;
-    }
-
-    fn increment(&mut self) {
-        self.value += 1;
-    }
-}
-
-macro_rules! system_calls {
-    ($($call:ident),*) => {
-        ::wam::system_calls(
-            &[$(&::wam::system_call_handler(stringify!($call), SystemState::$call)),*],
-            SystemState::default(),
-        )
-    };
-}
-
 #[derive(Debug)]
 struct DisplayError(Box<dyn std::error::Error>);
 
@@ -93,7 +61,10 @@ fn main() -> Result<(), DisplayError> {
                 stream: std::io::BufReader::new(stream),
                 read_buffer: Vec::new(),
             }),
-            system_calls: system_calls!(hello, get, put, increment),
+            system_calls: wam::system_calls(
+                &[&wam::system_call_handler("hello", || println!("Hello"))],
+                (),
+            ),
         })
         .run()
         {

@@ -1,5 +1,7 @@
 use core::{fmt, iter::FusedIterator, num::NonZeroU16};
 
+use comms_derive::{CommsFromInto, HexNewType};
+
 use crate::{log_trace, CommaSeparated};
 
 use super::basic_types::{
@@ -184,19 +186,12 @@ pub enum ValueType {
     TrailVariable,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, HexNewType, CommsFromInto)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 #[repr(transparent)]
 pub struct Address(NonZeroU16);
 
 impl Address {
-    pub fn new(n: NonZeroU16) -> Self {
-        Self(n)
-    }
-
-    pub fn into_inner(self) -> NonZeroU16 {
-        self.0
-    }
-
     fn from_word(word: TupleWord) -> Option<Self> {
         NonZeroU16::new(word).map(Self)
     }
@@ -210,65 +205,17 @@ impl Address {
     }
 }
 
-impl fmt::Debug for Address {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Address({})", self)
-    }
-}
-
-impl fmt::Display for Address {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04X}", self.0)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for Address {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:04X}", self.0)
-    }
-}
-
 impl NoneRepresents for Address {
     const NONE_REPRESENTS: &'static str = "NULL";
 }
 
+#[derive(HexNewType)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 pub struct AddressView(u16);
 
-impl fmt::Debug for AddressView {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04X}", self.0)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for AddressView {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:04X}", self.0)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, HexNewType)]
+#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
 struct TupleAddress(u16);
-
-impl fmt::Debug for TupleAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TupleAddress({})", self)
-    }
-}
-
-impl fmt::Display for TupleAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:04X}", self.0)
-    }
-}
-
-#[cfg(feature = "defmt-logging")]
-impl defmt::Format for TupleAddress {
-    fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:04X}", self.0)
-    }
-}
 
 impl core::ops::Add<u16> for TupleAddress {
     type Output = Self;
@@ -714,14 +661,14 @@ pub struct TermsList<'a>(&'a [TupleWord]);
 
 impl<'a> fmt::Debug for TermsList<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{:?}]", CommaSeparated(self.into_iter()))
+        CommaSeparated(self.into_iter()).fmt(f)
     }
 }
 
 #[cfg(feature = "defmt-logging")]
 impl<'a> defmt::Format for TermsList<'a> {
     fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "[{}]", CommaSeparated(self.into_iter()))
+        CommaSeparated(self.into_iter()).format(fmt)
     }
 }
 
@@ -734,7 +681,7 @@ impl<'a, C> minicbor::Encode<C> for TermsList<'a> {
         e.array(self.0.len() as u64)?;
 
         self.into_iter()
-            .try_for_each(|address| e.encode(address.map(Address::into_inner))?.ok())
+            .try_for_each(|address| e.encode(address.map(comms::Address::from))?.ok())
     }
 }
 
@@ -1692,20 +1639,14 @@ pub struct IntegerLeBytes<'a>(&'a [TupleWord]);
 
 impl<'a> fmt::Debug for IntegerLeBytes<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for word in self.0 {
-            write!(f, "{:04x}", word)?;
-        }
-
-        Ok(())
+        CommaSeparated(self.0).fmt(f)
     }
 }
 
 #[cfg(feature = "defmt-logging")]
 impl<'a> defmt::Format for IntegerLeBytes<'a> {
     fn format(&self, fmt: defmt::Formatter) {
-        for word in self.0 {
-            defmt::write!(fmt, "{:04x}", word);
-        }
+        CommaSeparated(self.0).format(fmt)
     }
 }
 
@@ -1791,13 +1732,13 @@ impl<'a> MaybeFree<Value<'a>> {
     pub fn into_comms(self) -> comms::Value<TermsList<'a>, IntegerLeBytes<'a>> {
         match self {
             MaybeFree::FreeVariable => comms::Value::FreeVariable,
-            MaybeFree::BoundTo(Value::Structure(Functor(f), _, terms)) => {
-                comms::Value::Structure(f, terms)
+            MaybeFree::BoundTo(Value::Structure(f, _, terms)) => {
+                comms::Value::Structure(f.into(), terms)
             }
             MaybeFree::BoundTo(Value::List(head, tail)) => {
-                comms::Value::List(head.map(Address::into_inner), tail.map(Address::into_inner))
+                comms::Value::List(head.map(Address::into), tail.map(Address::into))
             }
-            MaybeFree::BoundTo(Value::Constant(Constant(c))) => comms::Value::Constant(c),
+            MaybeFree::BoundTo(Value::Constant(c)) => comms::Value::Constant(c.into()),
             MaybeFree::BoundTo(Value::Integer { sign, le_bytes }) => comms::Value::Integer {
                 sign: sign.into_comms(),
                 le_bytes,
@@ -1831,6 +1772,9 @@ pub enum MemoryError {
     TupleMemory(TupleMemoryError),
     NotAFreeVariable {
         reference: Address,
+        address: Address,
+    },
+    SelfReference {
         address: Address,
     },
     NoEnvironment,
@@ -2208,6 +2152,10 @@ impl<'m> Heap<'m> {
 
                     match reference_address {
                         MaybeFree::BoundTo(reference_address) => {
+                            if address == reference_address {
+                                return Err(MemoryError::SelfReference { address });
+                            }
+
                             address = reference_address;
                             continue;
                         }
@@ -2441,6 +2389,10 @@ impl<'m> Heap<'m> {
         address: Address,
         value_address: Address,
     ) -> Result<Result<(), OutOfMemory>, MemoryError> {
+        if address == value_address {
+            log_trace!("Not binding memory {} to itself", address);
+        }
+
         log_trace!("Binding memory {} to value at {}", address, value_address);
 
         let (reference, tuple_address) = self.verify_is_reference(address)?;
@@ -2891,7 +2843,7 @@ impl<'m> Heap<'m> {
 
             let (_, item_tuple_address) = self.verify_is_reference(trail_item.variable)?;
 
-            ReferenceValue(MaybeFree::BoundTo(trail_item.variable)).encode(
+            ReferenceValue(MaybeFree::FreeVariable).encode(
                 trail_item.variable,
                 &mut self.tuple_memory,
                 item_tuple_address,
