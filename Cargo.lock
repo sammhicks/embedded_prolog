@@ -852,14 +852,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "target_tcp_server"
-version = "0.1.0"
-dependencies = [
- "pretty_env_logger",
- "wam",
-]
-
-[[package]]
 name = "termcolor"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

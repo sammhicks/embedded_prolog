@@ -3,7 +3,6 @@
 members = [
     "comms",
     "comms_derive",
+    "terminal",
     "wam",
-    "target_tcp_server",
-    "rust_terminal",
 ]
