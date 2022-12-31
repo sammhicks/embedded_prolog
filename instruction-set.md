@@ -1,18 +1,5 @@
 # Instruction Set
 
-### Pins
-
-#### Modes
-
-| Pin Modes                    | Value |
-| ---------------------------- | ----: |
-| Input                        |  `00` |
-| Output                       |  `01` |
-| Input with pullup resistor   |  `02` |
-| Input with pulldown resistor |  `03` |
-
-## Instructions
-
 | instruction    |   B4 |   B3 |   B2 |   B1 |   B4 |   B3 |   B2 |   B1 | ... |
 | -------------- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | put variable   | `00` | `Ai` | `00` | `Xn` |
