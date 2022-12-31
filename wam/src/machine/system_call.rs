@@ -1,6 +1,6 @@
 use core::{fmt, marker::PhantomData};
 
-use comms_derive::HexNewType;
+use comms::HexNewType;
 
 use crate::{log_info, log_trace};
 
@@ -516,7 +516,7 @@ where
 }
 
 #[derive(Clone, Copy, HexNewType)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct SystemCallIndex(pub u8);
 
 pub trait SystemCalls {

@@ -19,5 +19,4 @@ strsim = "0.10.0"
 thiserror = "1.0.37"
 
 comms = { path = "../comms", features = ["std"] }
-comms_derive = { path = "../comms_derive" }
 wam = { path = "../wam", features = ["logging"] }

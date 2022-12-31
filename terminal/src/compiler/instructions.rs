@@ -2,7 +2,7 @@ use std::fmt;
 
 use num_bigint::BigInt;
 
-use comms_derive::{CommsFromInto, HexNewType};
+use comms::{CommsFromInto, HexNewType};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ai {

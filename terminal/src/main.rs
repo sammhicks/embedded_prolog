@@ -18,8 +18,7 @@ use crossterm::{
 use num_bigint::BigInt;
 use serialport::{SerialPortType, UsbPortInfo};
 
-use comms::minicbor;
-use comms_derive::{CommsFromInto, HexNewType};
+use comms::{minicbor, CommsFromInto, HexNewType};
 
 mod compiler;
 use compiler::{Arity, Constant, Functor, ProgramInfo, Query, Term};

@@ -740,7 +740,6 @@ dependencies = [
  "clap",
  "cobs",
  "comms",
- "comms_derive",
  "crossterm",
  "num-bigint",
  "pretty_env_logger",
@@ -913,7 +912,6 @@ version = "0.1.0"
 dependencies = [
  "cobs",
  "comms",
- "comms_derive",
  "defmt",
  "generic-array",
  "log",

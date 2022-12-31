@@ -1,6 +1,6 @@
 use core::{fmt, iter::FusedIterator, num::NonZeroU16};
 
-use comms_derive::{CommsFromInto, HexNewType};
+use comms::{CommsFromInto, HexNewType};
 
 use crate::{log_trace, CommaSeparated};
 
@@ -187,7 +187,7 @@ pub enum ValueType {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, HexNewType, CommsFromInto)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 #[repr(transparent)]
 pub struct Address(NonZeroU16);
 
@@ -210,11 +210,11 @@ impl NoneRepresents for Address {
 }
 
 #[derive(HexNewType)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct AddressView(u16);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, HexNewType)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 struct TupleAddress(u16);
 
 impl core::ops::Add<u16> for TupleAddress {

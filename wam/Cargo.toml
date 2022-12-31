@@ -14,7 +14,6 @@ log = { version = "0.4.17", optional = true }
 minicbor = { version = "0.19.0", features = ["derive"] }
 
 comms = { path = "../comms" }
-comms_derive = { path = "../comms_derive" }
 
 [dev-dependencies]
 rand = "0.8.5"

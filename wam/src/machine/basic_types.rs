@@ -1,6 +1,6 @@
 use core::{fmt, num::NonZeroU16};
 
-use comms_derive::{CommsFromInto, HexNewType};
+use comms::{CommsFromInto, HexNewType};
 
 use crate::CommaSeparated;
 
@@ -31,27 +31,27 @@ impl<T: defmt::Format + NoneRepresents> defmt::Format for OptionDisplay<T> {
 
 /// A Register Index
 #[derive(Clone, Copy, HexNewType)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct Xn {
     pub xn: u8,
 }
 
 /// An Environment "Register Index", i.e. the nth variable on the stack
 #[derive(Clone, Copy, HexNewType)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct Yn {
     pub yn: u8,
 }
 
 /// An Argument Index. Functionally the same as a [Register Index](Xn)
 #[derive(Clone, Copy, HexNewType)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct Ai {
     pub ai: u8,
 }
 
 #[derive(Clone, Copy, HexNewType)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct RegisterIndex(pub u8);
 
 impl From<Xn> for RegisterIndex {
@@ -67,11 +67,11 @@ impl From<Ai> for RegisterIndex {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, HexNewType, CommsFromInto)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct Functor(pub u16);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, HexNewType, CommsFromInto)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct Arity(pub u8);
 
 impl core::ops::SubAssign for Arity {
@@ -85,7 +85,7 @@ impl Arity {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, HexNewType, CommsFromInto)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct Constant(pub u16);
 
 impl Constant {
@@ -265,7 +265,7 @@ impl<'memory> defmt::Format for LongInteger<'memory> {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, HexNewType)]
-#[cfg_attr(feature = "defmt-logging", derive(comms_derive::HexDefmt))]
+#[cfg_attr(feature = "defmt-logging", derive(comms::HexDefmt))]
 pub struct ProgramCounter(NonZeroU16);
 
 impl NoneRepresents for ProgramCounter {
