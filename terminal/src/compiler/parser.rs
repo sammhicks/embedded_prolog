@@ -1,10 +1,11 @@
 use std::{ops::Range, path::Path, rc::Rc};
 
 use chumsky::{prelude::*, text::whitespace};
+use itertools::Itertools;
 
 use super::{
     ast::{
-        CallName, Definition, Disjunction, Goal, GoalList, Name, Program, Query, SourceId, Term,
+        CallName, Clause, Definition, Goal, GoalList, Name, Program, Query, SourceId, Term,
         TermList,
     },
     instructions::Comparison,
@@ -234,12 +235,12 @@ pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Ve
             name: CallName::Comparison(operator),
             terms,
         }))
-        .or(is().map(|terms| Goal::Named {
-            name: CallName::Is,
-            terms,
-        }))
         .or(unify().map(|terms| Goal::Named {
             name: CallName::Unify,
+            terms,
+        }))
+        .or(is().map(|terms| Goal::Named {
+            name: CallName::Is,
             terms,
         }))
         .labelled("goal");
@@ -253,7 +254,7 @@ pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Ve
                 .map(GoalList::from),
         )
         .then_ignore(just('.'))
-        .map(|((name, head), body)| (name, Definition { head, body }))
+        .map(|((name, head), body)| (name, Clause { head, body }))
         .labelled("rule");
 
     let fact = make_structure(term())
@@ -261,7 +262,7 @@ pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Ve
         .map(|(name, head)| {
             (
                 name,
-                Definition {
+                Clause {
                     head,
                     body: GoalList::new(),
                 },
@@ -269,52 +270,29 @@ pub fn parse_program(path: Rc<Path>, program_source: &str) -> Result<Program, Ve
         })
         .labelled("fact");
 
-    let definition = rule.or(fact).padded().labelled("definition");
+    let clause = rule.or(fact).padded().labelled("clause");
 
-    definition
+    clause
         .repeated()
         .then_ignore(end())
         .labelled("program")
-        .map(|definitions| {
-            let mut definitions = definitions
+        .map(|clauses| Program {
+            definitions: (&clauses
                 .into_iter()
-                .map(|(name, definition)| {
+                .map(|(name, clause)| {
                     (
                         name,
-                        definition.with_singletons_removed(source_id.clone(), program_source),
+                        clause.with_singletons_removed(source_id.clone(), program_source),
                     )
                 })
-                .peekable();
-
-            Program {
-                definitions: core::iter::from_fn(|| {
-                    let (first_name, first_definition) = definitions.next()?;
-
-                    let mut middle_definitions = Vec::new();
-
-                    while let Some((_, definition)) = definitions.next_if(|(name, definition)| {
-                        (name, definition.head.len()) == (&first_name, first_definition.head.len())
-                    }) {
-                        middle_definitions.push(definition);
-                    }
-
-                    Some(match middle_definitions.pop() {
-                        None => Disjunction::Single {
-                            name: first_name,
-                            arity: first_definition.head.len() as u8,
-                            definition: first_definition,
-                        },
-                        Some(last_definition) => Disjunction::Multiple {
-                            name: first_name,
-                            arity: first_definition.head.len() as u8,
-                            first_definition,
-                            middle_definitions,
-                            last_definition,
-                        },
-                    })
+                .group_by(|(name, clause)| (name.clone(), clause.head.len() as u8)))
+                .into_iter()
+                .map(|((name, arity), clauses)| Definition {
+                    name,
+                    arity,
+                    clauses: clauses.map(|(_, clause)| clause).collect(),
                 })
                 .collect(),
-            }
         })
         .parse(source_id.clone().stream(program_source))
 }
@@ -325,12 +303,12 @@ pub fn parse_query(query: &str) -> Result<Query, Vec<ParseError>> {
             name: CallName::Comparison(operator),
             terms,
         }))
-        .or(is().map(|terms| Query {
-            name: CallName::Is,
-            terms,
-        }))
         .or(unify().map(|terms| Query {
             name: CallName::Unify,
+            terms,
+        }))
+        .or(is().map(|terms| Query {
+            name: CallName::Is,
             terms,
         }))
         .padded()

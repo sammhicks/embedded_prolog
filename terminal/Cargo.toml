@@ -12,6 +12,7 @@ chumsky = "0.8.0"
 clap = { version = "4.0.29", features = ["derive"] }
 cobs = "0.2.3"
 crossterm = "0.25.0"
+itertools = "0.10.5"
 num-bigint = "0.4.3"
 pretty_env_logger = "0.4.0"
 serialport = "4.2.0"
@@ -19,4 +20,4 @@ strsim = "0.10.0"
 thiserror = "1.0.37"
 
 comms = { path = "../comms", features = ["std"] }
-wam = { path = "../wam", features = ["logging"] }
+wam = { path = "../wam", features = ["logging", "std"] }

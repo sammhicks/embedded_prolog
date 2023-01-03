@@ -12,10 +12,14 @@ use basic_types::{
 pub use basic_types::{IntegerSign, OptionDisplay};
 use heap::{
     structure_iteration::{ReadWriteMode, State as StructureIterationState},
-    Heap,
+    Heap, IntegerLeBytes,
 };
 pub use heap::{Address, MaybeFree, Solution, TermsList, Value, ValueHead};
 pub use system_call::{system_call_handler, system_calls, SystemCallEncoder, SystemCalls};
+
+fn assert_fused<I: core::iter::FusedIterator>(i: I) -> I {
+    i
+}
 
 struct ProgramCounterOutOfRange {
     pc: ProgramCounter,
@@ -49,6 +53,20 @@ impl<'m> Instructions<'m> {
                 offset,
                 memory_size: self.memory.len(),
             })
+    }
+
+    fn get_tail(
+        &self,
+        pc: ProgramCounter,
+        length: u8,
+    ) -> Result<&'m [[u8; 4]], ProgramCounterOutOfRange> {
+        let start = pc.offset(1).into_usize();
+        let end = pc.offset(1).offset(u16::from(length)).into_usize();
+        self.memory.get(start..end).ok_or(ProgramCounterOutOfRange {
+            pc,
+            offset: u16::from(length + 1),
+            memory_size: self.memory.len(),
+        })
     }
 }
 
@@ -124,6 +142,220 @@ pub enum Comparison {
     EqualTo,
 }
 
+impl Comparison {
+    fn from_u8(n: u8) -> Option<Self> {
+        Some(match n {
+            0 => Self::GreaterThan,
+            1 => Self::LessThan,
+            2 => Self::LessThanOrEqualTo,
+            3 => Self::GreaterThanOrEqualTo,
+            4 => Self::NotEqualTo,
+            5 => Self::EqualTo,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
+struct SwitchOnTerm {
+    variable: ProgramCounter,
+    structure: Option<ProgramCounter>,
+    list: Option<ProgramCounter>,
+    constant: Option<ProgramCounter>,
+    integer: Option<ProgramCounter>,
+}
+
+impl SwitchOnTerm {
+    fn branch(&self, value: MaybeFree<Value>) -> Result<ProgramCounter, UnificationFailure> {
+        match value {
+            MaybeFree::FreeVariable => Some(self.variable),
+            MaybeFree::BoundTo(Value::Structure(..)) => self.structure,
+            MaybeFree::BoundTo(Value::List(..)) => self.list,
+            MaybeFree::BoundTo(Value::Constant(..)) => self.constant,
+            MaybeFree::BoundTo(Value::Integer { .. }) => self.integer,
+        }
+        .ok_or(UnificationFailure)
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
+struct SwitchOnStructureCase {
+    f: Functor,
+    n: Arity,
+    pc: Option<ProgramCounter>,
+}
+
+impl SwitchOnStructureCase {
+    fn new([[_, _, p1, p0], [f1, f0, _, n0]]: [[u8; 4]; 2]) -> Self {
+        Self {
+            f: Functor(u16::from_le_bytes([f0, f1])),
+            n: Arity(n0),
+            pc: ProgramCounter::from_le_bytes([p0, p1]),
+        }
+    }
+
+    fn matches(self, f: Functor, n: Arity) -> Option<Option<ProgramCounter>> {
+        ((f, n) == (self.f, self.n)).then_some(self.pc)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SwitchOnStructure<'memory> {
+    words: &'memory [[u8; 4]],
+}
+
+impl<'memory> SwitchOnStructure<'memory> {
+    fn cases(&self) -> impl Iterator<Item = SwitchOnStructureCase> + Clone + 'memory {
+        let mut words = assert_fused(self.words.iter());
+
+        core::iter::from_fn(move || {
+            let &a = words.next()?;
+            let &b = words.next()?;
+            Some(SwitchOnStructureCase::new([a, b]))
+        })
+    }
+
+    fn branch(&self, value: MaybeFree<Value>) -> Result<ProgramCounter, UnificationFailure> {
+        let MaybeFree::BoundTo(Value::Structure(f, n, _)) = value else {
+            return Err(UnificationFailure)
+        };
+
+        self.cases()
+            .find_map(|case| case.matches(f, n))
+            .flatten()
+            .ok_or(UnificationFailure)
+    }
+}
+
+impl<'memory> fmt::Debug for SwitchOnStructure<'memory> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CommaSeparated(self.cases()).fmt(f)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl<'memory> defmt::Format for SwitchOnStructure<'memory> {
+    fn format(&self, fmt: defmt::Formatter) {
+        CommaSeparated(self.cases()).format(fmt)
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
+struct SwitchOnConstantCase {
+    c: Constant,
+    pc: Option<ProgramCounter>,
+}
+
+impl SwitchOnConstantCase {
+    fn new([c1, c0, p1, p0]: [u8; 4]) -> Self {
+        Self {
+            c: Constant::from_le_bytes([c0, c1]),
+            pc: ProgramCounter::from_le_bytes([p0, p1]),
+        }
+    }
+
+    fn matches(self, c: Constant) -> Option<Option<ProgramCounter>> {
+        (c == self.c).then_some(self.pc)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SwitchOnConstant<'memory> {
+    words: &'memory [[u8; 4]],
+}
+
+impl<'memory> SwitchOnConstant<'memory> {
+    fn cases(&self) -> impl Iterator<Item = SwitchOnConstantCase> + Clone + 'memory {
+        self.words.iter().copied().map(SwitchOnConstantCase::new)
+    }
+
+    fn branch(&self, value: MaybeFree<Value>) -> Result<ProgramCounter, UnificationFailure> {
+        let MaybeFree::BoundTo(Value::Constant(c)) = value else {
+            return Err(UnificationFailure)
+        };
+
+        self.cases()
+            .find_map(|case| case.matches(c))
+            .flatten()
+            .ok_or(UnificationFailure)
+    }
+}
+
+impl<'memory> fmt::Debug for SwitchOnConstant<'memory> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CommaSeparated(self.cases()).fmt(f)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl<'memory> defmt::Format for SwitchOnConstant<'memory> {
+    fn format(&self, fmt: defmt::Formatter) {
+        CommaSeparated(self.cases()).format(fmt)
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
+struct SwitchOnIntegerCase {
+    i: ShortInteger,
+    pc: Option<ProgramCounter>,
+}
+
+impl SwitchOnIntegerCase {
+    fn new([i1, i0, p1, p0]: [u8; 4]) -> Self {
+        Self {
+            i: ShortInteger::new(i16::from_le_bytes([i0, i1])),
+            pc: ProgramCounter::from_le_bytes([p0, p1]),
+        }
+    }
+
+    fn matches(
+        self,
+        sign: IntegerSign,
+        le_bytes: IntegerLeBytes,
+    ) -> Option<Option<ProgramCounter>> {
+        (self.i.as_long().equals(sign, le_bytes)).then_some(self.pc)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SwitchOnInteger<'memory> {
+    words: &'memory [[u8; 4]],
+}
+
+impl<'memory> SwitchOnInteger<'memory> {
+    fn cases(&self) -> impl Iterator<Item = SwitchOnIntegerCase> + Clone + 'memory {
+        self.words.iter().copied().map(SwitchOnIntegerCase::new)
+    }
+
+    fn branch(&self, value: MaybeFree<Value>) -> Result<ProgramCounter, UnificationFailure> {
+        let MaybeFree::BoundTo(Value::Integer { sign, le_bytes }) = value else {
+            return Err(UnificationFailure)
+        };
+
+        self.cases()
+            .find_map(|case| case.matches(sign, le_bytes))
+            .flatten()
+            .ok_or(UnificationFailure)
+    }
+}
+
+impl<'memory> fmt::Debug for SwitchOnInteger<'memory> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CommaSeparated(self.cases()).fmt(f)
+    }
+}
+
+#[cfg(feature = "defmt-logging")]
+impl<'memory> defmt::Format for SwitchOnInteger<'memory> {
+    fn format(&self, fmt: defmt::Formatter) {
+        CommaSeparated(self.cases()).format(fmt)
+    }
+}
+
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt-logging", derive(defmt::Format))]
 enum Instruction<'memory> {
@@ -168,18 +400,25 @@ enum Instruction<'memory> {
     Call { p: ProgramCounter, n: Arity },
     Execute { p: ProgramCounter, n: Arity },
     Proceed,
-    TryMeElse { p: ProgramCounter },
-    RetryMeElse { p: ProgramCounter },
-    TrustMe,
-    NeckCut,
-    GetLevel { yn: Yn },
-    Cut { yn: Yn },
-    Comparison(Comparison),
-    Is,
     True,
     Fail,
     Unify,
+    Is,
+    Comparison(Comparison),
     SystemCall { i: system_call::SystemCallIndex },
+    TryMeElse { p: ProgramCounter },
+    RetryMeElse { p: ProgramCounter },
+    TrustMe,
+    Try { p: ProgramCounter },
+    Retry { p: ProgramCounter },
+    Trust { p: ProgramCounter },
+    SwitchOnTerm(SwitchOnTerm),
+    SwitchOnStructure(SwitchOnStructure<'memory>),
+    SwitchOnConstant(SwitchOnConstant<'memory>),
+    SwitchOnInteger(SwitchOnInteger<'memory>),
+    NeckCut,
+    GetLevel { yn: Yn },
+    Cut { yn: Yn },
 }
 
 impl<'memory> Instruction<'memory> {
@@ -200,12 +439,7 @@ impl<'memory> Instruction<'memory> {
         pc: ProgramCounter,
         n: u8,
     ) -> Result<&[[u8; 4]], Error> {
-        Ok(instructions
-            .get(pc, u16::from(n))?
-            .1
-            .split_first()
-            .expect("Zero length instruction")
-            .1)
+        Ok(instructions.get_tail(pc, n)?)
     }
 
     fn decode(
@@ -279,8 +513,7 @@ impl<'memory> Instruction<'memory> {
                 Instruction::PutInteger {
                     ai: Ai { ai },
                     i: LongInteger {
-                        sign: IntegerSign::from_u8(s)
-                            .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                        sign: IntegerSign::from_u8(s),
                         words: Self::decode_long_integer_words(instructions, pc, n)?,
                     },
                 },
@@ -356,8 +589,7 @@ impl<'memory> Instruction<'memory> {
                 Instruction::GetInteger {
                     ai: Ai { ai },
                     i: LongInteger {
-                        sign: IntegerSign::from_u8(s)
-                            .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                        sign: IntegerSign::from_u8(s),
                         words: Self::decode_long_integer_words(instructions, pc, n)?,
                     },
                 },
@@ -382,8 +614,7 @@ impl<'memory> Instruction<'memory> {
                 pc.offset(1 + u16::from(n)),
                 Instruction::SetInteger {
                     i: LongInteger {
-                        sign: IntegerSign::from_u8(s)
-                            .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                        sign: IntegerSign::from_u8(s),
                         words: Self::decode_long_integer_words(instructions, pc, n)?,
                     },
                 },
@@ -409,8 +640,7 @@ impl<'memory> Instruction<'memory> {
                 pc.offset(1 + u16::from(n)),
                 Instruction::UnifyInteger {
                     i: LongInteger {
-                        sign: IntegerSign::from_u8(s)
-                            .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                        sign: IntegerSign::from_u8(s),
                         words: Self::decode_long_integer_words(instructions, pc, n)?,
                     },
                 },
@@ -422,62 +652,111 @@ impl<'memory> Instruction<'memory> {
             [0x43, n, p1, p0] => (
                 pc.offset(1),
                 Instruction::Call {
-                    p: ProgramCounter::from_le_bytes([p0, p1]),
+                    p: ProgramCounter::from_le_bytes([p0, p1])
+                        .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
                     n: Arity(n),
                 },
             ),
             [0x44, n, p1, p0] => (
                 pc.offset(1),
                 Instruction::Execute {
-                    p: ProgramCounter::from_le_bytes([p0, p1]),
+                    p: ProgramCounter::from_le_bytes([p0, p1])
+                        .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
                     n: Arity(n),
                 },
             ),
             [0x45, 0, 0, 0] => (pc.offset(1), Instruction::Proceed),
-            [0x50, 0, p1, p0] => (
+            [0x46, 0, 0, 0] => (pc.offset(1), Instruction::True),
+            [0x47, 0, 0, 0] => (pc.offset(1), Instruction::Fail),
+            [0x48, 0, 0, 0] => (pc.offset(1), Instruction::Unify),
+            [0x49, 0, 0, 0] => (pc.offset(1), Instruction::Is),
+            [0x4a, 0, 0, n] => (
                 pc.offset(1),
-                Instruction::TryMeElse {
-                    p: ProgramCounter::from_le_bytes([p0, p1]),
-                },
+                Instruction::Comparison(
+                    Comparison::from_u8(n)
+                        .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                ),
             ),
-            [0x51, 0, p1, p0] => (
-                pc.offset(1),
-                Instruction::RetryMeElse {
-                    p: ProgramCounter::from_le_bytes([p0, p1]),
-                },
-            ),
-            [0x52, 0, 0, 0] => (pc.offset(1), Instruction::TrustMe),
-            [0x53, 0, 0, 0] => (pc.offset(1), Instruction::NeckCut),
-            [0x54, 0, 0, yn] => (pc.offset(1), Instruction::GetLevel { yn: Yn { yn } }),
-            [0x55, 0, 0, yn] => (pc.offset(1), Instruction::Cut { yn: Yn { yn } }),
-            [0x60, 0, 0, 0] => (
-                pc.offset(1),
-                Instruction::Comparison(Comparison::GreaterThan),
-            ),
-            [0x61, 0, 0, 0] => (pc.offset(1), Instruction::Comparison(Comparison::LessThan)),
-            [0x62, 0, 0, 0] => (
-                pc.offset(1),
-                Instruction::Comparison(Comparison::LessThanOrEqualTo),
-            ),
-            [0x63, 0, 0, 0] => (
-                pc.offset(1),
-                Instruction::Comparison(Comparison::GreaterThanOrEqualTo),
-            ),
-            [0x64, 0, 0, 0] => (
-                pc.offset(1),
-                Instruction::Comparison(Comparison::NotEqualTo),
-            ),
-            [0x65, 0, 0, 0] => (pc.offset(1), Instruction::Comparison(Comparison::EqualTo)),
-            [0x66, 0, 0, 0] => (pc.offset(1), Instruction::Is),
-            [0x70, 0, 0, 0] => (pc.offset(1), Instruction::True),
-            [0x71, 0, 0, 0] => (pc.offset(1), Instruction::Fail),
-            [0x72, 0, 0, 0] => (pc.offset(1), Instruction::Unify),
-            [0x80, 0, 0, n] => (
+            [0x4b, 0, 0, n] => (
                 pc.offset(1),
                 Instruction::SystemCall {
                     i: system_call::SystemCallIndex(n),
                 },
             ),
+            [0x50, 0, p1, p0] => (
+                pc.offset(1),
+                Instruction::TryMeElse {
+                    p: ProgramCounter::from_le_bytes([p0, p1])
+                        .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                },
+            ),
+            [0x51, 0, p1, p0] => (
+                pc.offset(1),
+                Instruction::RetryMeElse {
+                    p: ProgramCounter::from_le_bytes([p0, p1])
+                        .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                },
+            ),
+            [0x52, 0, 0, 0] => (pc.offset(1), Instruction::TrustMe),
+            [0x53, 0, p1, p0] => (
+                pc.offset(1),
+                Instruction::Try {
+                    p: ProgramCounter::from_le_bytes([p0, p1])
+                        .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                },
+            ),
+            [0x54, 0, p1, p0] => (
+                pc.offset(1),
+                Instruction::Retry {
+                    p: ProgramCounter::from_le_bytes([p0, p1])
+                        .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                },
+            ),
+            [0x55, 0, p1, p0] => (
+                pc.offset(1),
+                Instruction::Trust {
+                    p: ProgramCounter::from_le_bytes([p0, p1])
+                        .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                },
+            ),
+            [0x60, 0, v1, v0] => {
+                if let &[[s1, s0, l1, l0], [c1, c0, i1, i0]] = instructions.get_tail(pc, 2)? {
+                    (
+                        pc.offset(3),
+                        Instruction::SwitchOnTerm(SwitchOnTerm {
+                            variable: ProgramCounter::from_le_bytes([v0, v1])
+                                .ok_or(Error::BadInstruction(pc, BadMemoryRange(range)))?,
+                            structure: ProgramCounter::from_le_bytes([s0, s1]),
+                            list: ProgramCounter::from_le_bytes([l0, l1]),
+                            constant: ProgramCounter::from_le_bytes([c0, c1]),
+                            integer: ProgramCounter::from_le_bytes([i0, i1]),
+                        }),
+                    )
+                } else {
+                    return Err(Error::BadInstruction(pc, BadMemoryRange(range)));
+                }
+            }
+            [0x61, 0, 0, n] => (
+                pc.offset(1 + u16::from(n)),
+                Instruction::SwitchOnStructure(SwitchOnStructure {
+                    words: instructions.get_tail(pc, n)?,
+                }),
+            ),
+            [0x62, 0, 0, n] => (
+                pc.offset(1 + u16::from(n)),
+                Instruction::SwitchOnConstant(SwitchOnConstant {
+                    words: instructions.get_tail(pc, n)?,
+                }),
+            ),
+            [0x63, 0, 0, n] => (
+                pc.offset(1 + u16::from(n)),
+                Instruction::SwitchOnInteger(SwitchOnInteger {
+                    words: instructions.get_tail(pc, n)?,
+                }),
+            ),
+            [0x70, 0, 0, 0] => (pc.offset(1), Instruction::NeckCut),
+            [0x71, 0, 0, yn] => (pc.offset(1), Instruction::GetLevel { yn: Yn { yn } }),
+            [0x72, 0, 0, yn] => (pc.offset(1), Instruction::Cut { yn: Yn { yn } }),
             _ => return Err(Error::BadInstruction(pc, BadMemoryRange(range))),
         })
     }
@@ -688,7 +967,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
             let saved_trail_top = self.memory.save_trail_top();
             let saved_structure_iteration_state = self.structure_iteration_state.clone();
 
-            match self.execute_instruction(&instruction) {
+            match self.execute_instruction(new_pc, &instruction) {
                 Ok(()) => (),
                 Err(ExecutionFailure::Error(Error::OutOfMemory(oom))) => {
                     log_warn!("Out of Memory while executing {:?}: {:?}", instruction, oom);
@@ -698,7 +977,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
 
                     self.do_full_garbage_collection()?;
 
-                    self.execute_instruction(&instruction)?;
+                    self.execute_instruction(new_pc, &instruction)?;
                 }
                 Err(err) => return Err(err),
             }
@@ -721,6 +1000,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
 
     fn execute_instruction(
         &mut self,
+        pc: ProgramCounter,
         instruction: &Instruction,
     ) -> Result<(), ExecutionFailure<'m>> {
         match *instruction {
@@ -762,7 +1042,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 Ok(())
             }
             Instruction::PutShortInteger { ai, i } => {
-                self.execute_instruction(&Instruction::PutInteger { ai, i: i.as_long() })
+                self.execute_instruction(pc, &Instruction::PutInteger { ai, i: i.as_long() })
             }
             Instruction::PutInteger { ai, i } => {
                 let address = self.new_integer(i)?;
@@ -866,7 +1146,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 }
             }
             Instruction::GetShortInteger { ai, i } => {
-                self.execute_instruction(&Instruction::GetInteger { ai, i: i.as_long() })
+                self.execute_instruction(pc, &Instruction::GetInteger { ai, i: i.as_long() })
             }
             Instruction::GetInteger { ai, i } => ({
                 let (address, value) = self.get_register_value(ai)?;
@@ -924,7 +1204,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 Ok(())
             }
             Instruction::SetShortInteger { i } => {
-                self.execute_instruction(&Instruction::SetInteger { i: i.as_long() })
+                self.execute_instruction(pc, &Instruction::SetInteger { i: i.as_long() })
             }
             Instruction::SetInteger { i } => {
                 let address = self.new_integer(i)?;
@@ -990,7 +1270,7 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 }
             }
             Instruction::UnifyShortInteger { i } => {
-                self.execute_instruction(&Instruction::UnifyInteger { i: i.as_long() })
+                self.execute_instruction(pc, &Instruction::UnifyInteger { i: i.as_long() })
             }
             Instruction::UnifyInteger { i } => {
                 match self.structure_iteration_state.read_write_mode()? {
@@ -1089,38 +1369,19 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 self.pc = self.cp;
                 Ok(())
             }
-            Instruction::TryMeElse { p } => {
-                self.structure_iteration_state.verify_not_active()?;
-                self.memory.new_choice_point(
-                    p,
-                    self.cp,
-                    self.registers.get(..self.argument_count),
-                )??;
+            Instruction::True => {
+                self.special_functor::<0>()?;
                 Ok(())
             }
-            Instruction::RetryMeElse { p } => {
-                self.structure_iteration_state.verify_not_active()?;
-                self.memory
-                    .retry_choice_point(self.registers.all_mut(), &mut self.cp, p)?;
-                Ok(())
+            Instruction::Fail => self.backtrack(),
+            Instruction::Unify => {
+                let [a1, a2] = self.special_functor()?;
+                self.unify(a1, a2)
             }
-            Instruction::TrustMe => {
-                self.structure_iteration_state.verify_not_active()?;
-                self.memory
-                    .remove_choice_point(self.registers.all_mut(), &mut self.cp)?;
-                Ok(())
-            }
-            Instruction::NeckCut => {
-                self.memory.neck_cut()?;
-                Ok(())
-            }
-            Instruction::GetLevel { yn } => {
-                self.memory.get_level(yn)?;
-                Ok(())
-            }
-            Instruction::Cut { yn } => {
-                self.memory.cut(yn)?;
-                Ok(())
+            Instruction::Is => {
+                let [a1, a2] = self.special_functor()?;
+                let a2 = self.memory.evaluate(a2)??;
+                self.unify(a1, a2)
             }
             Instruction::Comparison(operation) => {
                 let [a1, a2] = self.special_functor()?;
@@ -1140,20 +1401,6 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                 } else {
                     self.backtrack()
                 }
-            }
-            Instruction::Is => {
-                let [a1, a2] = self.special_functor()?;
-                let a2 = self.memory.evaluate(a2)??;
-                self.unify(a1, a2)
-            }
-            Instruction::True => {
-                self.special_functor::<0>()?;
-                Ok(())
-            }
-            Instruction::Fail => self.backtrack(),
-            Instruction::Unify => {
-                let [a1, a2] = self.special_functor()?;
-                self.unify(a1, a2)
             }
             Instruction::SystemCall { i } => {
                 match self.system_calls.execute(
@@ -1177,6 +1424,99 @@ impl<'m, Calls: system_call::SystemCalls> Machine<'m, Calls> {
                         ExecutionFailure::Error(Error::SystemCallIndexOutOfRange(inner)),
                     ),
                 }
+            }
+            Instruction::TryMeElse { p } => {
+                self.structure_iteration_state.verify_not_active()?;
+                self.memory.new_choice_point(
+                    p,
+                    self.cp,
+                    self.registers.get(..self.argument_count),
+                )??;
+                Ok(())
+            }
+            Instruction::RetryMeElse { p } => {
+                self.structure_iteration_state.verify_not_active()?;
+                self.memory
+                    .retry_choice_point(self.registers.all_mut(), &mut self.cp, p)?;
+                Ok(())
+            }
+            Instruction::TrustMe => {
+                self.structure_iteration_state.verify_not_active()?;
+                self.memory
+                    .remove_choice_point(self.registers.all_mut(), &mut self.cp)?;
+                Ok(())
+            }
+            Instruction::Try { p } => {
+                self.structure_iteration_state.verify_not_active()?;
+                self.memory.new_choice_point(
+                    pc,
+                    self.cp,
+                    self.registers.get(..self.argument_count),
+                )??;
+                self.pc = Some(p);
+                Ok(())
+            }
+            Instruction::Retry { p } => {
+                self.structure_iteration_state.verify_not_active()?;
+                self.memory
+                    .retry_choice_point(self.registers.all_mut(), &mut self.cp, pc)?;
+                self.pc = Some(p);
+                Ok(())
+            }
+            Instruction::Trust { p } => {
+                self.structure_iteration_state.verify_not_active()?;
+                self.memory
+                    .remove_choice_point(self.registers.all_mut(), &mut self.cp)?;
+                self.pc = Some(p);
+                Ok(())
+            }
+            Instruction::SwitchOnTerm(switch_on_term) => {
+                match switch_on_term.branch(self.get_register_value(Ai { ai: 0 })?.1) {
+                    Ok(pc) => {
+                        self.pc = Some(pc);
+                        Ok(())
+                    }
+                    Err(UnificationFailure) => self.backtrack(),
+                }
+            }
+            Instruction::SwitchOnStructure(switch_on_structure) => {
+                match switch_on_structure.branch(self.get_register_value(Ai { ai: 0 })?.1) {
+                    Ok(pc) => {
+                        self.pc = Some(pc);
+                        Ok(())
+                    }
+                    Err(UnificationFailure) => self.backtrack(),
+                }
+            }
+            Instruction::SwitchOnConstant(switch_on_constant) => {
+                match switch_on_constant.branch(self.get_register_value(Ai { ai: 0 })?.1) {
+                    Ok(pc) => {
+                        self.pc = Some(pc);
+                        Ok(())
+                    }
+                    Err(UnificationFailure) => self.backtrack(),
+                }
+            }
+            Instruction::SwitchOnInteger(switch_on_integer) => {
+                match switch_on_integer.branch(self.get_register_value(Ai { ai: 0 })?.1) {
+                    Ok(pc) => {
+                        self.pc = Some(pc);
+                        Ok(())
+                    }
+                    Err(UnificationFailure) => self.backtrack(),
+                }
+            }
+            Instruction::NeckCut => {
+                self.memory.neck_cut()?;
+                Ok(())
+            }
+            Instruction::GetLevel { yn } => {
+                self.memory.get_level(yn)?;
+                Ok(())
+            }
+            Instruction::Cut { yn } => {
+                self.memory.cut(yn)?;
+                Ok(())
             }
         }
     }

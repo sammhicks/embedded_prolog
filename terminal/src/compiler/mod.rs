@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
     hash::Hash,
+    ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -12,8 +13,11 @@ mod instructions;
 mod parser;
 
 use arcstr::ArcStr;
-use ast::{Definition, Disjunction, Goal, Name, SourceId, VariableName};
-use instructions::{Ai, Instruction, LongInteger, ShortInteger, Xn, Yn};
+use ast::{Clause, Definition, Goal, Name, SourceId, VariableName};
+use instructions::{
+    Ai, Instruction, Label, LabelOr, LabelType, LongInteger, OwnedLabel, ProgramCounter,
+    ShortInteger, Xn, Yn,
+};
 
 pub use ast::{CallName, Query, Term, TermList, EMPTY_LIST};
 pub use instructions::{Arity, Constant, Functor, IntegerSign};
@@ -662,83 +666,6 @@ impl<'a, Mode: CompilationMode> RegisterAllocationState<'a, Mode> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Label<'a> {
-    name: &'a Name,
-    arity: Arity,
-    retry: usize,
-}
-
-impl<'a> Label<'a> {
-    fn named(name: &'a Name, arity: u8) -> Self {
-        Self {
-            name,
-            arity,
-            retry: 0,
-        }
-    }
-
-    fn is_named(&self) -> Option<(Name, Arity)> {
-        (self.retry == 0).then(|| (self.name.clone(), self.arity))
-    }
-
-    fn retry(self) -> Self {
-        let Self { name, arity, retry } = self;
-        Self {
-            name,
-            arity,
-            retry: retry + 1,
-        }
-    }
-
-    fn as_owned(&self) -> OwnedLabel {
-        let Label { name, arity, retry } = *self;
-        OwnedLabel {
-            name: Rc::new(name.clone()),
-            arity,
-            retry,
-        }
-    }
-}
-
-impl<'a> fmt::Display for Label<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { name, arity, retry } = *self;
-
-        match retry.checked_sub(1) {
-            Some(retry) => write!(f, "retry({})", Self { name, arity, retry }),
-            None => write!(f, "{name}/{arity}"),
-        }
-    }
-}
-
-pub struct OwnedLabel {
-    name: Rc<Name>,
-    arity: Arity,
-    retry: usize,
-}
-
-impl OwnedLabel {
-    fn named((name, arity): (Name, Arity)) -> Self {
-        Self {
-            name: Rc::new(name),
-            arity,
-            retry: 0,
-        }
-    }
-}
-
-impl fmt::Display for OwnedLabel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let OwnedLabel {
-            ref name,
-            arity,
-            retry,
-        } = *self;
-        Label { name, arity, retry }.fmt(f)
-    }
-}
-
 trait TokenHandler<Mode: CompilationMode> {
     fn token_xa(&mut self, xn: Xn, ai: Ai);
     fn token_va(&mut self, vn: Mode::Variable, ai: Ai);
@@ -796,29 +723,6 @@ impl KnownVariables<RuleGoalMode> {
                 .map(|variable| Vn::from(*variable.borrow()))
                 .collect(),
         )
-    }
-}
-
-#[derive(Debug)]
-pub enum Labelled<'a, I> {
-    Instruction(I),
-    Label(Label<'a>),
-    Call(Label<'a>),
-    Execute(Label<'a>),
-    TryMeElse(Label<'a>),
-    RetryMeElse(Label<'a>),
-}
-
-impl<'a, I: fmt::Display> fmt::Display for Labelled<'a, I> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Labelled::Instruction(i) => write!(f, "{i}"),
-            Labelled::Label(label) => write!(f, "label({label})"),
-            Labelled::Call(label) => write!(f, "call({label})"),
-            Labelled::Execute(label) => write!(f, "execute({label})"),
-            Labelled::TryMeElse(label) => write!(f, "try_me_else({label})"),
-            Labelled::RetryMeElse(label) => write!(f, "retry_me_else({label})"),
-        }
     }
 }
 
@@ -971,7 +875,7 @@ impl<'a> LabelSet<'a> {
         Ok(())
     }
 
-    fn get(&self, label: Label) -> Result<u16, AssemblyErrorType> {
+    fn get(&self, label: Label) -> Result<ProgramCounter, AssemblyErrorType> {
         self.new_labels
             .get(&label)
             .copied()
@@ -986,7 +890,7 @@ impl<'a> LabelSet<'a> {
     }
 }
 
-struct InstructionList<'a>(Vec<Labelled<'a, Instruction>>);
+struct InstructionList<'a>(Vec<LabelOr<'a, Instruction<'a>>>);
 
 impl<'a> InstructionList<'a> {
     fn new() -> Self {
@@ -999,58 +903,56 @@ impl<'a> InstructionList<'a> {
                 .zip(system_calls.iter())
                 .flat_map(|(i, (name, arity))| {
                     [
-                        Labelled::Label(Label::named(name, *arity)),
-                        Labelled::Instruction(Instruction::SystemCall { i }),
-                        Labelled::Instruction(Instruction::Proceed),
+                        LabelOr::Label(Label::named(name, *arity)),
+                        LabelOr::Instruction(Instruction::SystemCall { i }),
+                        LabelOr::Instruction(Instruction::Proceed),
                     ]
                 })
                 .collect(),
         )
     }
 
-    fn push(&mut self, instruction: Instruction) {
+    fn push(&mut self, instruction: Instruction<'a>) {
         if let (
-            Some((Labelled::Instruction(Instruction::PutVoid { n, .. }), _)),
+            Some((LabelOr::Instruction(Instruction::PutVoid { n, .. }), _)),
             Instruction::PutVoid { n: increment, .. },
         )
         | (
-            Some((Labelled::Instruction(Instruction::SetVoid { n, .. }), _)),
+            Some((LabelOr::Instruction(Instruction::SetVoid { n, .. }), _)),
             Instruction::SetVoid { n: increment, .. },
         )
         | (
-            Some((Labelled::Instruction(Instruction::UnifyVoid { n, .. }), _)),
+            Some((LabelOr::Instruction(Instruction::UnifyVoid { n, .. }), _)),
             Instruction::UnifyVoid { n: increment, .. },
         ) = (self.0.split_last_mut(), &instruction)
         {
             *n += *increment;
         } else {
-            self.0.push(Labelled::Instruction(instruction))
+            self.0.push(LabelOr::Instruction(instruction))
         }
     }
 
     fn push_label(&mut self, label: Label<'a>) {
-        self.0.push(Labelled::Label(label));
+        self.0.push(LabelOr::Label(label));
     }
 
     fn push_call(&mut self, label: CallName<Label<'a>>) {
         self.0.push(match label {
-            CallName::Named(label) => Labelled::Call(label),
+            CallName::Named(label) => LabelOr::Instruction(Instruction::Call { l: label }),
+            CallName::True => LabelOr::Instruction(Instruction::True),
+            CallName::Fail => LabelOr::Instruction(Instruction::Fail),
+            CallName::Unify => LabelOr::Instruction(Instruction::Unify),
+            CallName::Is => LabelOr::Instruction(Instruction::Is),
             CallName::Comparison(comparison) => {
-                Labelled::Instruction(Instruction::Comparison(comparison))
+                LabelOr::Instruction(Instruction::Comparison(comparison))
             }
-            CallName::Is => Labelled::Instruction(Instruction::Is),
-            CallName::True => Labelled::Instruction(Instruction::True),
-            CallName::Fail => Labelled::Instruction(Instruction::Fail),
-            CallName::Unify => Labelled::Instruction(Instruction::Unify),
         })
     }
 
-    fn push_try_me_else(&mut self, label: Label<'a>) {
-        self.0.push(Labelled::TryMeElse(label))
-    }
-
-    fn push_retry_me_else(&mut self, label: Label<'a>) {
-        self.0.push(Labelled::RetryMeElse(label))
+    fn push_maybe(&mut self, instruction: Option<LabelOr<'a, Instruction<'a>>>) {
+        if let Some(instruction) = instruction {
+            self.0.push(instruction);
+        }
     }
 
     fn last_call_optimisation(mut self) -> Self {
@@ -1058,18 +960,18 @@ impl<'a> InstructionList<'a> {
         let mut i = 0;
         while i < self.0.len() {
             if let Some(
-                [Labelled::Instruction(
-                    Instruction::NeckCut
-                    | Instruction::Cut { .. }
-                    | Instruction::Is
-                    | Instruction::True
+                [LabelOr::Instruction(
+                    Instruction::True
                     | Instruction::Unify
-                    | Instruction::SystemCall { .. },
-                ), Labelled::Instruction(Instruction::Deallocate), ..],
+                    | Instruction::Is
+                    | Instruction::SystemCall { .. }
+                    | Instruction::NeckCut
+                    | Instruction::Cut { .. },
+                ), LabelOr::Instruction(Instruction::Deallocate), ..],
             ) = self.0.get(i..)
             {
                 self.0
-                    .insert(i + 2, Labelled::Instruction(Instruction::Proceed))
+                    .insert(i + 2, LabelOr::Instruction(Instruction::Proceed))
             }
 
             i += 1
@@ -1079,12 +981,12 @@ impl<'a> InstructionList<'a> {
         let mut i = self.0.iter_mut().peekable();
 
         while let Some(first) = i.next() {
-            if let Labelled::Call(label) = first {
+            if let &mut LabelOr::Instruction(Instruction::Call { l }) = first {
                 if let Some(second) = i.next_if(|second| {
-                    matches!(second, Labelled::Instruction(Instruction::Deallocate))
+                    matches!(second, LabelOr::Instruction(Instruction::Deallocate))
                 }) {
-                    *second = Labelled::Execute(*label);
-                    *first = Labelled::Instruction(Instruction::Deallocate);
+                    *second = LabelOr::Instruction(Instruction::Execute { l });
+                    *first = LabelOr::Instruction(Instruction::Deallocate);
                 }
             }
         }
@@ -1106,92 +1008,24 @@ impl<'a> InstructionList<'a> {
     }
 
     fn assemble(self, program_info: &mut ProgramInfo) -> Result<Vec<[u8; 4]>, AssemblyErrorType> {
-        enum AB<A, B> {
-            A(A),
-            B(B),
-        }
-
-        impl<A: Iterator, B: Iterator<Item = A::Item>> Iterator for AB<A, B> {
-            type Item = A::Item;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                match self {
-                    AB::A(a) => a.next(),
-                    AB::B(b) => b.next(),
-                }
-            }
-        }
-
-        fn just<A, I>(instruction: I) -> AB<A, impl Iterator<Item = I>> {
-            AB::B(std::iter::once(instruction))
-        }
-
-        let instructions = self
-            .0
-            .into_iter()
-            .flat_map(|instruction| match instruction {
-                Labelled::Instruction(instruction) => {
-                    AB::A(instruction.serialize().map(Labelled::Instruction))
-                }
-                Labelled::Label(label) => just(Labelled::Label(label)),
-                Labelled::Call(label) => just(Labelled::Call(label)),
-                Labelled::Execute(label) => just(Labelled::Execute(label)),
-                Labelled::TryMeElse(label) => just(Labelled::TryMeElse(label)),
-                Labelled::RetryMeElse(label) => just(Labelled::RetryMeElse(label)),
-            })
-            .collect::<Vec<_>>();
+        let instructions = self.0.into_iter().fold(
+            instructions::InstructionHalfList::new(),
+            instructions::InstructionHalfList::with_label_or_instruction,
+        );
 
         let mut labels = LabelSet::new(program_info);
 
         instructions.iter().try_fold(0, |pc, instruction| {
             Ok(match instruction {
-                Labelled::Label(label) => {
+                LabelOr::Label(label) => {
                     labels.insert(*label, pc)?;
                     pc
                 }
-                Labelled::Instruction(_)
-                | Labelled::Call(_)
-                | Labelled::Execute(_)
-                | Labelled::TryMeElse(_)
-                | Labelled::RetryMeElse(_) => pc + 1,
+                LabelOr::Instruction(_) => pc + 1,
             })
         })?;
 
-        fn assert_single<I: Iterator>(mut i: I) -> I::Item {
-            let v = i.next().unwrap();
-            assert!(i.next().is_none());
-            v
-        }
-
-        let instructions = instructions
-            .into_iter()
-            .map(|instruction| {
-                Ok(Some(assert_single(
-                    match instruction {
-                        Labelled::Instruction(instruction) => return Ok(Some(instruction)),
-                        Labelled::Label(_) => return Ok(None),
-                        Labelled::Call(label) => Instruction::Call {
-                            p: labels.get(label)?,
-                            n: label.arity,
-                        },
-                        Labelled::Execute(label) => Instruction::Execute {
-                            p: labels.get(label)?,
-                            n: label.arity,
-                        },
-                        Labelled::TryMeElse(label) => Instruction::TryMeElse {
-                            p: labels.get(label)?,
-                        },
-                        Labelled::RetryMeElse(label) => Instruction::RetryMeElse {
-                            p: labels.get(label)?,
-                        },
-                    }
-                    .serialize(),
-                )))
-            })
-            .filter_map(Result::transpose)
-            .collect::<Result<_, _>>()?;
-
-        Ok(instructions)
+        instructions.resolve_labels(|label| labels.get(label))
     }
 }
 
@@ -1880,8 +1714,8 @@ where
     }
 }
 
-fn compile_program_definition<'i>(
-    Definition { head, body }: &'i Definition,
+fn compile_program_clause<'i>(
+    Clause { head, body }: &'i Clause,
     program_info: &mut ProgramInfo,
     instructions: &mut InstructionList<'i>,
 ) {
@@ -1921,6 +1755,205 @@ fn compile_program_definition<'i>(
             body_allocations,
             permanent_variable_allocation,
         );
+    }
+}
+
+#[derive(Debug)]
+enum Subsequence {
+    Variable(usize),
+    NonVariables(Range<usize>),
+}
+
+struct NonEmptyList<T> {
+    head: T,
+    tail: Vec<T>,
+}
+
+impl<T> NonEmptyList<T> {
+    fn new(value: T) -> Self {
+        Self {
+            head: value,
+            tail: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: T) {
+        self.tail.push(value);
+    }
+}
+
+#[derive(Debug)]
+enum ValueSwitch {
+    Single(usize),
+    Multiple {
+        first: usize,
+        middle: Vec<usize>,
+        last: usize,
+    },
+}
+
+impl ValueSwitch {
+    fn encode<'a>(
+        self,
+        make_nth_clause_label: impl Fn(usize) -> Label<'a>,
+        label: Label<'a>,
+    ) -> (Label<'a>, Vec<LabelOr<'a, Instruction<'a>>>) {
+        match self {
+            ValueSwitch::Single(index) => (make_nth_clause_label(index), Vec::new()),
+            ValueSwitch::Multiple {
+                first,
+                middle,
+                last,
+            } => (
+                label,
+                itertools::chain!(
+                    [
+                        LabelOr::Label(label),
+                        LabelOr::Instruction(Instruction::Try {
+                            l: make_nth_clause_label(first),
+                        }),
+                    ],
+                    middle.into_iter().map(|index| {
+                        LabelOr::Instruction(Instruction::Retry {
+                            l: make_nth_clause_label(index),
+                        })
+                    }),
+                    [LabelOr::Instruction(Instruction::Trust {
+                        l: make_nth_clause_label(last),
+                    })]
+                )
+                .collect(),
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum MatchingClauses<T> {
+    None,
+    Single((T, ValueSwitch)),
+    Multiple(Vec<(T, ValueSwitch)>),
+}
+
+impl<T: Copy> MatchingClauses<T> {
+    fn new(mut items: Vec<(T, ValueSwitch)>) -> Self {
+        match items.len() {
+            0 => Self::None,
+            1 => Self::Single(items.pop().unwrap()),
+            _ => Self::Multiple(items),
+        }
+    }
+
+    fn encode<'a>(
+        self,
+        label: Label<'a>,
+        make_label: impl Fn(LabelType) -> Label<'a>,
+        make_value_label: impl Copy + FnOnce(T) -> Label<'a>,
+        make_switch_instruction: impl FnOnce(Vec<(T, Label<'a>)>) -> Instruction<'a>,
+    ) -> (Option<Label<'a>>, Vec<LabelOr<'a, Instruction<'a>>>) {
+        let make_nth_clause_label = |index| make_label(LabelType::NthClause(index));
+
+        match self {
+            MatchingClauses::None => (None, Vec::new()),
+            MatchingClauses::Single((value, switch)) => {
+                let (label, instructions) =
+                    switch.encode(make_nth_clause_label, make_value_label(value));
+                (Some(label), instructions)
+            }
+            MatchingClauses::Multiple(switches) => {
+                let mut labels = Vec::new();
+                let mut switches_instructions = Vec::new();
+
+                for (value, switch) in switches {
+                    let (switch_label, instructions) =
+                        switch.encode(make_nth_clause_label, make_value_label(value));
+                    labels.push((value, switch_label));
+                    switches_instructions.push(instructions);
+                }
+
+                (
+                    Some(label),
+                    itertools::chain!(
+                        [
+                            LabelOr::Label(label),
+                            LabelOr::Instruction(make_switch_instruction(labels))
+                        ],
+                        switches_instructions.into_iter().flatten()
+                    )
+                    .collect(),
+                )
+            }
+        }
+    }
+}
+
+fn select_matching_clauses<T: Copy + Ord>(
+    clauses: &[Clause],
+    range: &Range<usize>,
+    mut f: impl FnMut(&Clause) -> Option<T>,
+) -> MatchingClauses<T> {
+    MatchingClauses::new(
+        clauses
+            .iter()
+            .enumerate()
+            .take(range.end)
+            .skip(range.start)
+            .filter_map(|(index, clause)| f(clause).map(|t| (index, t)))
+            .fold(BTreeMap::new(), |mut map, (index, key)| {
+                match map.entry(key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(NonEmptyList::new(index));
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry) => {
+                        entry.into_mut().push(index);
+                    }
+                }
+                map
+            })
+            .into_iter()
+            .map(|(value, mut indexes)| {
+                (
+                    value,
+                    if let Some(last) = indexes.tail.pop() {
+                        ValueSwitch::Multiple {
+                            first: indexes.head,
+                            middle: indexes.tail,
+                            last,
+                        }
+                    } else {
+                        ValueSwitch::Single(indexes.head)
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
+fn try_me_else<'a>(
+    name: &'a Name,
+    arity: Arity,
+    range: Range<usize>,
+    clauses: &'a [Clause],
+) -> Option<LabelOr<'a, Instruction<'a>>> {
+    let is_first = range.start == 0;
+    let is_last = range.end >= clauses.len();
+    match (is_first, is_last) {
+        (true, true) => None,
+        (true, false) => Some(LabelOr::Instruction(Instruction::TryMeElse {
+            l: Label {
+                name,
+                arity,
+                label_type: LabelType::TrySubsequenceStartingAt(range.end),
+            },
+        })),
+        (false, false) => Some(LabelOr::Instruction(Instruction::RetryMeElse {
+            l: Label {
+                name,
+                arity,
+                label_type: LabelType::TrySubsequenceStartingAt(range.end),
+            },
+        })),
+        (false, true) => Some(LabelOr::Instruction(Instruction::TrustMe)),
     }
 }
 
@@ -2002,47 +2035,248 @@ pub fn compile_program(
 
     let mut instructions = InstructionList::with_system_calls(&system_calls);
 
-    for disjunction in &program.definitions {
-        match disjunction {
-            Disjunction::Single {
-                name,
-                arity,
-                definition,
-            } => {
-                instructions.push_label(Label::named(name, *arity));
+    for Definition {
+        name,
+        arity,
+        clauses,
+    } in &program.definitions
+    {
+        let arity = *arity;
 
-                compile_program_definition(definition, &mut program_info, &mut instructions);
+        instructions.push_label(Label::named(name, arity));
+
+        let mut clauses_cursor = clauses.iter().enumerate();
+        let subsequences = std::iter::from_fn(|| {
+            let (start, start_clause) = clauses_cursor.next()?;
+
+            if matches!(start_clause.head.first(), Some(Term::Variable { .. })) {
+                return Some([None, Some(Subsequence::Variable(start))]);
             }
-            Disjunction::Multiple {
-                name,
-                arity,
-                first_definition,
-                middle_definitions,
-                last_definition,
-            } => {
-                let label = Label::named(name, *arity);
-                instructions.push_label(label);
 
-                let label = label.retry();
-                instructions.push_try_me_else(label);
+            for (index, clause) in clauses_cursor.by_ref() {
+                if matches!(clause.head.first(), Some(Term::Variable { .. })) {
+                    return Some([
+                        Some(Subsequence::NonVariables(start..index)),
+                        Some(Subsequence::Variable(index)),
+                    ]);
+                }
+            }
 
-                compile_program_definition(first_definition, &mut program_info, &mut instructions);
+            Some([
+                Some(Subsequence::NonVariables(start..(clauses.len()))),
+                None,
+            ])
+        })
+        .flatten()
+        .flatten();
 
-                let label = middle_definitions.iter().fold(label, |label, definition| {
-                    instructions.push_label(label);
+        for subsequence in subsequences {
+            match subsequence {
+                Subsequence::Variable(index) => {
+                    instructions.push_label(Label {
+                        name,
+                        arity,
+                        label_type: LabelType::TrySubsequenceStartingAt(index),
+                    });
 
-                    let label = label.retry();
-                    instructions.push_retry_me_else(label);
+                    instructions.push_maybe(try_me_else(name, arity, index..(index + 1), clauses));
 
-                    compile_program_definition(definition, &mut program_info, &mut instructions);
+                    compile_program_clause(&clauses[index], &mut program_info, &mut instructions);
+                }
+                Subsequence::NonVariables(ref range) => {
+                    instructions.push_label(Label {
+                        name,
+                        arity,
+                        label_type: LabelType::TrySubsequenceStartingAt(range.start),
+                    });
 
-                    label
-                });
+                    instructions.push_maybe(try_me_else(name, arity, range.clone(), clauses));
 
-                instructions.push_label(label);
-                instructions.push(Instruction::TrustMe);
+                    let make_label = |label_type| Label {
+                        name,
+                        arity,
+                        label_type,
+                    };
 
-                compile_program_definition(last_definition, &mut program_info, &mut instructions);
+                    let (structures_label, structures_instructions) =
+                        select_matching_clauses(clauses, range, |clause| {
+                            if let Some(Term::Structure { name, terms }) = clause.head.first() {
+                                Some((
+                                    Functor(program_info.functors.get(name.as_string())),
+                                    terms.len() as u8,
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                        .encode(
+                            make_label(LabelType::SwitchOnStructure(range.start, range.end)),
+                            make_label,
+                            |value| {
+                                make_label(LabelType::SwitchOnStructureValue(
+                                    range.start,
+                                    range.end,
+                                    value,
+                                ))
+                            },
+                            Instruction::SwitchOnStructure,
+                        );
+
+                    let (lists_label, lists_instructions) =
+                        select_matching_clauses(clauses, range, |clause| {
+                            if let Some(Term::List { .. }) = clause.head.first() {
+                                Some(())
+                            } else {
+                                None
+                            }
+                        })
+                        .encode(
+                            make_label(LabelType::SwitchOnList(range.start, range.end)),
+                            make_label,
+                            |()| make_label(LabelType::SwitchOnListValue(range.start, range.end)),
+                            |_| panic!("List cannot have more than one value"),
+                        );
+
+                    let (constants_label, constants_instructions) =
+                        select_matching_clauses(clauses, range, |clause| {
+                            if let Some(Term::Constant { name }) = clause.head.first() {
+                                Some(Constant(program_info.functors.get(name.as_string())))
+                            } else {
+                                None
+                            }
+                        })
+                        .encode(
+                            make_label(LabelType::SwitchOnConstant(range.start, range.end)),
+                            make_label,
+                            |value| {
+                                make_label(LabelType::SwitchOnConstantValue(
+                                    range.start,
+                                    range.end,
+                                    value,
+                                ))
+                            },
+                            Instruction::SwitchOnConstant,
+                        );
+
+                    let mut all_integers_were_successfully_converted = true;
+
+                    let integers = select_matching_clauses(clauses, range, |clause| {
+                        if let Some(Term::Integer { i }) = clause.head.first() {
+                            Some(i.try_into().unwrap_or_else(|_| {
+                                all_integers_were_successfully_converted = false;
+                                0_i16
+                            }))
+                        } else {
+                            None
+                        }
+                    });
+
+                    let (integers_label, integers_instructions) =
+                        if all_integers_were_successfully_converted {
+                            integers.encode(
+                                make_label(LabelType::SwitchOnInteger(range.start, range.end)),
+                                make_label,
+                                |value| {
+                                    make_label(LabelType::SwitchOnIntegerValue(
+                                        range.start,
+                                        range.end,
+                                        value,
+                                    ))
+                                },
+                                Instruction::SwitchOnInteger,
+                            )
+                        } else {
+                            (
+                                matches!(
+                                    &integers,
+                                    MatchingClauses::Single(_) | MatchingClauses::Multiple(_)
+                                )
+                                .then_some(make_label(LabelType::TryNthClause(range.start))),
+                                Vec::new(),
+                            )
+                        };
+
+                    instructions.push(Instruction::SwitchOnTerm(instructions::SwitchOnTerm {
+                        variable: make_label(LabelType::TryNthClause(range.start)),
+                        structure: structures_label,
+                        list: lists_label,
+                        constant: constants_label,
+                        integer: integers_label,
+                    }));
+
+                    instructions.0.extend(itertools::chain!(
+                        structures_instructions,
+                        lists_instructions,
+                        constants_instructions,
+                        integers_instructions,
+                    ));
+
+                    let mut clauses = clauses.iter().enumerate().take(range.end).skip(range.start);
+
+                    if let Some((first_clause_index, first_clause)) = clauses.next() {
+                        if let Some((last_clause_index, last_clause)) = clauses.next_back() {
+                            instructions.push_label(make_label(LabelType::TryNthClause(
+                                first_clause_index,
+                            )));
+
+                            instructions.push(Instruction::TryMeElse {
+                                l: make_label(LabelType::TryNthClause(first_clause_index + 1)),
+                            });
+
+                            instructions
+                                .push_label(make_label(LabelType::NthClause(first_clause_index)));
+
+                            compile_program_clause(
+                                first_clause,
+                                &mut program_info,
+                                &mut instructions,
+                            );
+
+                            for (index, clause) in clauses {
+                                instructions.push_label(make_label(LabelType::TryNthClause(index)));
+
+                                instructions.push(Instruction::RetryMeElse {
+                                    l: make_label(LabelType::TryNthClause(index + 1)),
+                                });
+
+                                instructions.push_label(make_label(LabelType::NthClause(index)));
+
+                                compile_program_clause(
+                                    clause,
+                                    &mut program_info,
+                                    &mut instructions,
+                                );
+                            }
+
+                            instructions
+                                .push_label(make_label(LabelType::TryNthClause(last_clause_index)));
+
+                            instructions.push(Instruction::TrustMe);
+
+                            instructions
+                                .push_label(make_label(LabelType::NthClause(last_clause_index)));
+
+                            compile_program_clause(
+                                last_clause,
+                                &mut program_info,
+                                &mut instructions,
+                            );
+                        } else {
+                            instructions.push_label(make_label(LabelType::TryNthClause(
+                                first_clause_index,
+                            )));
+
+                            instructions
+                                .push_label(make_label(LabelType::NthClause(first_clause_index)));
+
+                            compile_program_clause(
+                                first_clause,
+                                &mut program_info,
+                                &mut instructions,
+                            );
+                        }
+                    }
+                }
             }
         }
     }

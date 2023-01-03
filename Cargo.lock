@@ -741,6 +741,7 @@ dependencies = [
  "cobs",
  "comms",
  "crossterm",
+ "itertools",
  "num-bigint",
  "pretty_env_logger",
  "serialport",

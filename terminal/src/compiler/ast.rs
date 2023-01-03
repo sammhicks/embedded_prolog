@@ -271,22 +271,22 @@ impl<'a> IntoIterator for &'a TermList {
 #[derive(Debug, Clone, Copy)]
 pub enum CallName<Name> {
     Named(Name),
-    Comparison(super::instructions::Comparison),
-    Is,
     True,
     Fail,
     Unify,
+    Is,
+    Comparison(super::instructions::Comparison),
 }
 
 impl<'a> CallName<&'a Name> {
     pub fn map_name<O: 'a, F: FnOnce(&'a Name) -> O>(self, f: F) -> CallName<O> {
         match self {
             Self::Named(name) => CallName::Named(f(name)),
-            Self::Comparison(comparison) => CallName::Comparison(comparison),
-            Self::Is => CallName::Is,
             Self::True => CallName::True,
             Self::Fail => CallName::Fail,
             Self::Unify => CallName::Unify,
+            Self::Is => CallName::Is,
+            Self::Comparison(comparison) => CallName::Comparison(comparison),
         }
     }
 }
@@ -295,11 +295,11 @@ impl CallName<Name> {
     pub fn as_ref(&self) -> CallName<&Name> {
         match *self {
             Self::Named(ref name) => CallName::Named(name),
-            Self::Comparison(comparison) => CallName::Comparison(comparison),
-            Self::Is => CallName::Is,
             Self::True => CallName::True,
             Self::Fail => CallName::Fail,
             Self::Unify => CallName::Unify,
+            Self::Is => CallName::Is,
+            Self::Comparison(comparison) => CallName::Comparison(comparison),
         }
     }
 }
@@ -308,11 +308,11 @@ impl<T: fmt::Display> fmt::Display for CallName<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Named(name) => name.fmt(f),
-            Self::Comparison(comparison) => comparison.fmt(f),
-            Self::Is => "is".fmt(f),
             Self::True => "true".fmt(f),
             Self::Fail => "fail".fmt(f),
             Self::Unify => "=".fmt(f),
+            Self::Is => "is".fmt(f),
+            Self::Comparison(comparison) => comparison.fmt(f),
         }
     }
 }
@@ -403,12 +403,12 @@ impl GoalList {
 }
 
 #[derive(Debug)]
-pub struct Definition {
+pub struct Clause {
     pub head: TermList,
     pub body: GoalList,
 }
 
-impl Definition {
+impl Clause {
     pub fn with_singletons_removed(mut self, source_id: SourceId, source: &str) -> Self {
         use chumsky::Span;
 
@@ -454,24 +454,15 @@ impl Definition {
 }
 
 #[derive(Debug)]
-pub enum Disjunction {
-    Single {
-        name: Name,
-        arity: u8,
-        definition: Definition,
-    },
-    Multiple {
-        name: Name,
-        arity: u8,
-        first_definition: Definition,
-        middle_definitions: Vec<Definition>,
-        last_definition: Definition,
-    },
+pub struct Definition {
+    pub name: Name,
+    pub arity: u8,
+    pub clauses: Vec<Clause>,
 }
 
 #[derive(Debug)]
 pub struct Program {
-    pub definitions: Vec<Disjunction>,
+    pub definitions: Vec<Definition>,
 }
 
 #[derive(Debug)]

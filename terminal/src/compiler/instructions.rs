@@ -1,8 +1,10 @@
-use std::fmt;
+use std::{fmt, rc::Rc};
 
 use num_bigint::BigInt;
 
 use comms::{CommsFromInto, HexNewType};
+
+use super::ast::Name;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ai {
@@ -56,11 +58,11 @@ pub type Arity = u8;
 pub type ProgramCounter = u16;
 pub type SystemCallIndex = u8;
 
-#[derive(Clone, Copy, PartialEq, Eq, HexNewType, CommsFromInto)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, HexNewType, CommsFromInto)]
 #[repr(transparent)]
 pub struct Functor(pub u16);
 
-#[derive(Clone, Copy, PartialEq, Eq, HexNewType, CommsFromInto)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, HexNewType, CommsFromInto)]
 #[repr(transparent)]
 pub struct Constant(pub u16);
 
@@ -139,13 +141,14 @@ impl<'a> From<&'a BigInt> for LongInteger {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[repr(u8)]
 pub enum Comparison {
-    GreaterThan,
-    LessThan,
-    LessThanOrEqualTo,
-    GreaterThanOrEqualTo,
-    NotEqualTo,
-    EqualTo,
+    GreaterThan = 0,
+    LessThan = 1,
+    LessThanOrEqualTo = 2,
+    GreaterThanOrEqualTo = 3,
+    NotEqualTo = 4,
+    EqualTo = 5,
 }
 
 impl fmt::Display for Comparison {
@@ -162,8 +165,132 @@ impl fmt::Display for Comparison {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum LabelType {
+    Named,
+    TrySubsequenceStartingAt(usize),
+    TryNthClause(usize),
+    NthClause(usize),
+    SwitchOnStructure(usize, usize),
+    SwitchOnStructureValue(usize, usize, (Functor, Arity)),
+    SwitchOnList(usize, usize),
+    SwitchOnListValue(usize, usize),
+    SwitchOnConstant(usize, usize),
+    SwitchOnConstantValue(usize, usize, Constant),
+    SwitchOnInteger(usize, usize),
+    SwitchOnIntegerValue(usize, usize, i16),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct Label<'a> {
+    pub name: &'a Name,
+    pub arity: Arity,
+    pub label_type: LabelType,
+}
+
+impl<'a> Label<'a> {
+    pub fn named(name: &'a Name, arity: u8) -> Self {
+        Self {
+            name,
+            arity,
+            label_type: LabelType::Named,
+        }
+    }
+
+    pub fn is_named(&self) -> Option<(Name, Arity)> {
+        matches!(self.label_type, LabelType::Named).then(|| (self.name.clone(), self.arity))
+    }
+
+    pub fn as_owned(&self) -> OwnedLabel {
+        let Label {
+            name,
+            arity,
+            label_type,
+        } = *self;
+        OwnedLabel {
+            name: Rc::new(name.clone()),
+            arity,
+            label_type,
+        }
+    }
+}
+
+impl<'a> fmt::Display for Label<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+pub(super) struct OwnedLabel {
+    pub name: Rc<Name>,
+    pub arity: Arity,
+    pub label_type: LabelType,
+}
+
+impl OwnedLabel {
+    pub fn named((name, arity): (Name, Arity)) -> Self {
+        Self {
+            name: Rc::new(name),
+            arity,
+            label_type: LabelType::Named,
+        }
+    }
+}
+
+impl fmt::Display for OwnedLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let OwnedLabel {
+            ref name,
+            arity,
+            label_type,
+        } = *self;
+        Label {
+            name,
+            arity,
+            label_type,
+        }
+        .fmt(f)
+    }
+}
+
 #[derive(Debug)]
-pub enum Instruction {
+pub(super) enum LabelOr<'a, I> {
+    Label(Label<'a>),
+    Instruction(I),
+}
+
+pub(super) enum InstructionHalf<'a> {
+    Literal([u8; 2]),
+    LabelValue(Option<Label<'a>>),
+}
+
+impl<'a> InstructionHalf<'a> {
+    fn resolve_labels<E>(
+        self,
+        get_label: impl Fn(Label<'a>) -> Result<ProgramCounter, E>,
+    ) -> Result<[u8; 2], E> {
+        Ok(match self {
+            Self::Literal(literal) => literal,
+            Self::LabelValue(label) => match label {
+                Some(label) => get_label(label)?,
+                None => u16::MAX,
+            }
+            .to_be_bytes(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct SwitchOnTerm<'a> {
+    pub variable: Label<'a>,
+    pub structure: Option<Label<'a>>,
+    pub list: Option<Label<'a>>,
+    pub constant: Option<Label<'a>>,
+    pub integer: Option<Label<'a>>,
+}
+
+#[derive(Debug)]
+pub(super) enum Instruction<'a> {
     PutVariableXn { xn: Xn, ai: Ai },
     PutVariableYn { yn: Yn, ai: Ai },
     PutValueXn { xn: Xn, ai: Ai },
@@ -202,24 +329,31 @@ pub enum Instruction {
     Allocate { n: Arity },
     Trim { n: Arity },
     Deallocate,
-    Call { p: ProgramCounter, n: Arity },
-    Execute { p: ProgramCounter, n: Arity },
+    Call { l: Label<'a> },
+    Execute { l: Label<'a> },
     Proceed,
-    TryMeElse { p: ProgramCounter },
-    RetryMeElse { p: ProgramCounter },
-    TrustMe,
-    NeckCut,
-    GetLevel { yn: Yn },
-    Cut { yn: Yn },
-    Comparison(Comparison),
-    Is,
     True,
     Fail,
     Unify,
+    Is,
+    Comparison(Comparison),
     SystemCall { i: SystemCallIndex },
+    TryMeElse { l: Label<'a> },
+    RetryMeElse { l: Label<'a> },
+    TrustMe,
+    Try { l: Label<'a> },
+    Retry { l: Label<'a> },
+    Trust { l: Label<'a> },
+    SwitchOnTerm(SwitchOnTerm<'a>),
+    SwitchOnStructure(Vec<((Functor, Arity), Label<'a>)>),
+    SwitchOnConstant(Vec<(Constant, Label<'a>)>),
+    SwitchOnInteger(Vec<(i16, Label<'a>)>),
+    NeckCut,
+    GetLevel { yn: Yn },
+    Cut { yn: Yn },
 }
 
-impl fmt::Display for Instruction {
+impl<'a> fmt::Display for Instruction<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Instruction::PutVariableXn { xn, ai } => write!(f, "put_variable({xn},{ai})"),
@@ -264,235 +398,312 @@ impl fmt::Display for Instruction {
             Instruction::Allocate { n } => write!(f, "allocate({n})"),
             Instruction::Trim { n } => write!(f, "trim({n})"),
             Instruction::Deallocate => write!(f, "deallocate"),
-            Instruction::Call { p, n } => write!(f, "call({p}/{n})"),
-            Instruction::Execute { p, n } => write!(f, "execute({p}/{n})"),
+            Instruction::Call { l } => write!(f, "call({l})"),
+            Instruction::Execute { l } => write!(f, "execute({l})"),
             Instruction::Proceed => write!(f, "proceed"),
-            Instruction::TryMeElse { p } => write!(f, "try_me_else({p})"),
-            Instruction::RetryMeElse { p } => write!(f, "retry_me_else({p})"),
-            Instruction::TrustMe => write!(f, "trust_me"),
-            Instruction::NeckCut => write!(f, "neck_cut"),
-            Instruction::GetLevel { yn } => write!(f, "get_level({yn})"),
-            Instruction::Cut { yn } => write!(f, "cut({yn})"),
-            Instruction::Comparison(comparison) => write!(f, "{comparison}"),
-            Instruction::Is => write!(f, "is"),
             Instruction::True => write!(f, "true"),
             Instruction::Fail => write!(f, "fail"),
             Instruction::Unify => write!(f, "unify"),
+            Instruction::Is => write!(f, "is"),
+            Instruction::Comparison(comparison) => write!(f, "{comparison}"),
             Instruction::SystemCall { i } => write!(f, "system_call({i})"),
+            Instruction::TryMeElse { l } => write!(f, "try_me_else({l})"),
+            Instruction::RetryMeElse { l } => write!(f, "retry_me_else({l})"),
+            Instruction::TrustMe => write!(f, "trust_me"),
+            Instruction::Try { l } => write!(f, "try({l})"),
+            Instruction::Retry { l } => write!(f, "retry({l})"),
+            Instruction::Trust { l } => write!(f, "trust({l})"),
+            Instruction::SwitchOnTerm(switch) => write!(f, "switch_on_term({switch:?})"),
+            Instruction::SwitchOnStructure(switch) => write!(f, "switch_on_structure({switch:?})"),
+            Instruction::SwitchOnConstant(switch) => write!(f, "switch_on_constant({switch:?})"),
+            Instruction::SwitchOnInteger(switch) => write!(f, "switch_on_integer({switch:?})"),
+            Instruction::NeckCut => write!(f, "neck_cut"),
+            Instruction::GetLevel { yn } => write!(f, "get_level({yn})"),
+            Instruction::Cut { yn } => write!(f, "cut({yn})"),
         }
     }
 }
 
-impl Instruction {
-    pub fn serialize(self) -> impl Iterator<Item = [u8; 4]> {
-        enum ABC<A, B, C> {
-            A(A),
-            B(B),
-            C(C),
+trait HalfWord {
+    fn encode(self) -> [u8; 2];
+}
+
+impl HalfWord for u8 {
+    fn encode(self) -> [u8; 2] {
+        [0, self]
+    }
+}
+
+impl HalfWord for u16 {
+    fn encode(self) -> [u8; 2] {
+        self.to_be_bytes()
+    }
+}
+
+impl HalfWord for Functor {
+    fn encode(self) -> [u8; 2] {
+        self.0.encode()
+    }
+}
+
+impl HalfWord for Constant {
+    fn encode(self) -> [u8; 2] {
+        self.0.encode()
+    }
+}
+
+impl HalfWord for i16 {
+    fn encode(self) -> [u8; 2] {
+        self.to_be_bytes()
+    }
+}
+
+impl HalfWord for (u8, u8) {
+    fn encode(self) -> [u8; 2] {
+        [self.0, self.1]
+    }
+}
+
+impl HalfWord for Xn {
+    fn encode(self) -> [u8; 2] {
+        [0, self.xn]
+    }
+}
+
+impl HalfWord for Yn {
+    fn encode(self) -> [u8; 2] {
+        [0, self.yn]
+    }
+}
+
+struct Zero;
+
+impl HalfWord for Zero {
+    fn encode(self) -> [u8; 2] {
+        [0, 0]
+    }
+}
+
+pub struct InstructionHalfList<'a>(Vec<LabelOr<'a, [InstructionHalf<'a>; 2]>>);
+
+impl<'a> InstructionHalfList<'a> {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn with_label(mut self, label: Label<'a>) -> Self {
+        self.0.push(LabelOr::Label(label));
+        self
+    }
+
+    fn with_instruction_half_pair(mut self, pair: [InstructionHalf<'a>; 2]) -> Self {
+        self.0.push(LabelOr::Instruction(pair));
+        self
+    }
+
+    fn with_maybe_label_value_pair(self, [l1, l2]: [Option<Label<'a>>; 2]) -> Self {
+        self.with_instruction_half_pair([
+            InstructionHalf::LabelValue(l1),
+            InstructionHalf::LabelValue(l2),
+        ])
+    }
+
+    fn with_literal_and_label_value(self, (literal, label): ([u8; 2], Label<'a>)) -> Self {
+        self.with_instruction_half_pair([
+            InstructionHalf::Literal(literal),
+            InstructionHalf::LabelValue(Some(label)),
+        ])
+    }
+
+    fn with_literal_pair(mut self, [a, b]: [[u8; 2]; 2]) -> Self {
+        self.0.push(LabelOr::Instruction([
+            InstructionHalf::Literal(a),
+            InstructionHalf::Literal(b),
+        ]));
+        self
+    }
+
+    fn with_literal(self, [a, b, c, d]: [u8; 4]) -> Self {
+        self.with_literal_pair([[a, b], [c, d]])
+    }
+
+    fn with_ai_instruction(self, opcode: u8, Ai { ai }: Ai, w: impl HalfWord) -> Self {
+        self.with_literal_pair([[opcode, ai], w.encode()])
+    }
+
+    fn with_ai_structure(
+        self,
+        short_opcode: u8,
+        long_opcode: u8,
+        Ai { ai }: Ai,
+        Functor(f): Functor,
+        n: Arity,
+    ) -> Self {
+        match u8::try_from(f) {
+            Ok(f) => self.with_literal([short_opcode, ai, f, n]),
+            Err(_) => self
+                .with_literal([long_opcode, ai, 0, n])
+                .with_literal(Word::from(f).to_be_bytes()),
         }
+    }
 
-        type WordBytes = [u8; 4];
+    fn with_long_integer(
+        self,
+        opcode: u8,
+        ai: Option<Ai>,
+        LongInteger {
+            sign,
+            le_words: words,
+        }: LongInteger,
+    ) -> Self {
+        let len = words.len() as u8;
+        words.into_iter().map(Word::to_le_bytes).fold(
+            self.with_literal([opcode, ai.map_or(0, |Ai { ai }| ai), sign as u8, len]),
+            Self::with_literal,
+        )
+    }
 
-        impl<
-                A: Iterator<Item = WordBytes>,
-                B: Iterator<Item = WordBytes>,
-                C: Iterator<Item = WordBytes>,
-            > Iterator for ABC<A, B, C>
-        {
-            type Item = WordBytes;
+    fn with_full_word_instruction(self, opcode: u8, b: u8, w: impl HalfWord) -> Self {
+        self.with_literal_pair([[opcode, b], w.encode()])
+    }
 
-            fn next(&mut self) -> Option<WordBytes> {
-                match self {
-                    Self::A(a) => a.next(),
-                    Self::B(b) => b.next(),
-                    Self::C(c) => c.next(),
-                }
+    fn with_half_word_instruction(self, opcode: u8, w: impl HalfWord) -> Self {
+        self.with_full_word_instruction(opcode, 0, w)
+    }
+
+    fn with_just(self, opcode: u8) -> Self {
+        self.with_half_word_instruction(opcode, Zero)
+    }
+
+    fn with_instruction(self, instruction: Instruction<'a>) -> Self {
+        match instruction {
+            Instruction::PutVariableXn { xn, ai } => self.with_ai_instruction(0x00, ai, xn),
+            Instruction::PutVariableYn { yn, ai } => self.with_ai_instruction(0x01, ai, yn),
+            Instruction::PutValueXn { xn, ai } => self.with_ai_instruction(0x02, ai, xn),
+            Instruction::PutValueYn { yn, ai } => self.with_ai_instruction(0x03, ai, yn),
+            Instruction::PutStructure { f, n, ai } => self.with_ai_structure(0x04, 0x05, ai, f, n),
+            Instruction::PutList { ai } => self.with_ai_instruction(0x06, ai, Zero),
+            Instruction::PutConstant { c, ai } => self.with_ai_instruction(0x07, ai, c),
+            Instruction::PutShortInteger { i, ai } => self.with_ai_instruction(0x08, ai, i),
+            Instruction::PutInteger { i, ai } => self.with_long_integer(0x09, Some(ai), i),
+            Instruction::PutVoid { ai, n } => self.with_ai_instruction(0x0a, ai, n),
+            Instruction::GetVariableXn { xn, ai } => self.with_ai_instruction(0x10, ai, xn),
+            Instruction::GetVariableYn { yn, ai } => self.with_ai_instruction(0x11, ai, yn),
+            Instruction::GetValueXn { xn, ai } => self.with_ai_instruction(0x12, ai, xn),
+            Instruction::GetValueYn { yn, ai } => self.with_ai_instruction(0x13, ai, yn),
+            Instruction::GetStructure { f, n, ai } => self.with_ai_structure(0x14, 0x15, ai, f, n),
+            Instruction::GetList { ai } => self.with_ai_instruction(0x16, ai, Zero),
+            Instruction::GetConstant { c, ai } => self.with_ai_instruction(0x17, ai, c),
+            Instruction::GetShortInteger { i, ai } => self.with_ai_instruction(0x18, ai, i),
+            Instruction::GetInteger { i, ai } => self.with_long_integer(0x19, Some(ai), i),
+            Instruction::SetVariableXn { xn } => self.with_half_word_instruction(0x20, xn),
+            Instruction::SetVariableYn { yn } => self.with_half_word_instruction(0x21, yn),
+            Instruction::SetValueXn { xn } => self.with_half_word_instruction(0x22, xn),
+            Instruction::SetValueYn { yn } => self.with_half_word_instruction(0x23, yn),
+            Instruction::SetConstant { c } => self.with_half_word_instruction(0x27, c),
+            Instruction::SetShortInteger { i } => self.with_half_word_instruction(0x28, i),
+            Instruction::SetInteger { i } => self.with_long_integer(0x29, None, i),
+            Instruction::SetVoid { n } => self.with_half_word_instruction(0x2a, n),
+            Instruction::UnifyVariableXn { xn } => self.with_half_word_instruction(0x30, xn),
+            Instruction::UnifyVariableYn { yn } => self.with_half_word_instruction(0x31, yn),
+            Instruction::UnifyValueXn { xn } => self.with_half_word_instruction(0x32, xn),
+            Instruction::UnifyValueYn { yn } => self.with_half_word_instruction(0x33, yn),
+            Instruction::UnifyConstant { c } => self.with_half_word_instruction(0x37, c),
+            Instruction::UnifyShortInteger { i } => self.with_half_word_instruction(0x38, i),
+            Instruction::UnifyInteger { i } => self.with_long_integer(0x39, None, i),
+            Instruction::UnifyVoid { n } => self.with_half_word_instruction(0x3a, n),
+            Instruction::Allocate { n } => self.with_half_word_instruction(0x40, n),
+            Instruction::Trim { n } => self.with_half_word_instruction(0x41, n),
+            Instruction::Deallocate => self.with_just(0x42),
+            Instruction::Call { l } => self.with_literal_and_label_value(([0x43, l.arity], l)),
+            Instruction::Execute { l } => self.with_literal_and_label_value(([0x44, l.arity], l)),
+            Instruction::Proceed => self.with_just(0x45),
+            Instruction::True => self.with_just(0x46),
+            Instruction::Fail => self.with_just(0x47),
+            Instruction::Unify => self.with_just(0x48),
+            Instruction::Is => self.with_just(0x49),
+            Instruction::Comparison(comparison) => {
+                self.with_half_word_instruction(0x4a, comparison as u8)
             }
-        }
-
-        trait HalfWord {
-            fn encode(self) -> [u8; 2];
-        }
-
-        impl HalfWord for u8 {
-            fn encode(self) -> [u8; 2] {
-                [0, self]
+            Instruction::SystemCall { i } => self.with_half_word_instruction(0x4b, i),
+            Instruction::TryMeElse { l } => self.with_literal_and_label_value(([0x50, 0], l)),
+            Instruction::RetryMeElse { l } => self.with_literal_and_label_value(([0x51, 0], l)),
+            Instruction::TrustMe => self.with_just(0x52),
+            Instruction::Try { l } => self.with_literal_and_label_value(([0x53, 0], l)),
+            Instruction::Retry { l } => self.with_literal_and_label_value(([0x54, 0], l)),
+            Instruction::Trust { l } => self.with_literal_and_label_value(([0x55, 0], l)),
+            Instruction::SwitchOnTerm(SwitchOnTerm {
+                variable,
+                structure,
+                list,
+                constant,
+                integer,
+            }) => self
+                .with_literal_and_label_value(([0x60, 0], variable))
+                .with_maybe_label_value_pair([structure, list])
+                .with_maybe_label_value_pair([constant, integer]),
+            Instruction::SwitchOnStructure(switch) => {
+                let len = (2 * switch.len()) as u8;
+                switch.into_iter().fold(
+                    self.with_literal([0x61, 0, 0, len]),
+                    |this, ((f, n), label)| {
+                        this.with_literal_and_label_value(([0, 0], label))
+                            .with_literal_pair([f.0.to_be_bytes(), [0, n]])
+                    },
+                )
             }
-        }
-
-        impl HalfWord for u16 {
-            fn encode(self) -> [u8; 2] {
-                self.to_be_bytes()
+            Instruction::SwitchOnConstant(switch) => {
+                let len = switch.len() as u8;
+                switch
+                    .into_iter()
+                    .map(|(c, l)| (c.0.to_be_bytes(), l))
+                    .fold(
+                        self.with_literal([0x62, 0, 0, len]),
+                        Self::with_literal_and_label_value,
+                    )
             }
-        }
-
-        impl HalfWord for Functor {
-            fn encode(self) -> [u8; 2] {
-                self.0.encode()
+            Instruction::SwitchOnInteger(switch) => {
+                let len = switch.len() as u8;
+                switch.into_iter().map(|(i, l)| (i.to_be_bytes(), l)).fold(
+                    self.with_literal([0x63, 0, 0, len]),
+                    Self::with_literal_and_label_value,
+                )
             }
+            Instruction::NeckCut => self.with_just(0x70),
+            Instruction::GetLevel { yn } => self.with_half_word_instruction(0x71, yn),
+            Instruction::Cut { yn } => self.with_half_word_instruction(0x72, yn),
         }
+    }
 
-        impl HalfWord for Constant {
-            fn encode(self) -> [u8; 2] {
-                self.0.encode()
-            }
+    pub(super) fn with_label_or_instruction(
+        self,
+        instruction: LabelOr<'a, Instruction<'a>>,
+    ) -> Self {
+        match instruction {
+            LabelOr::Label(label) => self.with_label(label),
+            LabelOr::Instruction(instruction) => self.with_instruction(instruction),
         }
+    }
 
-        impl HalfWord for i16 {
-            fn encode(self) -> [u8; 2] {
-                self.to_be_bytes()
-            }
-        }
+    pub(super) fn iter(&self) -> std::slice::Iter<LabelOr<'a, [InstructionHalf; 2]>> {
+        self.0.iter()
+    }
 
-        impl HalfWord for (u8, u8) {
-            fn encode(self) -> [u8; 2] {
-                [self.0, self.1]
-            }
-        }
-
-        impl HalfWord for Xn {
-            fn encode(self) -> [u8; 2] {
-                [0, self.xn]
-            }
-        }
-
-        impl HalfWord for Yn {
-            fn encode(self) -> [u8; 2] {
-                [0, self.yn]
-            }
-        }
-
-        struct Zero;
-
-        impl HalfWord for Zero {
-            fn encode(self) -> [u8; 2] {
-                [0, 0]
-            }
-        }
-
-        fn ai_instruction<B, C>(
-            opcode: u8,
-            Ai { ai }: Ai,
-            w: impl HalfWord,
-        ) -> ABC<std::iter::Once<WordBytes>, B, C> {
-            let [w1, w0] = w.encode();
-            ABC::A(std::iter::once([opcode, ai, w1, w0]))
-        }
-
-        fn ai_structure<C>(
-            short_opcode: u8,
-            long_opcode: u8,
-            Ai { ai }: Ai,
-            Functor(f): Functor,
-            n: Arity,
-        ) -> ABC<std::iter::Once<WordBytes>, std::array::IntoIter<WordBytes, 2>, C> {
-            match u8::try_from(f) {
-                Ok(f) => ABC::A(std::iter::once([short_opcode, ai, f, n])),
-                Err(_) => ABC::B(IntoIterator::into_iter([
-                    [long_opcode, ai, 0, n],
-                    Word::from(f).to_be_bytes(),
-                ])),
-            }
-        }
-
-        fn long_integer<A, B>(
-            opcode: u8,
-            ai: Option<Ai>,
-            LongInteger {
-                sign,
-                le_words: words,
-            }: LongInteger,
-        ) -> ABC<A, B, impl Iterator<Item = WordBytes>> {
-            let ai = ai.map_or(0, |Ai { ai }| ai);
-
-            ABC::C(
-                std::iter::once([opcode, ai, sign as u8, words.len() as u8])
-                    .chain(words.into_iter().map(Word::to_le_bytes)),
-            )
-        }
-
-        fn half_word_instruction<B, C>(
-            opcode: u8,
-            w: impl HalfWord,
-        ) -> ABC<std::iter::Once<WordBytes>, B, C> {
-            let [w1, w0] = w.encode();
-            ABC::A(std::iter::once([opcode, 0, w1, w0]))
-        }
-
-        fn full_word_instruction<B, C>(
-            opcode: u8,
-            b: u8,
-            w: impl HalfWord,
-        ) -> ABC<std::iter::Once<WordBytes>, B, C> {
-            let [w1, w0] = w.encode();
-            ABC::A(std::iter::once([opcode, b, w1, w0]))
-        }
-
-        fn just<B, C>(opcode: u8) -> ABC<std::iter::Once<WordBytes>, B, C> {
-            ABC::A(std::iter::once([opcode, 0, 0, 0]))
-        }
-
-        match self {
-            Instruction::PutVariableXn { xn, ai } => ai_instruction(0x00, ai, xn),
-            Instruction::PutVariableYn { yn, ai } => ai_instruction(0x01, ai, yn),
-            Instruction::PutValueXn { xn, ai } => ai_instruction(0x02, ai, xn),
-            Instruction::PutValueYn { yn, ai } => ai_instruction(0x03, ai, yn),
-            Instruction::PutStructure { f, n, ai } => ai_structure(0x04, 0x05, ai, f, n),
-            Instruction::PutList { ai } => ai_instruction(0x06, ai, Zero),
-            Instruction::PutConstant { c, ai } => ai_instruction(0x07, ai, c),
-            Instruction::PutShortInteger { i, ai } => ai_instruction(0x08, ai, i),
-            Instruction::PutInteger { i, ai } => long_integer(0x09, Some(ai), i),
-            Instruction::PutVoid { ai, n } => ai_instruction(0x0a, ai, n),
-            Instruction::GetVariableXn { xn, ai } => ai_instruction(0x10, ai, xn),
-            Instruction::GetVariableYn { yn, ai } => ai_instruction(0x11, ai, yn),
-            Instruction::GetValueXn { xn, ai } => ai_instruction(0x12, ai, xn),
-            Instruction::GetValueYn { yn, ai } => ai_instruction(0x13, ai, yn),
-            Instruction::GetStructure { f, n, ai } => ai_structure(0x14, 0x15, ai, f, n),
-            Instruction::GetList { ai } => ai_instruction(0x16, ai, Zero),
-            Instruction::GetConstant { c, ai } => ai_instruction(0x17, ai, c),
-            Instruction::GetShortInteger { i, ai } => ai_instruction(0x18, ai, i),
-            Instruction::GetInteger { i, ai } => long_integer(0x19, Some(ai), i),
-            Instruction::SetVariableXn { xn } => half_word_instruction(0x20, xn),
-            Instruction::SetVariableYn { yn } => half_word_instruction(0x21, yn),
-            Instruction::SetValueXn { xn } => half_word_instruction(0x22, xn),
-            Instruction::SetValueYn { yn } => half_word_instruction(0x23, yn),
-            Instruction::SetConstant { c } => half_word_instruction(0x27, c),
-            Instruction::SetShortInteger { i } => half_word_instruction(0x28, i),
-            Instruction::SetInteger { i } => long_integer(0x29, None, i),
-            Instruction::SetVoid { n } => half_word_instruction(0x2a, n),
-            Instruction::UnifyVariableXn { xn } => half_word_instruction(0x30, xn),
-            Instruction::UnifyVariableYn { yn } => half_word_instruction(0x31, yn),
-            Instruction::UnifyValueXn { xn } => half_word_instruction(0x32, xn),
-            Instruction::UnifyValueYn { yn } => half_word_instruction(0x33, yn),
-            Instruction::UnifyConstant { c } => half_word_instruction(0x37, c),
-            Instruction::UnifyShortInteger { i } => half_word_instruction(0x38, i),
-            Instruction::UnifyInteger { i } => long_integer(0x39, None, i),
-            Instruction::UnifyVoid { n } => half_word_instruction(0x3a, n),
-            Instruction::Allocate { n } => half_word_instruction(0x40, n),
-            Instruction::Trim { n } => half_word_instruction(0x41, n),
-            Instruction::Deallocate => just(0x42),
-            Instruction::Call { p, n } => full_word_instruction(0x43, n, p),
-            Instruction::Execute { p, n } => full_word_instruction(0x44, n, p),
-            Instruction::Proceed => just(0x45),
-            Instruction::TryMeElse { p } => half_word_instruction(0x50, p),
-            Instruction::RetryMeElse { p } => half_word_instruction(0x51, p),
-            Instruction::TrustMe => just(0x52),
-            Instruction::NeckCut => just(0x53),
-            Instruction::GetLevel { yn } => half_word_instruction(0x54, yn),
-            Instruction::Cut { yn } => half_word_instruction(0x55, yn),
-            Instruction::Comparison(comparison) => just(match comparison {
-                Comparison::GreaterThan => 0x60,
-                Comparison::LessThan => 0x61,
-                Comparison::LessThanOrEqualTo => 0x62,
-                Comparison::GreaterThanOrEqualTo => 0x63,
-                Comparison::NotEqualTo => 0x64,
-                Comparison::EqualTo => 0x65,
-            }),
-            Instruction::Is => just(0x66),
-            Instruction::True => just(0x70),
-            Instruction::Fail => just(0x71),
-            Instruction::Unify => just(0x72),
-            Instruction::SystemCall { i } => half_word_instruction(0x80, i),
-        }
+    pub(super) fn resolve_labels<E>(
+        self,
+        get_label: impl Copy + Fn(Label) -> Result<ProgramCounter, E>,
+    ) -> Result<Vec<[u8; 4]>, E> {
+        self.0
+            .into_iter()
+            .flat_map(|entry| match entry {
+                LabelOr::Label(_) => None,
+                LabelOr::Instruction(instruction) => Some(instruction),
+            })
+            .map(|[l, r]| {
+                let [a, b] = l.resolve_labels(get_label)?;
+                let [c, d] = r.resolve_labels(get_label)?;
+                Ok([a, b, c, d])
+            })
+            .collect()
     }
 }

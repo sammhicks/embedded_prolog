@@ -136,17 +136,12 @@ impl core::ops::Mul for IntegerSign {
 }
 
 impl IntegerSign {
-    pub fn from_u8(s: u8) -> Option<Self> {
+    pub fn from_u8(s: u8) -> Self {
         Self::from_i8(s as i8)
     }
 
-    pub fn from_i8(s: i8) -> Option<Self> {
-        Some(match s {
-            -1 => Self::Negative,
-            0 => Self::Zero,
-            1 => Self::Positive,
-            _ => return None,
-        })
+    pub fn from_i8(s: i8) -> Self {
+        Self::from(s.cmp(&0))
     }
 
     pub fn reverse(self) -> Self {
@@ -285,14 +280,11 @@ impl ProgramCounter {
         )
     }
 
-    pub fn from_word(word: u16) -> Self {
-        Self(
-            // Safety: adding 1 makes word NonZero
-            unsafe { NonZeroU16::new_unchecked(word + 1) },
-        )
+    pub fn from_word(word: u16) -> Option<Self> {
+        word.checked_add(1).and_then(NonZeroU16::new).map(Self)
     }
 
-    pub fn from_le_bytes(bytes: [u8; 2]) -> Self {
+    pub fn from_le_bytes(bytes: [u8; 2]) -> Option<Self> {
         Self::from_word(u16::from_le_bytes(bytes))
     }
 
@@ -302,17 +294,5 @@ impl ProgramCounter {
 
     pub fn into_usize(self) -> usize {
         self.into_word().into()
-    }
-}
-
-impl From<ProgramCounter> for usize {
-    fn from(pc: ProgramCounter) -> Self {
-        pc.into_usize()
-    }
-}
-
-impl From<u16> for ProgramCounter {
-    fn from(word: u16) -> Self {
-        Self::from_word(word)
     }
 }
