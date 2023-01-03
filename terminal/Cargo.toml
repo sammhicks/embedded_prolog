@@ -12,7 +12,7 @@ chumsky = "0.8.0"
 clap = { version = "4.0.29", features = ["derive"] }
 cobs = "0.2.3"
 crossterm = "0.25.0"
-itertools = "0.10.5"
+itertools = { workspace = true, features = ["use_std"] }
 log = { workspace = true }
 minicbor = { workspace = true }
 num-bigint = "0.4.3"
