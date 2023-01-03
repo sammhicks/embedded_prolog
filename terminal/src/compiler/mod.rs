@@ -1008,6 +1008,10 @@ impl<'a> InstructionList<'a> {
     }
 
     fn assemble(self, program_info: &mut ProgramInfo) -> Result<Vec<[u8; 4]>, AssemblyErrorType> {
+        for instruction in &self.0 {
+            log::debug!("{instruction:?}");
+        }
+
         let instructions = self.0.into_iter().fold(
             instructions::InstructionHalfList::new(),
             instructions::InstructionHalfList::with_label_or_instruction,

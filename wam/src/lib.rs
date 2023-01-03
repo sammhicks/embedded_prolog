@@ -2,12 +2,6 @@
 
 use core::fmt;
 
-#[cfg(feature = "logging")]
-pub use log;
-
-#[cfg(feature = "defmt-logging")]
-pub use defmt;
-
 mod device;
 mod device_with_program;
 mod device_with_query;

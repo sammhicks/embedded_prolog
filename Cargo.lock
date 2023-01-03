@@ -742,6 +742,8 @@ dependencies = [
  "comms",
  "crossterm",
  "itertools",
+ "log",
+ "minicbor",
  "num-bigint",
  "pretty_env_logger",
  "serialport",

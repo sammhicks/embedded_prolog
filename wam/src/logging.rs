@@ -4,10 +4,10 @@ macro_rules! log_error {
         $(let _ = &$arg;)*
 
         #[cfg(feature = "logging")]
-        $crate::log::error!($($arg),*);
+        ::log::error!($($arg),*);
 
         #[cfg(feature = "defmt-logging")]
-        $crate::defmt::error!($($arg),*);
+        ::defmt::error!($($arg),*);
     }};
 }
 
@@ -17,10 +17,10 @@ macro_rules! log_warn {
         $(let _ = &$arg;)*
 
         #[cfg(feature = "logging")]
-        $crate::log::warn!($($arg),*);
+        ::log::warn!($($arg),*);
 
         #[cfg(feature = "defmt-logging")]
-        $crate::defmt::warn!($($arg),*);
+        ::defmt::warn!($($arg),*);
     }};
 }
 
@@ -30,10 +30,10 @@ macro_rules! log_info {
         $(let _ = &$arg;)*
 
         #[cfg(feature = "logging")]
-        $crate::log::info!($($arg),*);
+        ::log::info!($($arg),*);
 
         #[cfg(feature = "defmt-logging")]
-        $crate::defmt::info!($($arg),*);
+        ::defmt::info!($($arg),*);
     }};
 }
 
@@ -43,10 +43,10 @@ macro_rules! log_debug {
         $(let _ = &$arg;)*
 
         #[cfg(feature = "logging")]
-        $crate::log::debug!($($arg),*);
+        ::log::debug!($($arg),*);
 
         #[cfg(feature = "defmt-logging")]
-        $crate::defmt::debug!($($arg),*);
+        ::defmt::debug!($($arg),*);
     }};
 }
 
@@ -56,9 +56,9 @@ macro_rules! log_trace {
         $(let _ = &$arg;)*
 
         #[cfg(feature = "logging")]
-        $crate::log::trace!($($arg),*);
+        ::log::trace!($($arg),*);
 
         #[cfg(feature = "defmt-logging")]
-        $crate::defmt::trace!($($arg),*);
+        ::defmt::trace!($($arg),*);
     }};
 }

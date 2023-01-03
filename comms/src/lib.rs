@@ -2,8 +2,6 @@
 
 use core::{fmt, num::NonZeroU16};
 
-pub use minicbor;
-
 pub use comms_derive::{CommsFromInto, HexDefmt, HexNewType};
 
 #[derive(HexNewType, minicbor::Encode, minicbor::Decode)]

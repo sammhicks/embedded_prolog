@@ -371,22 +371,9 @@ impl From<Vec<Goal<Name>>> for GoalList {
     }
 }
 
-impl IntoIterator for GoalList {
-    type Item = Goal<Name>;
-    type IntoIter = <Vec<Goal<Name>> as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
 impl GoalList {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 
     pub fn variables<'a, V: Extend<VariableName<'a>>>(&'a self, variables: V) -> V {
