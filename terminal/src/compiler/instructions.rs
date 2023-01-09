@@ -113,7 +113,7 @@ impl fmt::Display for LongInteger {
             f,
             "{}{}",
             self.sign,
-            crate::DisplayCommaSeparated(self.le_words.iter())
+            crate::CommaSeparated(self.le_words.iter())
         )
     }
 }

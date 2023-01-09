@@ -38,24 +38,39 @@ enum Value {
     Error(String),
 }
 
-struct DisplayCommaSeparated<I>(I);
+struct CommaSeparated<I>(I);
 
-impl<I> fmt::Display for DisplayCommaSeparated<I>
-where
-    I: Clone,
-    I: Iterator,
-    I::Item: fmt::Display,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut i = self.0.clone();
+macro_rules! impl_comma_separated {
+    ($($type:ident),*) => {
+        $(
+            impl<I> core::fmt::$type for CommaSeparated<I>
+            where
+                I: Clone + IntoIterator,
+                I::Item: core::fmt::$type,
+            {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.write_str("[")?;
 
-        if let Some(item) = i.next() {
-            write!(f, "{item}")?;
-        }
+                    let mut iter = self.0.clone().into_iter();
+                    if let Some(first_item) = iter.next() {
+                        first_item.fmt(f)?;
 
-        i.try_for_each(|item| write!(f, ", {item}"))
-    }
+                        for item in iter {
+                            f.write_str(", ")?;
+                            item.fmt(f)?;
+                        }
+                    }
+
+                    f.write_str("]")
+                }
+            }
+        )*
+    };
 }
+
+impl_comma_separated!(
+    Binary, Debug, Display, LowerExp, LowerHex, Octal, Pointer, UpperExp, UpperHex
+);
 
 struct DisplayFunctorName<'a, Name: std::borrow::Borrow<Functor>> {
     answer: &'a Answer<'a>,
@@ -189,7 +204,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
                 f,
                 "<Unknown functor {}>({})",
                 self.name,
-                DisplayCommaSeparated(self.terms.iter().map(|address| DisplayValue {
+                CommaSeparated(self.terms.iter().map(|address| DisplayValue {
                     answer,
                     parent: Some(self.address),
                     address,
@@ -239,7 +254,7 @@ impl<'a> fmt::Display for DisplayStructure<'a> {
                 _ => write!(
                     f,
                     "{operator}({})",
-                    DisplayCommaSeparated(self.terms.iter().map(|address| DisplayValue {
+                    CommaSeparated(self.terms.iter().map(|address| DisplayValue {
                         answer,
                         parent: Some(self.address),
                         address,
@@ -685,6 +700,7 @@ trait ReadExt: Read {
             let block_size = self.read_one()?;
 
             let Some(block_size) = block_size.checked_sub(1) else {
+                log::debug!("Response: {:02X}", CommaSeparated(buffer.as_slice()));
                 return Ok(comms::CommandResponse::into_response(minicbor::decode(&buffer)?));
             };
 

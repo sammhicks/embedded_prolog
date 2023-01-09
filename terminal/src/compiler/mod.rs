@@ -2049,6 +2049,21 @@ pub fn compile_program(
 
         instructions.push_label(Label::named(name, arity));
 
+        if arity == 0 {
+            for (index, clause) in clauses.iter().enumerate() {
+                instructions.push_label(Label {
+                    name,
+                    arity,
+                    label_type: LabelType::TrySubsequenceStartingAt(index),
+                });
+
+                instructions.push_maybe(try_me_else(name, arity, index..(index + 1), clauses));
+
+                compile_program_clause(clause, &mut program_info, &mut instructions);
+            }
+            continue;
+        }
+
         let mut clauses_cursor = clauses.iter().enumerate();
         let subsequences = std::iter::from_fn(|| {
             let (start, start_clause) = clauses_cursor.next()?;

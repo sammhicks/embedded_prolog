@@ -172,6 +172,13 @@ impl<'b, C, T: minicbor::Decode<'b, C>, E: minicbor::Decode<'b, C>> minicbor::De
                 );
             }
             if d.u32()? == 0 {
+                let position = d.position();
+                if Some(1) != d.array()? {
+                    return Err(minicbor::decode::Error::missing_value(0)
+                        .with_message("expected 1-element array")
+                        .at(position));
+                }
+
                 return Ok(Self(Err(d.decode_with::<C, E>(ctx)?)));
             }
         }
